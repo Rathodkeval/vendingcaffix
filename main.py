@@ -16,15 +16,15 @@ async def get_index():
     react_index = "caffix-app/dist/index.html"
     if os.path.exists(react_index):
         return FileResponse(react_index)
-    return FileResponse("index.html")
+    return FileResponse("legacy-frontend/index.html")
 
 # Mount static frontend root (html, css, js)
 if os.path.exists("caffix-app/dist"):
     app.mount("/", StaticFiles(directory="caffix-app/dist", html=True), name="static")
 else:
-    if os.path.exists("assets"):
-        app.mount("/assets", StaticFiles(directory="assets"), name="assets")
-    app.mount("/", StaticFiles(directory=".", html=True), name="static")
+    if os.path.exists("legacy-frontend/assets"):
+        app.mount("/assets", StaticFiles(directory="legacy-frontend/assets"), name="assets")
+    app.mount("/", StaticFiles(directory="legacy-frontend", html=True), name="static")
 
 if __name__ == "__main__":
     print("----------------------------------------------------------------")
