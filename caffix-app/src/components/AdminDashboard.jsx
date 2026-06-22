@@ -32,16 +32,16 @@ export default function AdminDashboard({
   const [activeTab, setActiveTab] = useState('OVERVIEW');
   const [orderQuery, setOrderQuery] = useState('');
   const [tempPrices, setTempPrices] = useState({
-    classic: prices.classic === 30 || !prices.classic ? 100 : prices.classic,
-    vanilla: prices.vanilla === 40 || !prices.vanilla ? 100 : prices.vanilla,
-    hazelnut: prices.hazelnut === 50 || !prices.hazelnut ? 100 : prices.hazelnut
+    classic: prices.classic === 100 || !prices.classic ? 100 : prices.classic,
+    vanilla: prices.vanilla === 100 || !prices.vanilla ? 100 : prices.vanilla,
+    hazelnut: prices.hazelnut === 100 || !prices.hazelnut ? 100 : prices.hazelnut
   });
 
   useEffect(() => {
     setTempPrices({
-      classic: prices.classic === 30 || !prices.classic ? 100 : prices.classic,
-      vanilla: prices.vanilla === 40 || !prices.vanilla ? 100 : prices.vanilla,
-      hazelnut: prices.hazelnut === 50 || !prices.hazelnut ? 100 : prices.hazelnut
+      classic: prices.classic === 100 || !prices.classic ? 100 : prices.classic,
+      vanilla: prices.vanilla === 100 || !prices.vanilla ? 100 : prices.vanilla,
+      hazelnut: prices.hazelnut === 100 || !prices.hazelnut ? 100 : prices.hazelnut
     });
   }, [prices]);
 
