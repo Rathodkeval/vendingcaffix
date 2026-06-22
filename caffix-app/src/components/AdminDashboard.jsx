@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   LayoutDashboard,
   Layers,
@@ -31,7 +31,20 @@ export default function AdminDashboard({
 }) {
   const [activeTab, setActiveTab] = useState('OVERVIEW');
   const [orderQuery, setOrderQuery] = useState('');
-  const [tempPrices, setTempPrices] = useState({ ...prices });
+  const [tempPrices, setTempPrices] = useState({
+    classic: prices.classic || 100,
+    vanilla: prices.vanilla || 100,
+    hazelnut: prices.hazelnut || 100
+  });
+
+  useEffect(() => {
+    setTempPrices({
+      classic: prices.classic || 100,
+      vanilla: prices.vanilla || 100,
+      hazelnut: prices.hazelnut || 100
+    });
+  }, [prices]);
+
   const [settingsSuccess, setSettingsSuccess] = useState(false);
 
   // Inventories setup
@@ -573,7 +586,7 @@ export default function AdminDashboard({
                       <label className="text-xs font-bold text-slate-500 block mb-1">Classic Coffee Base Price (₹)</label>
                       <input
                         type="number"
-                        value={tempPrices.classic}
+                        value={tempPrices.classic || 100}
                         onChange={(e) => setTempPrices({ ...tempPrices, classic: parseInt(e.target.value) || 0 })}
                         className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-semibold focus:outline-none focus:border-coffee"
                       />
@@ -583,7 +596,7 @@ export default function AdminDashboard({
                       <label className="text-xs font-bold text-slate-500 block mb-1">Vanilla Coffee Base Price (₹)</label>
                       <input
                         type="number"
-                        value={tempPrices.vanilla}
+                        value={tempPrices.vanilla || 100}
                         onChange={(e) => setTempPrices({ ...tempPrices, vanilla: parseInt(e.target.value) || 0 })}
                         className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-semibold focus:outline-none focus:border-coffee"
                       />
@@ -593,7 +606,7 @@ export default function AdminDashboard({
                       <label className="text-xs font-bold text-slate-500 block mb-1">Hazelnut Coffee Base Price (₹)</label>
                       <input
                         type="number"
-                        value={tempPrices.hazelnut}
+                        value={tempPrices.hazelnut || 100}
                         onChange={(e) => setTempPrices({ ...tempPrices, hazelnut: parseInt(e.target.value) || 0 })}
                         className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-semibold focus:outline-none focus:border-coffee"
                       />
