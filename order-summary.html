@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>CAFFIX - Order Summary</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="bg-decor"></div>
+
+  <div class="kiosk-container">
+    <!-- Header -->
+    <header class="kiosk-header">
+      <div class="brand-section">
+        <svg class="brand-logo-svg" viewBox="0 0 24 24">
+          <path d="M2 21h18v-2H2v2zM20 8h-2V5h2V2h-2v3H4v8c0 3.31 2.69 6 6 6h4c3.31 0 6-2.69 6-6v-3h2c1.1 0 2-.9 2-2V9c0-1.1-.9-2-2-2zm-2 5c0 2.21-1.79 4-4 4h-4c-2.21 0-4-1.79-4-4V7h12v6zm2-3h-2V9h2v1z"/>
+        </svg>
+        <span class="brand-name">Caffix</span>
+      </div>
+      
+      <button class="btn-nav-back" onclick="window.history.back()">
+        <svg viewBox="0 0 24 24">
+          <path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/>
+        </svg>
+        <span>Back</span>
+      </button>
+    </header>
+
+    <!-- Progress Meter -->
+    <div class="progress-bar-container">
+      <div class="progress-header">
+        <span>Review Invoice</span>
+        <span>Step 4 of 4</span>
+      </div>
+      <div class="progress-dots">
+        <div class="progress-dot-step active"></div>
+        <div class="progress-dot-step active"></div>
+        <div class="progress-dot-step active"></div>
+        <div class="progress-dot-step active"></div>
+      </div>
+    </div>
+
+    <!-- Main Summary Panel -->
+    <main class="kiosk-main">
+      <div class="summary-container">
+        <!-- Item headers info -->
+        <div class="summary-item-header">
+          <div id="summary-img" class="summary-img"></div>
+          <div class="summary-title-block">
+            <span id="summary-name" class="summary-name">Premium Coffee</span>
+            <span class="summary-base-lbl">Freshly Prepared on Demand</span>
+          </div>
+        </div>
+
+        <!-- Parameters recap -->
+        <div class="summary-details-list">
+          <div class="summary-row">
+            <span class="summary-lbl">Cup Size:</span>
+            <span id="summary-size-val" class="summary-val">Regular (240ml)</span>
+          </div>
+          <div class="summary-row">
+            <span class="summary-lbl">Sugar Level:</span>
+            <span id="summary-sugar-val" class="summary-val">Medium</span>
+          </div>
+          <div class="summary-row">
+            <span class="summary-lbl">Coffee Strength:</span>
+            <span id="summary-strength-val" class="summary-val">Regular</span>
+          </div>
+          <div class="summary-row">
+            <span class="summary-lbl">Extra Frothed Foam:</span>
+            <span id="summary-foam-val" class="summary-val">No</span>
+          </div>
+        </div>
+
+        <!-- Total row -->
+        <div class="summary-total-bar">
+          <span class="total-txt-lbl">Total Amount</span>
+          <span id="total-amount" class="total-num-val">₹20</span>
+        </div>
+
+        <!-- Master Proceed Payment CTA -->
+        <button id="summary-continue-btn" class="btn-action-master" onclick="window.location.href='payment.html'">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H7c0-2.76 2.24-5 5-5s5 2.24 5 5c0 1.04-.42 1.99-1.07 2.75z"/>
+          </svg>
+          <span>PROCEED TO PAYMENT</span>
+        </button>
+      </div>
+    </main>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>

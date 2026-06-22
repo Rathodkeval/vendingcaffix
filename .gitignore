@@ -1,0 +1,44 @@
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Dependency directories
+node_modules/
+venv/
+env/
+ENV/
+
+# Local databases
+*.db
+*.db-journal
+*.sqlite
+
+# Local env files
+.env
+.env.local
+.env.*.local
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+
+# IDE files
+.vscode/
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Python cache & Archives
+__pycache__/
+*.pyc
+*.zip
+*.tar.gz

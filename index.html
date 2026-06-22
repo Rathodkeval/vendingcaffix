@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>CAFFIX - Crafted Coffee. Instantly.</title>
+  <meta name="description" content="Premium Self-Service Coffee Kiosk">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+</head>
+<body>
+  <!-- Canvas for Steam Particle Animation -->
+  <canvas id="steam-canvas"></canvas>
+  <div class="bg-decor"></div>
+
+  <div class="kiosk-container" style="justify-content: space-between;">
+    <!-- Brand Header -->
+    <header class="kiosk-header">
+      <div class="brand-section">
+        <svg class="brand-logo-svg" viewBox="0 0 24 24">
+          <path d="M2 21h18v-2H2v2zM20 8h-2V5h2V2h-2v3H4v8c0 3.31 2.69 6 6 6h4c3.31 0 6-2.69 6-6v-3h2c1.1 0 2-.9 2-2V9c0-1.1-.9-2-2-2zm-2 5c0 2.21-1.79 4-4 4h-4c-2.21 0-4-1.79-4-4V7h12v6zm2-3h-2V9h2v1z"/>
+        </svg>
+        <span class="brand-name">Caffix</span>
+      </div>
+      <div class="system-status">
+        <span class="status-dot"></span>
+        <span>Online</span>
+      </div>
+    </header>
+
+    <!-- Main Coffee Card Selection Grid -->
+    <main class="kiosk-main" style="justify-content: flex-start; margin-top: 0.5rem;">
+      <div class="home-hero-text">
+        <h1 class="home-tagline">Crafted Coffee. Instantly.</h1>
+      </div>
+
+      <div class="flavours-grid">
+        <!-- Classic Coffee -->
+        <div class="flavour-card" onclick="selectFlavour('classic')">
+          <div class="flavour-card-img" style="background-image: url('assets/classic_coffee.png');">
+            <span class="flavour-badge">Best Seller</span>
+          </div>
+          <div class="flavour-info">
+            <div>
+              <h3 class="flavour-name">Classic Coffee</h3>
+              <p class="flavour-tagline">Rich and authentic coffee experience made from premium Arabica coffee beans.</p>
+            </div>
+            <div class="flavour-price-row">
+              <span class="card-price">₹20</span>
+              <button class="btn-card-select">Select</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Vanilla Coffee -->
+        <div class="flavour-card" onclick="selectFlavour('vanilla')">
+          <div class="flavour-card-img" style="background-image: url('assets/vanilla_coffee.png');">
+            <span class="flavour-badge">Smooth & Creamy</span>
+          </div>
+          <div class="flavour-info">
+            <div>
+              <h3 class="flavour-name">Vanilla Coffee</h3>
+              <p class="flavour-tagline">Smooth coffee blended with sweet vanilla notes for a creamy and comforting taste.</p>
+            </div>
+            <div class="flavour-price-row">
+              <span class="card-price">₹20</span>
+              <button class="btn-card-select">Select</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Hazelnut Coffee -->
+        <div class="flavour-card" onclick="selectFlavour('hazelnut')">
+          <div class="flavour-card-img" style="background-image: url('assets/hazelnut_coffee.png');">
+            <span class="flavour-badge">Rich Nutty</span>
+          </div>
+          <div class="flavour-info">
+            <div>
+              <h3 class="flavour-name">Hazelnut Coffee</h3>
+              <p class="flavour-tagline">Nutty aroma with a smooth coffee finish delivering a premium café experience.</p>
+            </div>
+            <div class="flavour-price-row">
+              <span class="card-price">₹20</span>
+              <button class="btn-card-select">Select</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Bottom Status Bar -->
+    <footer class="system-status" style="justify-content: space-between; margin-top: 1rem; padding: 0.6rem 1.4rem; border-radius: 12px;">
+      <span>● Machine Ready</span>
+      <span>● Fresh Ingredients Available</span>
+      <span style="color: var(--color-coffee); font-weight: 700;">Touch To Begin Order</span>
+    </footer>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>

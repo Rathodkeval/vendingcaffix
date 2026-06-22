@@ -1,0 +1,304 @@
+openapi: 3.0.0
+info:
+  title: CAFFIX Smart Vending REST API
+  description: Production-ready backend service enabling telemetry sync, order processing, and administrative controls for CAFFIX coffee vending kiosks.
+  version: 1.0.0
+servers:
+  - url: http://localhost:5000
+    description: Local API server
+paths:
+  /api/auth/register:
+    post:
+      summary: Register a new system user
+      description: Registers a new user with 'admin' or 'kiosk' roles.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - email
+                - password
+                - role
+              properties:
+                name:
+                  type: string
+                  example: Caffix Manager
+                email:
+                  type: string
+                  example: admin@caffix.com
+                password:
+                  type: string
+                  example: admin123
+                role:
+                  type: string
+                  enum: [admin, kiosk]
+                  example: admin
+      responses:
+        '201':
+          description: User registered successfully
+        '400':
+          description: Bad request or user already exists
+
+  /api/auth/login:
+    post:
+      summary: Log in to the system
+      description: Verifies credentials and returns a JWT token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - password
+              properties:
+                email:
+                  type: string
+                  example: admin@caffix.com
+                password:
+                  type: string
+                  example: admin123
+      responses:
+        '200':
+          description: Logged in successfully, returns JWT token
+        '401':
+          description: Invalid credentials
+
+  /api/products:
+    get:
+      summary: Retrieve all coffee beverages
+      responses:
+        '200':
+          description: List of coffee items fetched successfully
+    post:
+      summary: Add a new beverage flavor
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - price
+              properties:
+                name:
+                  type: string
+                  example: Caramel Latte
+                price:
+                  type: integer
+                  example: 60
+                description:
+                  type: string
+                  example: Creamy espresso infused with warm buttery caramel.
+                image:
+                  type: string
+                  example: /assets/classic_coffee.png
+      responses:
+        '201':
+          description: Beverage flavor created
+        '401':
+          description: Unauthorized
+        '403':
+          description: Admin privileges required
+
+  /api/products/{id}/price:
+    put:
+      summary: Configure a coffee flavor base price
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "1"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - price
+              properties:
+                price:
+                  type: integer
+                  example: 35
+      responses:
+        '200':
+          description: Price updated successfully
+        '401':
+          description: Unauthorized
+        '404':
+          description: Product not found
+
+  /api/machines:
+    get:
+      summary: List all active vending kiosks
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of machines retrieved
+        '403':
+          description: Admin access required
+
+  /api/machines/register:
+    post:
+      summary: Register a new vending kiosk
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - id
+                - machine_name
+                - location
+              properties:
+                id:
+                  type: string
+                  example: CFX-MC-02
+                machine_name:
+                  type: string
+                  example: Kiosk-Two
+                location:
+                  type: string
+                  example: Noida Tech Park
+      responses:
+        '201':
+          description: Machine registered successfully
+
+  /api/machines/{id}/status:
+    patch:
+      summary: Update machine heartbeat status
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: CFX-MC-01
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - status
+              properties:
+                status:
+                  type: string
+                  enum: [online, offline, maintenance]
+                  example: online
+      responses:
+        '200':
+          description: Status updated
+
+  /api/machines/{machine_id}/inventory:
+    get:
+      summary: Fetch machine inventory levels
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: machine_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: CFX-MC-01
+      responses:
+        '200':
+          description: Inventory object returned
+
+  /api/machines/{machine_id}/refill:
+    post:
+      summary: Refill a machine ingredient to 100%
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: machine_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: CFX-MC-01
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - ingredient
+              properties:
+                ingredient:
+                  type: string
+                  enum: [milk, coffee, vanilla, hazelnut, water, ALL]
+                  example: ALL
+      responses:
+        '200':
+          description: Ingredient refilled
+
+  /api/orders:
+    get:
+      summary: Fetch entire sales transactions log
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Transactions list returned
+
+  /api/orders/checkout:
+    post:
+      summary: Process customer kiosk checkout order
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - product_id
+                - machine_id
+              properties:
+                id:
+                  type: string
+                  example: CFX-8602
+                product_id:
+                  type: integer
+                  example: 1
+                amount:
+                  type: integer
+                  example: 30
+                machine_id:
+                  type: string
+                  example: CFX-MC-01
+      responses:
+        '201':
+          description: Order created, ingredient levels decremented
+        '400':
+          description: Ingredients depleted or machine in maintenance
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

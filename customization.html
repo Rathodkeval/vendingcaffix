@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>CAFFIX - Customize Coffee</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="bg-decor"></div>
+
+  <div class="kiosk-container">
+    <!-- Header -->
+    <header class="kiosk-header">
+      <div class="brand-section">
+        <svg class="brand-logo-svg" viewBox="0 0 24 24">
+          <path d="M2 21h18v-2H2v2zM20 8h-2V5h2V2h-2v3H4v8c0 3.31 2.69 6 6 6h4c3.31 0 6-2.69 6-6v-3h2c1.1 0 2-.9 2-2V9c0-1.1-.9-2-2-2zm-2 5c0 2.21-1.79 4-4 4h-4c-2.21 0-4-1.79-4-4V7h12v6zm2-3h-2V9h2v1z"/>
+        </svg>
+        <span class="brand-name">Caffix</span>
+      </div>
+      
+      <button class="btn-nav-back" onclick="window.history.back()">
+        <svg viewBox="0 0 24 24">
+          <path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/>
+        </svg>
+        <span>Back</span>
+      </button>
+    </header>
+
+    <!-- Progress Meter -->
+    <div class="progress-bar-container">
+      <div class="progress-header">
+        <span>Customize Order</span>
+        <span>Step 3 of 4</span>
+      </div>
+      <div class="progress-dots">
+        <div class="progress-dot-step active"></div>
+        <div class="progress-dot-step active"></div>
+        <div class="progress-dot-step active"></div>
+        <div class="progress-dot-step"></div>
+      </div>
+    </div>
+
+    <!-- Main Custom Pane -->
+    <main class="kiosk-main">
+      <div class="custom-layout-grid">
+        <!-- Left: preview coffee selection -->
+        <div class="custom-visual-pane">
+          <h3 class="custom-pane-title">Your Selection</h3>
+          <div id="preview-img" class="custom-preview-img"></div>
+          <div class="custom-preview-details">
+            <span id="preview-name" class="custom-preview-name">Loading...</span>
+            <span id="preview-price" class="custom-preview-price">₹--</span>
+          </div>
+        </div>
+
+        <!-- Right: selector groups -->
+        <div class="customization-pane-selectors">
+          <!-- Sugar Toggles -->
+          <div class="custom-option">
+            <span class="custom-label">Sugar Level</span>
+            <div id="sugar-toggles" class="custom-buttons-four">
+              <button class="btn-toggle">None</button>
+              <button class="btn-toggle">Low</button>
+              <button class="btn-toggle active">Medium</button>
+              <button class="btn-toggle">High</button>
+            </div>
+          </div>
+
+          <!-- Strength Toggles -->
+          <div class="custom-option">
+            <span class="custom-label">Coffee Strength</span>
+            <div id="strength-toggles" class="custom-buttons">
+              <button class="btn-toggle">Mild</button>
+              <button class="btn-toggle active">Regular</button>
+              <button class="btn-toggle">Strong</button>
+            </div>
+          </div>
+
+          <!-- Foam Switch Toggle Row -->
+          <div class="foam-toggle-row">
+            <div class="foam-info-lbl">
+              <span class="foam-title">Extra Frothed Foam</span>
+              <span class="foam-subtitle">Add a light, creamy top layer</span>
+            </div>
+            <div class="switch-container">
+              <input type="checkbox" id="foam-input" class="switch-input">
+              <label for="foam-input" class="switch-slider"></label>
+            </div>
+          </div>
+
+          <!-- Continue CTA -->
+          <button id="custom-continue-btn" class="btn-action-master" style="margin-top: 0.5rem;">
+            <span>Review Order</span>
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+              <path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>

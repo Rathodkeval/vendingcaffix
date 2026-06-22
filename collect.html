@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>CAFFIX - Collect Coffee</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="bg-decor"></div>
+
+  <div class="kiosk-container">
+    <!-- Header -->
+    <header class="kiosk-header">
+      <div class="brand-section">
+        <svg class="brand-logo-svg" viewBox="0 0 24 24">
+          <path d="M2 21h18v-2H2v2zM20 8h-2V5h2V2h-2v3H4v8c0 3.31 2.69 6 6 6h4c3.31 0 6-2.69 6-6v-3h2c1.1 0 2-.9 2-2V9c0-1.1-.9-2-2-2zm-2 5c0 2.21-1.79 4-4 4h-4c-2.21 0-4-1.79-4-4V7h12v6zm2-3h-2V9h2v1z"/>
+        </svg>
+        <span class="brand-name">Caffix</span>
+      </div>
+      <div class="system-status">
+        <span class="status-dot"></span>
+        <span>Finished</span>
+      </div>
+    </header>
+
+    <!-- Main Collect Box -->
+    <main class="kiosk-main">
+      <div class="collect-box">
+        <!-- Cup ready graphic -->
+        <div class="collect-graphic" style="background-image: url('assets/classic_coffee.png');"></div>
+
+        <h1 class="collect-title">Your Coffee Is Ready</h1>
+        
+        <p class="collect-msg">
+          Please Collect Your Cup from the dispenser tray.<br>
+          Thank You For Choosing CAFFIX
+        </p>
+
+        <!-- Countdown timer -->
+        <div class="collect-countdown">
+          <span>Returning to Home in </span><span id="collect-countdown-num" style="font-size: 1.25rem; font-weight: 800; color: var(--color-coffee);">10</span><span> Seconds</span>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>

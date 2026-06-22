@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>CAFFIX - Preparing Coffee</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="bg-decor"></div>
+
+  <div class="kiosk-container">
+    <!-- Header -->
+    <header class="kiosk-header">
+      <div class="brand-section">
+        <svg class="brand-logo-svg" viewBox="0 0 24 24">
+          <path d="M2 21h18v-2H2v2zM20 8h-2V5h2V2h-2v3H4v8c0 3.31 2.69 6 6 6h4c3.31 0 6-2.69 6-6v-3h2c1.1 0 2-.9 2-2V9c0-1.1-.9-2-2-2zm-2 5c0 2.21-1.79 4-4 4h-4c-2.21 0-4-1.79-4-4V7h12v6zm2-3h-2V9h2v1z"/>
+        </svg>
+        <span class="brand-name">Caffix</span>
+      </div>
+      <div class="system-status">
+        <span class="status-dot"></span>
+        <span>Dispensing...</span>
+      </div>
+    </header>
+
+    <!-- Main Brewer dashboard -->
+    <main class="kiosk-main">
+      <div class="brewer-dashboard">
+        <!-- Shaking cup visual -->
+        <svg class="loading-coffee-cup" viewBox="0 0 24 24">
+          <path d="M2 21h18v-2H2v2zM20 8h-2V5h2V2h-2v3H4v8c0 3.31 2.69 6 6 6h4c3.31 0 6-2.69 6-6v-3h2c1.1 0 2-.9 2-2V9c0-1.1-.9-2-2-2zm-2 5c0 2.21-1.79 4-4 4h-4c-2.21 0-4-1.79-4-4V7h12v6zm2-3h-2V9h2v1z"/>
+        </svg>
+
+        <h1 class="status-title">Preparing Coffee</h1>
+        <h2 class="status-subtitle">Your coffee is being freshly prepared.</h2>
+
+        <!-- Active diagnostics telemetry panel -->
+        <div class="brewer-telemetry">
+          <div class="telemetry-box">
+            <span class="telemetry-lbl">Boiler Temp</span>
+            <span id="spec-temp" class="telemetry-val">--°C</span>
+          </div>
+          <div class="telemetry-box">
+            <span class="telemetry-lbl">Pump Pressure</span>
+            <span id="spec-pressure" class="telemetry-val">-- Bar</span>
+          </div>
+          <div class="telemetry-box">
+            <span class="telemetry-lbl">Est. Time</span>
+            <span class="telemetry-val">45 Seconds</span>
+          </div>
+        </div>
+
+        <!-- Brew status slider progress -->
+        <div class="brewing-anim-container">
+          <span id="brewing-step-text" class="brewing-step-text">Initializing boilers...</span>
+          
+          <div class="progress-track">
+            <div id="progress-fill" class="progress-fill"></div>
+          </div>
+        </div>
+
+        <p class="instructions-collect" style="font-size: 0.9rem;">
+          Keep a safe distance from the nozzle.<br>
+          Collect cup only after the dispenser indicator finishes.
+        </p>
+      </div>
+    </main>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>

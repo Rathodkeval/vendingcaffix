@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>CAFFIX - Coffee Selection</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="bg-decor"></div>
+
+  <div class="kiosk-container">
+    <header class="kiosk-header">
+      <div class="brand-section">
+        <svg class="brand-logo-svg" viewBox="0 0 24 24">
+          <path d="M2 21h18v-2H2v2zM20 8h-2V5h2V2h-2v3H4v8c0 3.31 2.69 6 6 6h4c3.31 0 6-2.69 6-6v-3h2c1.1 0 2-.9 2-2V9c0-1.1-.9-2-2-2zm-2 5c0 2.21-1.79 4-4 4h-4c-2.21 0-4-1.79-4-4V7h12v6zm2-3h-2V9h2v1z"/>
+        </svg>
+        <span class="brand-name">Caffix</span>
+      </div>
+      
+      <button class="btn-nav-back" onclick="navigateToHome()">
+        <svg viewBox="0 0 24 24">
+          <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/>
+        </svg>
+        <span>Cancel</span>
+      </button>
+    </header>
+
+    <h2 class="selection-title">Select Coffee Blend</h2>
+
+    <main class="kiosk-main">
+      <div class="flavours-grid">
+        <!-- Reserve Espresso Card -->
+        <div class="flavour-card" onclick="selectFlavour('classic')">
+          <div class="flavour-card-img" style="background-image: url('assets/classic_coffee.png');">
+            <span class="flavour-badge">Reserve Single-Origin</span>
+          </div>
+          <div class="flavour-info">
+            <div>
+              <h3 class="flavour-name">Reserve Espresso</h3>
+              <p class="flavour-tagline">Rich, aromatic & intense pure arabica blend</p>
+            </div>
+            <div class="flavour-price-row">
+              <span class="card-price">₹25</span>
+              <div class="card-arrow">
+                <svg viewBox="0 0 24 24">
+                  <path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/>
+                </svg>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Vanilla Bean Latte Card -->
+        <div class="flavour-card" onclick="selectFlavour('vanilla')">
+          <div class="flavour-card-img" style="background-image: url('assets/vanilla_coffee.png');">
+            <span class="flavour-badge">Creamy & Aromatic</span>
+          </div>
+          <div class="flavour-info">
+            <div>
+              <h3 class="flavour-name">Vanilla Bean Latte</h3>
+              <p class="flavour-tagline">Creamy espresso with Madagascar vanilla beans</p>
+            </div>
+            <div class="flavour-price-row">
+              <span class="card-price">₹25</span>
+              <div class="card-arrow">
+                <svg viewBox="0 0 24 24">
+                  <path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/>
+                </svg>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Hazelnut Macchiato Card -->
+        <div class="flavour-card" onclick="selectFlavour('hazelnut')">
+          <div class="flavour-card-img" style="background-image: url('assets/hazelnut_coffee.png');">
+            <span class="flavour-badge">Roasted Nutty</span>
+          </div>
+          <div class="flavour-info">
+            <div>
+              <h3 class="flavour-name">Hazelnut Macchiato</h3>
+              <p class="flavour-tagline">Bold espresso layered with roasted hazelnut</p>
+            </div>
+            <div class="flavour-price-row">
+              <span class="card-price">₹25</span>
+              <div class="card-arrow">
+                <svg viewBox="0 0 24 24">
+                  <path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/>
+                </svg>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>

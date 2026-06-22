@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>CAFFIX - Payment Terminal</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="bg-decor"></div>
+
+  <div class="kiosk-container">
+    <!-- Header -->
+    <header class="kiosk-header">
+      <div class="brand-section">
+        <svg class="brand-logo-svg" viewBox="0 0 24 24">
+          <path d="M2 21h18v-2H2v2zM20 8h-2V5h2V2h-2v3H4v8c0 3.31 2.69 6 6 6h4c3.31 0 6-2.69 6-6v-3h2c1.1 0 2-.9 2-2V9c0-1.1-.9-2-2-2zm-2 5c0 2.21-1.79 4-4 4h-4c-2.21 0-4-1.79-4-4V7h12v6zm2-3h-2V9h2v1z"/>
+        </svg>
+        <span class="brand-name">Caffix</span>
+      </div>
+      <div class="system-status">
+        <span class="status-dot"></span>
+        <span>Secure Session</span>
+      </div>
+    </header>
+
+    <!-- Main Payment Split Panel -->
+    <main class="kiosk-main">
+      <div class="payment-wrapper">
+        <!-- Left Pane: QR scanner & Pulsing frames -->
+        <div class="payment-card-visual">
+          <!-- Pulsing QR frame selector -->
+          <div id="qr-frame" class="payment-qr-frame pulsate">
+            <svg class="qr-svg" viewBox="0 0 29 29" shape-rendering="crispEdges">
+              <path fill="#ffffff" d="M0 0h29v29H0z"/>
+              <path fill="#2B2B2B" d="M0 0h7v7H0zm0 22h7v7H0zm22 0h7v7h-7zM22 0h7v7h-7zM2 2h3v3H2zm0 24h3v3H2zm22 0h3v3h-3zm0-24h3v3h-3zM8 0h1v4H8zm2 0h1v1h-1zm3 0h3v1h-3zm4 0h1v2h-1zm1 0h1v1h-1zm2 0h1v3h-1zm-10 1h2v1h-2zm3 0h1v3h-1zm3 0h1v1h-1zm-9 2h2v1H8zm5 0h1v1h-1zm2 0h1v1h-1zm4 0h2v1h-2zm-12 1h1v3H9zm2 0h1v1h-1zm1 0h1v2h-1zm3 0h1v1h-1zm2 0h2v1h-2zm-6 2h1v1H9zm1 0h2v1h-2zm4 0h1v1h-1zm2 0h1v1h-1zm1 0h1v1h-1zm1 0h2v1h-2zm-11 1h1v1H8zm2 0h1v1h-1zm1 0h1v1h-1zm2 0h2v1h-2zm3 0h1v1h-1zm3 0h1v1h-1zm1 0h1v1h-1zm-13 1h2v1h-2zm4 0h1v1h-1zm2 0h1v2h-1zm2 0h2v1h-2zm-12 2h1v1H0zm2 0h1v1H2zm3 0h2v1H5zm1 1h1v2H6zm3 0h1v1H9zm2 0h3v1h-3zm4 0h1v1h-1zm1 0h2v1h-2zm5 0h1v2h-1zm-15 1h1v1H1zm2 0h1v1H3zm2 0h1v1H5zm3 0h1v1H8zm4 0h2v1h-2zm3 0h1v2h-1zm3 0h2v1h-2zm2 0h1v1h-1zm-15 1h2v1H1zm3 0h1v1H4zm3 0h1v1H7zm1 0h2v1H8zm4 0h1v1h-1zm3 0h1v1h-1zm3 0h1v1h-1zm-14 2h2v1H2zm3 0h1v1H5zm2 0h1v1H7zm4 0h1v2h-1zm2 0h1v1h-1zm2 0h1v1h-1zm4 0h1v1h-1zm-15 1h1v1H1zm3 0h1v1H4zm4 0h1v1H8zm2 0h1v1h-1zm4 0h1v1h-1zm3 0h2v1h-2zm1 0h2v1h-2zm-15 1h1v1H1zm3 0h1v1H4zm3 0h1v1H7zm1 0h3v1H8zm4 0h2v1h-2zm4 0h2v1h-2z"/>
+            </svg>
+          </div>
+          
+          <!-- Verification logs -->
+          <div class="payment-status-console">
+            <span class="pay-blink-dot"></span>
+            <span id="log-text" class="pay-status-msg">Connecting to Gateway...</span>
+          </div>
+        </div>
+
+        <!-- Right Pane: Invoicing and Details -->
+        <div class="payment-invoice-pane">
+          <div>
+            <h3 class="pay-bill-title">Payment Information</h3>
+            <div class="pay-bill-summary">
+              <div class="pay-bill-row">
+                <span class="pay-bill-lbl">Item:</span>
+                <span id="bill-item-name" class="pay-bill-val">Classic Coffee (Medium)</span>
+              </div>
+              <div class="pay-bill-row">
+                <span class="pay-bill-lbl">Order Ticket:</span>
+                <span id="order-number" class="pay-bill-val">CFX-0000</span>
+              </div>
+              <div class="pay-bill-row">
+                <span class="pay-bill-lbl">Status:</span>
+                <span class="pay-bill-val" style="color: var(--color-coffee);">Awaiting Pay</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Price & Countdown -->
+          <div class="pay-bill-amount-row">
+            <div>
+              <span class="price-lbl">Payable Amount</span>
+              <span id="bill-amount" class="pay-bill-amount-val">₹30</span>
+            </div>
+            
+            <div class="pay-countdown-bar">
+              <span>Expires in: </span><span id="timer-count">03:00</span>
+            </div>
+          </div>
+
+          <!-- Bottom: Apps and Cancel -->
+          <div style="display: flex; flex-direction: column; gap: 0.6rem;">
+            <div class="payment-gateways" style="border-top: none; padding-top: 0;">
+              <span class="gateway-title" style="font-size: 0.75rem;">Supported UPI Apps: GPay, PhonePe, Paytm, BHIM</span>
+            </div>
+            
+            <!-- Hide simulating button and rely on click or provide clean, stylized simulation button -->
+            <div class="payment-buttons">
+              <!-- Styled simulated checkout bypass button for tests -->
+              <button id="pay-now-btn" class="btn-pay-now" style="background: linear-gradient(135deg, var(--color-gold) 0%, var(--color-accent) 100%); color: white; border: none; box-shadow: 0 4px 12px var(--color-gold-glow);">
+                <span>Simulate Success</span>
+              </button>
+              
+              <button id="cancel-btn" class="btn-cancel">
+                <span>Cancel Order</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>

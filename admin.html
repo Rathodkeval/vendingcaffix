@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>CAFFIX - Admin Telemetry Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="bg-decor"></div>
+
+  <div class="kiosk-container">
+    <main class="kiosk-main" style="height: 100%;">
+      <div class="admin-card">
+        <!-- Header -->
+        <div class="admin-header">
+          <h2 class="admin-title">Kiosk Diagnostics & Telemetry</h2>
+          <span style="font-size: 0.85rem; background: var(--color-coffee); color: white; padding: 0.35rem 0.8rem; border-radius: 12px; font-weight: 700;">Secure Mode</span>
+        </div>
+
+        <!-- Telemetry Stats Grid -->
+        <div class="admin-grid">
+          <!-- Sales Diagnostics -->
+          <div class="admin-section">
+            <h3 class="admin-sect-title">Sales Diagnostics</h3>
+            <div class="admin-row">
+              <span class="admin-lbl">Today's Sales:</span>
+              <span id="admin-sales" class="admin-val" style="color: var(--color-coffee); font-weight: 800;">₹560.00</span>
+            </div>
+            <div class="admin-row">
+              <span class="admin-lbl">Total Orders:</span>
+              <span id="admin-orders" class="admin-val">28</span>
+            </div>
+            <div class="admin-row">
+              <span class="admin-lbl">Payment API:</span>
+              <span class="admin-val success">Connected</span>
+            </div>
+          </div>
+
+          <!-- Inventory Diagnostics -->
+          <div class="admin-section">
+            <h3 class="admin-sect-title">Inventory diagnostics</h3>
+            <div class="admin-row">
+              <span class="admin-lbl">Water Tank Status:</span>
+              <span id="admin-water" class="admin-val">85.5%</span>
+            </div>
+            <div class="admin-row">
+              <span class="admin-lbl">Coffee Bean Status:</span>
+              <span id="admin-beans" class="admin-val">78.2%</span>
+            </div>
+            <div class="admin-row" style="margin-top: auto;">
+              <button id="admin-refill-btn" class="btn-toggle" style="width: 100%; padding: 0.5rem; font-size: 0.8rem;">Refill Tanks</button>
+            </div>
+          </div>
+
+          <!-- System Diagnostics -->
+          <div class="admin-section">
+            <h3 class="admin-sect-title">Hardware Telemetry</h3>
+            <div class="admin-row">
+              <span class="admin-lbl">Arduino Mega Board:</span>
+              <span class="admin-val success">Online</span>
+            </div>
+            <div class="admin-row">
+              <span class="admin-lbl">Boiler Element Temp:</span>
+              <span class="admin-val">92.4°C</span>
+            </div>
+            <div class="admin-row">
+              <span class="admin-lbl">Pump Pressure:</span>
+              <span class="admin-val">0.0 Bar</span>
+            </div>
+            <div class="admin-row">
+              <span class="admin-lbl">Maintenance Status:</span>
+              <span class="admin-val success">Healthy</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Return button -->
+        <button class="btn-admin-close" onclick="navigateToHome()" style="margin-top: 1rem;">
+          <span>Return To Kiosk</span>
+        </button>
+      </div>
+    </main>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>

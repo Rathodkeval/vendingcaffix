@@ -1,0 +1,120 @@
+import React from 'react';
+import { ArrowLeft } from 'lucide-react';
+
+const COFFEES = [
+  {
+    id: 'classic',
+    name: 'Classic Coffee',
+    desc: 'Rich and authentic coffee experience made from premium Arabica beans.',
+    price: 30,
+    image: '/assets/classic_coffee.png',
+    badge: 'Best Seller',
+    badgeColor: 'bg-gold/90 text-coffee-dark border border-gold-dark/20'
+  },
+  {
+    id: 'vanilla',
+    name: 'Vanilla Coffee',
+    desc: 'Smooth coffee blended with sweet vanilla notes for a creamy, comforting taste.',
+    price: 40,
+    image: '/assets/vanilla_coffee.png',
+    badge: 'Creamy & Sweet',
+    badgeColor: 'bg-coffee-light/80 text-cream-light border border-coffee-light/20'
+  },
+  {
+    id: 'hazelnut',
+    name: 'Hazelnut Coffee',
+    desc: 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.',
+    price: 50,
+    image: '/assets/hazelnut_coffee.png',
+    badge: 'Rich & Nutty',
+    badgeColor: 'bg-[#805A3B] text-cream-light border border-[#805A3B]/20'
+  }
+];
+
+export default function SelectionScreen({ onSelect, onBack, prices = { classic: 30, vanilla: 40, hazelnut: 50 } }) {
+  const coffeesWithPrices = COFFEES.map((c) => ({
+    ...c,
+    price: prices[c.id] ?? c.price
+  }));
+
+  return (
+    <div className="w-full h-full flex flex-col justify-between p-4 bg-cream-light relative overflow-hidden">
+      {/* Title Header Row */}
+      <div className="flex items-center gap-4 mb-2">
+        <button
+          onClick={onBack}
+          className="p-2 rounded-xl bg-cream border border-coffee-light/20 hover:bg-cream-dark active:scale-95 active-touch-feedback"
+          aria-label="Go back"
+        >
+          <ArrowLeft className="w-5 h-5 text-coffee" />
+        </button>
+        <div>
+          <h2 className="font-sans font-extrabold text-2xl text-coffee-dark tracking-tight leading-none">
+            Choose Your Beverage
+          </h2>
+          <p className="text-xs text-coffee-light font-medium tracking-wide mt-0.5">
+            Select a flavor to customize your drink
+          </p>
+        </div>
+      </div>
+
+      {/* Coffee Cards Grid */}
+      <div className="grid grid-cols-3 gap-4 flex-grow items-stretch my-2">
+        {coffeesWithPrices.map((coffee) => (
+          <div
+            key={coffee.id}
+            onClick={() => onSelect(coffee)}
+            className="flex flex-col justify-between bg-white rounded-2xl border border-coffee-light/10 shadow-sm overflow-hidden transform transition-all duration-300 hover:shadow-md active:scale-[0.98] cursor-pointer group active-touch-feedback relative"
+          >
+            {/* Badge Overlay */}
+            <div className={`absolute top-2 left-2 z-10 px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wider uppercase shadow-sm ${coffee.badgeColor}`}>
+              {coffee.badge}
+            </div>
+
+            {/* Coffee Image Section */}
+            <div className="relative h-[120px] bg-cream/30 overflow-hidden flex items-center justify-center">
+              <div 
+                className="w-full h-full bg-cover bg-center transition-transform duration-500 group-hover:scale-105"
+                style={{ backgroundImage: `url('${coffee.image}')` }}
+              />
+              <div className="absolute inset-0 bg-gradient-to-t from-white/90 via-transparent to-transparent" />
+            </div>
+
+            {/* Information Section */}
+            <div className="px-3 pb-3 flex-grow flex flex-col justify-between">
+              <div>
+                <h3 className="font-sans font-bold text-base text-coffee-dark tracking-tight leading-tight group-hover:text-gold-dark transition-colors">
+                  {coffee.name}
+                </h3>
+                <p className="text-[11px] text-coffee-light/80 leading-tight mt-1 line-clamp-2">
+                  {coffee.desc}
+                </p>
+              </div>
+
+              {/* Price & Action Button */}
+              <div className="mt-3 flex items-center justify-between pt-2 border-t border-cream">
+                <span className="font-sans font-black text-lg text-coffee">
+                  ₹{coffee.price}
+                </span>
+                <button
+                  className="px-3.5 py-1.5 bg-coffee text-cream-light font-bold text-xs rounded-xl shadow-md group-hover:bg-gold-dark transition-all"
+                  onClick={(e) => {
+                    e.stopPropagation(); // Avoid double click trigger
+                    onSelect(coffee);
+                  }}
+                >
+                  Select
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Footer hint */}
+      <div className="text-center text-[10px] text-coffee-light/40 uppercase tracking-widest font-bold">
+        Secure touchless payment enabled
+      </div>
+    </div>
+  );
+}
