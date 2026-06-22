@@ -6,7 +6,7 @@ const COFFEES = [
     id: 'classic',
     name: 'Classic Coffee',
     desc: 'Rich and authentic coffee experience made from premium Arabica beans.',
-    price: 30,
+    price: 100,
     image: '/assets/classic_coffee.png',
     badge: 'Best Seller',
     badgeColor: 'bg-gold/90 text-coffee-dark border border-gold-dark/20'
@@ -15,7 +15,7 @@ const COFFEES = [
     id: 'vanilla',
     name: 'Vanilla Coffee',
     desc: 'Smooth coffee blended with sweet vanilla notes for a creamy, comforting taste.',
-    price: 40,
+    price: 100,
     image: '/assets/vanilla_coffee.png',
     badge: 'Creamy & Sweet',
     badgeColor: 'bg-coffee-light/80 text-cream-light border border-coffee-light/20'
@@ -24,14 +24,14 @@ const COFFEES = [
     id: 'hazelnut',
     name: 'Hazelnut Coffee',
     desc: 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.',
-    price: 50,
+    price: 100,
     image: '/assets/hazelnut_coffee.png',
     badge: 'Rich & Nutty',
     badgeColor: 'bg-[#805A3B] text-cream-light border border-[#805A3B]/20'
   }
 ];
 
-export default function SelectionScreen({ onSelect, onBack, prices = { classic: 30, vanilla: 40, hazelnut: 50 } }) {
+export default function SelectionScreen({ onSelect, onBack, prices = { classic: 100, vanilla: 100, hazelnut: 100 } }) {
   const coffeesWithPrices = COFFEES.map((c) => ({
     ...c,
     price: prices[c.id] ?? c.price

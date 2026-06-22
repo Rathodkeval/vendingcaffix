@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { getDB } from '../config/db';
 import { NotFoundError, BadRequestError } from '../utils/errors';
 import logger from '../utils/logger';
+import { syncOrderToFirebase } from '../utils/firebase';
 const Razorpay = require('razorpay');
 
 const razorpayKeyId = (process.env.RAZORPAY_KEY_ID || '').trim();
@@ -123,17 +124,24 @@ export const createOrder = async (
 
     logger.info(`Created PENDING order ${orderId} with Razorpay Order ID ${rpOrderId}`);
 
+    const newOrder = {
+      id: orderId,
+      product_id,
+      product_name: product.name,
+      amount: orderAmount,
+      status: 'PENDING',
+      machine_id,
+      created_at: todayStr,
+      razorpay_order_id: rpOrderId
+    };
+
+    // Sync to Firebase asynchronously
+    syncOrderToFirebase(newOrder);
+
     res.status(201).json({
       status: 'success',
       data: {
-        id: orderId,
-        product_id,
-        product_name: product.name,
-        amount: orderAmount,
-        status: 'PENDING',
-        machine_id,
-        created_at: todayStr,
-        razorpay_order_id: rpOrderId,
+        ...newOrder,
         razorpay_key: isMockMode ? 'mock' : razorpayKeyId
       }
     });
@@ -225,6 +233,11 @@ export async function executeOrderStatusUpdate(id: string, status: string): Prom
     JOIN products p ON o.product_id = p.id
     WHERE o.id = ?
   `, [id]);
+
+  if (updatedOrder) {
+    // Sync status updates to Firebase asynchronously
+    syncOrderToFirebase(updatedOrder);
+  }
 
   return updatedOrder;
 }

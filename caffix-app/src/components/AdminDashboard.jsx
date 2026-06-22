@@ -117,8 +117,8 @@ export default function AdminDashboard({
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
                   className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold tracking-wide transition-all ${activeTab === tab.id
-                      ? 'bg-gold text-coffee-dark shadow-md'
-                      : 'hover:bg-coffee/40 text-cream/70 hover:text-cream-light'
+                    ? 'bg-gold text-coffee-dark shadow-md'
+                    : 'hover:bg-coffee/40 text-cream/70 hover:text-cream-light'
                     }`}
                 >
                   <Icon className="w-4 h-4" />
@@ -305,8 +305,8 @@ export default function AdminDashboard({
                         onClick={() => refillItem(item.key)}
                         disabled={item.value >= 100}
                         className={`py-2 px-3 rounded-lg text-xs font-bold transition-all ${item.value >= 100
-                            ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                            : 'bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100'
+                          ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                          : 'bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100'
                           }`}
                       >
                         Refill
@@ -368,8 +368,8 @@ export default function AdminDashboard({
                           <td className="py-3 font-mono font-bold text-slate-800">{log.code}</td>
                           <td className="py-3">
                             <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider ${log.level === 'Warning' ? 'bg-amber-50 text-amber-700 border border-amber-200' :
-                                log.level === 'System' ? 'bg-blue-50 text-blue-700 border border-blue-200' :
-                                  'bg-slate-50 text-slate-600 border border-slate-200'
+                              log.level === 'System' ? 'bg-blue-50 text-blue-700 border border-blue-200' :
+                                'bg-slate-50 text-slate-600 border border-slate-200'
                               }`}>
                               {log.level}
                             </span>
@@ -631,8 +631,8 @@ export default function AdminDashboard({
                       <button
                         onClick={onToggleMaintenance}
                         className={`w-11 h-6 flex items-center rounded-full p-0.5 cursor-pointer transition-all duration-300 border ${maintenanceMode
-                            ? 'bg-amber-600 border-amber-600 justify-end'
-                            : 'bg-slate-200 border-slate-300 justify-start'
+                          ? 'bg-amber-600 border-amber-600 justify-end'
+                          : 'bg-slate-200 border-slate-300 justify-start'
                           }`}
                       >
                         <span className="w-5 h-5 rounded-full bg-white shadow-md block" />

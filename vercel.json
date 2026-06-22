@@ -1,16 +1,8 @@
 {
   "version": 2,
+  "outputDirectory": "caffix-app/dist",
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/index.ts" },
-    { "source": "/assets/(.*)", "destination": "/caffix-app/dist/assets/$1" },
-    { "source": "/(.*)", "destination": "/caffix-app/dist/index.html" }
-  ],
-  "functions": {
-    "api/index.ts": {
-      "includeFiles": [
-        "node_modules/sqlite3/**",
-        "caffix-backend/node_modules/sqlite3/**"
-      ]
-    }
-  }
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
 }

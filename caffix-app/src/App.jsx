@@ -23,7 +23,7 @@ export default function App() {
   const [orderDetails, setOrderDetails] = useState(null);
   
   // Admin & Settings States
-  const [prices, setPrices] = useState({ classic: 30, vanilla: 40, hazelnut: 50 });
+  const [prices, setPrices] = useState({ classic: 100, vanilla: 100, hazelnut: 100 });
   const [maintenanceMode, setMaintenanceMode] = useState(false);
   const [inventory, setInventory] = useState({
     water: 100,

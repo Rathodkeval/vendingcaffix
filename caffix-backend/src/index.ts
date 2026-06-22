@@ -65,7 +65,7 @@ app.use('/api', apiRoutes);
 app.use('/', apiRoutes);
 
 // Root route
-app.get('/health', (req, res) => {
+app.get(['/health', '/api/health'], (req, res) => {
   res.status(200).json({
     status: 'success',
     message: 'Welcome to CAFFIX Vending REST API Server',

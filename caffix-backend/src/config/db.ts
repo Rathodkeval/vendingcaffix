@@ -21,9 +21,9 @@ const mockStore = {
     { id: 2, name: 'kiosk-one', email: 'kiosk01@caffix.com', password: bcrypt.hashSync('kiosk123', 10), role: 'kiosk' }
   ],
   products: [
-    { id: 1, name: 'Classic Coffee', price: 30, description: 'Rich and authentic coffee experience made from premium Arabica beans.', image: '/assets/classic_coffee.png' },
-    { id: 2, name: 'Vanilla Coffee', price: 40, description: 'Smooth coffee blended with sweet vanilla notes for a creamy, comforting taste.', image: '/assets/vanilla_coffee.png' },
-    { id: 3, name: 'Hazelnut Coffee', price: 50, description: 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.', image: '/assets/hazelnut_coffee.png' }
+    { id: 1, name: 'Classic Coffee', price: 100, description: 'Rich and authentic coffee experience made from premium Arabica beans.', image: '/assets/classic_coffee.png' },
+    { id: 2, name: 'Vanilla Coffee', price: 100, description: 'Smooth coffee blended with sweet vanilla notes for a creamy, comforting taste.', image: '/assets/vanilla_coffee.png' },
+    { id: 3, name: 'Hazelnut Coffee', price: 100, description: 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.', image: '/assets/hazelnut_coffee.png' }
   ],
   machines: [
     { id: 'CFX-MC-01', machine_name: 'Kiosk-One', location: 'Delhi Airport T3', status: 'online', last_seen: new Date().toISOString() }
@@ -32,9 +32,9 @@ const mockStore = {
     { id: 1, machine_id: 'CFX-MC-01', milk_level: 92, coffee_level: 78, vanilla_level: 65, hazelnut_level: 55, water_level: 85 }
   ],
   orders: [
-    { id: 'CFX-4912', product_id: 1, amount: 30, status: 'COMPLETED', machine_id: 'CFX-MC-01', created_at: new Date().toISOString(), razorpay_order_id: null, razorpay_payment_id: null, razorpay_signature: null },
-    { id: 'CFX-7104', product_id: 3, amount: 50, status: 'COMPLETED', machine_id: 'CFX-MC-01', created_at: new Date().toISOString(), razorpay_order_id: null, razorpay_payment_id: null, razorpay_signature: null },
-    { id: 'CFX-3850', product_id: 2, amount: 40, status: 'COMPLETED', machine_id: 'CFX-MC-01', created_at: new Date().toISOString(), razorpay_order_id: null, razorpay_payment_id: null, razorpay_signature: null }
+    { id: 'CFX-4912', product_id: 1, amount: 100, status: 'COMPLETED', machine_id: 'CFX-MC-01', created_at: new Date().toISOString(), razorpay_order_id: null, razorpay_payment_id: null, razorpay_signature: null },
+    { id: 'CFX-7104', product_id: 3, amount: 100, status: 'COMPLETED', machine_id: 'CFX-MC-01', created_at: new Date().toISOString(), razorpay_order_id: null, razorpay_payment_id: null, razorpay_signature: null },
+    { id: 'CFX-3850', product_id: 2, amount: 100, status: 'COMPLETED', machine_id: 'CFX-MC-01', created_at: new Date().toISOString(), razorpay_order_id: null, razorpay_payment_id: null, razorpay_signature: null }
   ] as any[]
 };
 
@@ -61,7 +61,7 @@ class MockDatabase {
     
     if (query.includes('from products')) {
       const id = params[0];
-      return mockStore.products.find(p => p.id === id);
+      return mockStore.products.find(p => p.id === Number(id));
     }
     
     if (query.includes('from machines')) {
@@ -197,9 +197,9 @@ class MockDatabase {
     
     if (query.includes('update products set price = ?')) {
       const [price, id] = params;
-      const prod = mockStore.products.find(p => p.id === id);
+      const prod = mockStore.products.find(p => p.id === Number(id));
       if (prod) {
-        prod.price = price;
+        prod.price = Number(price);
       }
       return { changes: 1 };
     }
@@ -361,15 +361,15 @@ async function seedData() {
   if (productCount && productCount.count === 0) {
     await db.run(
       'INSERT INTO products (id, name, price, description, image) VALUES (?, ?, ?, ?, ?)',
-      [1, 'Classic Coffee', 30, 'Rich and authentic coffee experience made from premium Arabica beans.', '/assets/classic_coffee.png']
+      [1, 'Classic Coffee', 100, 'Rich and authentic coffee experience made from premium Arabica beans.', '/assets/classic_coffee.png']
     );
     await db.run(
       'INSERT INTO products (id, name, price, description, image) VALUES (?, ?, ?, ?, ?)',
-      [2, 'Vanilla Coffee', 40, 'Smooth coffee blended with sweet vanilla notes for a creamy, comforting taste.', '/assets/vanilla_coffee.png']
+      [2, 'Vanilla Coffee', 100, 'Smooth coffee blended with sweet vanilla notes for a creamy, comforting taste.', '/assets/vanilla_coffee.png']
     );
     await db.run(
       'INSERT INTO products (id, name, price, description, image) VALUES (?, ?, ?, ?, ?)',
-      [3, 'Hazelnut Coffee', 50, 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.', '/assets/hazelnut_coffee.png']
+      [3, 'Hazelnut Coffee', 100, 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.', '/assets/hazelnut_coffee.png']
     );
   }
 
@@ -397,15 +397,15 @@ async function seedData() {
     const today = new Date().toISOString();
     await db.run(
       'INSERT INTO orders (id, product_id, amount, status, machine_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-      ['CFX-4912', 1, 30, 'COMPLETED', 'CFX-MC-01', today]
+      ['CFX-4912', 1, 100, 'COMPLETED', 'CFX-MC-01', today]
     );
     await db.run(
       'INSERT INTO orders (id, product_id, amount, status, machine_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-      ['CFX-7104', 3, 50, 'COMPLETED', 'CFX-MC-01', today]
+      ['CFX-7104', 3, 100, 'COMPLETED', 'CFX-MC-01', today]
     );
     await db.run(
       'INSERT INTO orders (id, product_id, amount, status, machine_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-      ['CFX-3850', 2, 40, 'COMPLETED', 'CFX-MC-01', today]
+      ['CFX-3850', 2, 100, 'COMPLETED', 'CFX-MC-01', today]
     );
   }
 }
