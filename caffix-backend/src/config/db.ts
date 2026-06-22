@@ -1,16 +1,245 @@
-import sqlite3 from 'sqlite3';
-import { open, Database } from 'sqlite';
 import path from 'path';
 import bcrypt from 'bcryptjs';
 
-let db: Database;
+// Dynamically load native sqlite3 package only when NOT running on Vercel
+let sqlite3: any = null;
+let sqliteOpen: any = null;
 
-export async function initDB(): Promise<Database> {
-  const dbPath = process.env.VERCEL
-    ? '/tmp/caffix.db'
-    : path.resolve(__dirname, '../../caffix.db');
+if (!process.env.VERCEL) {
+  try {
+    sqlite3 = require('sqlite3');
+    sqliteOpen = require('sqlite').open;
+  } catch (error) {
+    console.error('Failed to load native sqlite3 package:', error);
+  }
+}
+
+// In-memory data store for Vercel Serverless environment
+const mockStore = {
+  users: [
+    { id: 1, name: 'Caffix Manager', email: 'admin@caffix.com', password: bcrypt.hashSync('admin123', 10), role: 'admin' },
+    { id: 2, name: 'kiosk-one', email: 'kiosk01@caffix.com', password: bcrypt.hashSync('kiosk123', 10), role: 'kiosk' }
+  ],
+  products: [
+    { id: 1, name: 'Classic Coffee', price: 30, description: 'Rich and authentic coffee experience made from premium Arabica beans.', image: '/assets/classic_coffee.png' },
+    { id: 2, name: 'Vanilla Coffee', price: 40, description: 'Smooth coffee blended with sweet vanilla notes for a creamy, comforting taste.', image: '/assets/vanilla_coffee.png' },
+    { id: 3, name: 'Hazelnut Coffee', price: 50, description: 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.', image: '/assets/hazelnut_coffee.png' }
+  ],
+  machines: [
+    { id: 'CFX-MC-01', machine_name: 'Kiosk-One', location: 'Delhi Airport T3', status: 'online', last_seen: new Date().toISOString() }
+  ],
+  inventory: [
+    { id: 1, machine_id: 'CFX-MC-01', milk_level: 92, coffee_level: 78, vanilla_level: 65, hazelnut_level: 55, water_level: 85 }
+  ],
+  orders: [
+    { id: 'CFX-4912', product_id: 1, amount: 30, status: 'COMPLETED', machine_id: 'CFX-MC-01', created_at: new Date().toISOString(), razorpay_order_id: null, razorpay_payment_id: null, razorpay_signature: null },
+    { id: 'CFX-7104', product_id: 3, amount: 50, status: 'COMPLETED', machine_id: 'CFX-MC-01', created_at: new Date().toISOString(), razorpay_order_id: null, razorpay_payment_id: null, razorpay_signature: null },
+    { id: 'CFX-3850', product_id: 2, amount: 40, status: 'COMPLETED', machine_id: 'CFX-MC-01', created_at: new Date().toISOString(), razorpay_order_id: null, razorpay_payment_id: null, razorpay_signature: null }
+  ] as any[]
+};
+
+class MockDatabase {
+  async exec(sql: string) {
+    return;
+  }
+
+  async get(sql: string, params: any[] = []): Promise<any> {
+    const query = sql.toLowerCase();
+    
+    if (query.includes('count(*)')) {
+      if (query.includes('from users')) return { count: mockStore.users.length };
+      if (query.includes('from products')) return { count: mockStore.products.length };
+      if (query.includes('from machines')) return { count: mockStore.machines.length };
+      if (query.includes('from inventory')) return { count: mockStore.inventory.length };
+      if (query.includes('from orders')) return { count: mockStore.orders.length };
+    }
+
+    if (query.includes('from users')) {
+      const email = params[0];
+      return mockStore.users.find(u => u.email === email);
+    }
+    
+    if (query.includes('from products')) {
+      const id = params[0];
+      return mockStore.products.find(p => p.id === id);
+    }
+    
+    if (query.includes('from machines')) {
+      const id = params[0];
+      return mockStore.machines.find(m => m.id === id);
+    }
+    
+    if (query.includes('from inventory')) {
+      const machineId = params[0];
+      return mockStore.inventory.find(i => i.machine_id === machineId);
+    }
+    
+    if (query.includes('from orders')) {
+      let order: any;
+      if (query.includes('where o.id = ?') || query.includes('where id = ?')) {
+        const id = params[0];
+        order = mockStore.orders.find(o => o.id === id);
+      } else if (query.includes('where razorpay_order_id = ?')) {
+        const rpId = params[0];
+        order = mockStore.orders.find(o => o.razorpay_order_id === rpId);
+      }
+      
+      if (order && query.includes('join products')) {
+        const p = mockStore.products.find(prod => prod.id === order.product_id);
+        return {
+          ...order,
+          product_name: p ? p.name : '',
+          product_desc: p ? p.description : ''
+        };
+      }
+      return order;
+    }
+    
+    return null;
+  }
+
+  async all(sql: string, params: any[] = []): Promise<any[]> {
+    const query = sql.toLowerCase();
+    
+    if (query.includes('from products')) {
+      return mockStore.products;
+    }
+
+    if (query.includes('from machines')) {
+      return mockStore.machines;
+    }
+    
+    if (query.includes('from orders')) {
+      return mockStore.orders.map(o => {
+        const p = mockStore.products.find(prod => prod.id === o.product_id);
+        return {
+          ...o,
+          product_name: p ? p.name : ''
+        };
+      }).sort((a, b) => b.created_at.localeCompare(a.created_at));
+    }
+    
+    return [];
+  }
+
+  async run(sql: string, params: any[] = []): Promise<any> {
+    const query = sql.toLowerCase();
+    
+    if (query.includes('insert into orders')) {
+      const [id, product_id, amount, status, machine_id, created_at, razorpay_order_id] = params;
+      const newOrder = {
+        id,
+        product_id,
+        amount,
+        status,
+        machine_id,
+        created_at,
+        razorpay_order_id,
+        razorpay_payment_id: null,
+        razorpay_signature: null
+      };
+      mockStore.orders.push(newOrder);
+      return { lastID: id };
+    }
+    
+    if (query.includes('update orders set')) {
+      if (query.includes('razorpay_payment_id = ?')) {
+        const [paymentId, signature, orderId] = params;
+        const order = mockStore.orders.find(o => o.id === orderId);
+        if (order) {
+          order.razorpay_payment_id = paymentId;
+          order.razorpay_signature = signature;
+        }
+      } else if (query.includes('status = ?')) {
+        const [status, orderId] = params;
+        const order = mockStore.orders.find(o => o.id === orderId);
+        if (order) {
+          order.status = status.toUpperCase();
+        }
+      }
+      return { changes: 1 };
+    }
+    
+    if (query.includes('update inventory set')) {
+      if (query.includes('milk_level = 100')) {
+        const [machineId] = params;
+        const inv = mockStore.inventory.find(i => i.machine_id === machineId);
+        if (inv) {
+          inv.milk_level = 100;
+          inv.coffee_level = 100;
+          inv.vanilla_level = 100;
+          inv.hazelnut_level = 100;
+          inv.water_level = 100;
+        }
+      } else if (query.includes('water_level = water_level - ?')) {
+        const [water, coffee, milk, vanilla, hazelnut, machineId] = params;
+        const inv = mockStore.inventory.find(i => i.machine_id === machineId);
+        if (inv) {
+          inv.water_level -= water;
+          inv.coffee_level -= coffee;
+          inv.milk_level -= milk;
+          inv.vanilla_level -= vanilla;
+          inv.hazelnut_level -= hazelnut;
+        }
+      } else {
+        const [machineId] = params;
+        const inv = mockStore.inventory.find(i => i.machine_id === machineId);
+        if (inv) {
+          const match = query.match(/update inventory set (\w+_level) = 100/);
+          if (match) {
+            const field = match[1];
+            (inv as any)[field] = 100;
+          }
+        }
+      }
+      return { changes: 1 };
+    }
+    
+    if (query.includes('update products set price = ?')) {
+      const [price, id] = params;
+      const prod = mockStore.products.find(p => p.id === id);
+      if (prod) {
+        prod.price = price;
+      }
+      return { changes: 1 };
+    }
+    
+    if (query.includes('update machines set status = ?')) {
+      const [status, id] = params;
+      const mach = mockStore.machines.find(m => m.id === id);
+      if (mach) {
+        mach.status = status;
+      }
+      return { changes: 1 };
+    }
+
+    if (query.includes('insert into machines')) {
+      const [id, machine_name, location, status, last_seen] = params;
+      mockStore.machines.push({ id, machine_name, location, status, last_seen });
+      return { lastID: id };
+    }
+
+    if (query.includes('insert into inventory')) {
+      const [machine_id] = params;
+      mockStore.inventory.push({ id: mockStore.inventory.length + 1, machine_id, milk_level: 100, coffee_level: 100, vanilla_level: 100, hazelnut_level: 100, water_level: 100 });
+      return { lastID: mockStore.inventory.length };
+    }
+    
+    return { lastID: null, changes: 0 };
+  }
+}
+
+let db: any;
+
+export async function initDB(): Promise<any> {
+  if (process.env.VERCEL) {
+    db = new MockDatabase();
+    return db;
+  }
+
+  const dbPath = path.resolve(__dirname, '../../caffix.db');
   
-  db = await open({
+  db = await sqliteOpen({
     filename: dbPath,
     driver: sqlite3.Database
   });
@@ -103,7 +332,7 @@ export async function initDB(): Promise<Database> {
   return db;
 }
 
-export function getDB(): Database {
+export function getDB(): any {
   if (!db) {
     throw new Error('Database not initialized! Call initDB() first.');
   }
