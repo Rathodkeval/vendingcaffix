@@ -586,7 +586,7 @@ export default function AdminDashboard({
                       <label className="text-xs font-bold text-slate-500 block mb-1">Classic Coffee Base Price (₹)</label>
                       <input
                         type="number"
-                        value={tempPrices.classic === 30 || !tempPrices.classic ? 100 : tempPrices.classic}
+                        value={tempPrices.classic === 100 || !tempPrices.classic ? 100 : tempPrices.classic}
                         onChange={(e) => setTempPrices({ ...tempPrices, classic: parseInt(e.target.value) || 0 })}
                         className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-semibold focus:outline-none focus:border-coffee"
                       />
@@ -596,7 +596,7 @@ export default function AdminDashboard({
                       <label className="text-xs font-bold text-slate-500 block mb-1">Vanilla Coffee Base Price (₹)</label>
                       <input
                         type="number"
-                        value={tempPrices.vanilla === 40 || !tempPrices.vanilla ? 100 : tempPrices.vanilla}
+                        value={tempPrices.vanilla === 100 || !tempPrices.vanilla ? 100 : tempPrices.vanilla}
                         onChange={(e) => setTempPrices({ ...tempPrices, vanilla: parseInt(e.target.value) || 0 })}
                         className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-semibold focus:outline-none focus:border-coffee"
                       />
@@ -606,7 +606,7 @@ export default function AdminDashboard({
                       <label className="text-xs font-bold text-slate-500 block mb-1">Hazelnut Coffee Base Price (₹)</label>
                       <input
                         type="number"
-                        value={tempPrices.hazelnut === 50 || !tempPrices.hazelnut ? 100 : tempPrices.hazelnut}
+                        value={tempPrices.hazelnut === 100 || !tempPrices.hazelnut ? 100 : tempPrices.hazelnut}
                         onChange={(e) => setTempPrices({ ...tempPrices, hazelnut: parseInt(e.target.value) || 0 })}
                         className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-semibold focus:outline-none focus:border-coffee"
                       />

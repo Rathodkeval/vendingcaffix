@@ -73,7 +73,7 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
 
             {/* Coffee Image Section */}
             <div className="relative h-[120px] bg-cream/30 overflow-hidden flex items-center justify-center">
-              <div 
+              <div
                 className="w-full h-full bg-cover bg-center transition-transform duration-500 group-hover:scale-105"
                 style={{ backgroundImage: `url('${coffee.image}')` }}
               />
