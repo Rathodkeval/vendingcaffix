@@ -11,6 +11,12 @@ import AdminDashboard from './components/AdminDashboard';
 import PaymentFailedScreen from './components/PaymentFailedScreen';
 import { Wrench } from 'lucide-react';
 
+const API_BASE = import.meta.env.VITE_API_URL || (
+  window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.port === '8000' || window.location.port === '5173'
+    ? 'http://localhost:5000/api'
+    : '/api'
+);
+
 export default function App() {
   const [screen, setScreen] = useState('WELCOME');
   const [selectedCoffee, setSelectedCoffee] = useState(null);
@@ -34,7 +40,7 @@ export default function App() {
   const refreshKioskData = async (token) => {
     try {
       // 1. Get products list
-      const prodRes = await fetch('http://localhost:5000/api/products');
+      const prodRes = await fetch(`${API_BASE}/products`);
       const prodData = await prodRes.json();
       if (prodData.status === 'success') {
         const prodList = prodData.data;
@@ -48,7 +54,7 @@ export default function App() {
       }
 
       // 2. Get machine status/levels
-      const machineRes = await fetch('http://localhost:5000/api/machine-status', {
+      const machineRes = await fetch(`${API_BASE}/machine-status`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const machineData = await machineRes.json();
@@ -71,7 +77,7 @@ export default function App() {
   const refreshAdminData = async (token) => {
     try {
       // 1. Get orders history
-      const ordersRes = await fetch('http://localhost:5000/api/orders', {
+      const ordersRes = await fetch(`${API_BASE}/orders`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const ordersData = await ordersRes.json();
@@ -96,7 +102,7 @@ export default function App() {
   useEffect(() => {
     async function initKiosk() {
       try {
-        const res = await fetch('http://localhost:5000/api/auth/login', {
+        const res = await fetch(`${API_BASE}/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email: 'kiosk01@caffix.com', password: 'kiosk123' })
@@ -128,7 +134,7 @@ export default function App() {
     const idMap = { classic: 1, vanilla: 2, hazelnut: 3 };
     
     try {
-      const res = await fetch('http://localhost:5000/api/orders/create', {
+      const res = await fetch(`${API_BASE}/orders/create`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -161,7 +167,7 @@ export default function App() {
   const handlePaymentSuccess = async () => {
     const token = localStorage.getItem('kioskToken') || '';
     try {
-      await fetch(`http://localhost:5000/api/orders/${orderDetails.dbId}/status`, {
+      await fetch(`${API_BASE}/orders/${orderDetails.dbId}/status`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -178,7 +184,7 @@ export default function App() {
   const handleBrewComplete = async () => {
     const token = localStorage.getItem('kioskToken') || '';
     try {
-      await fetch(`http://localhost:5000/api/orders/${orderDetails.dbId}/status`, {
+      await fetch(`${API_BASE}/orders/${orderDetails.dbId}/status`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -205,7 +211,7 @@ export default function App() {
     const token = localStorage.getItem('kioskToken') || '';
     try {
       if (orderDetails && orderDetails.dbId) {
-        await fetch(`http://localhost:5000/api/orders/${orderDetails.dbId}/status`, {
+        await fetch(`${API_BASE}/orders/${orderDetails.dbId}/status`, {
           method: 'PUT',
           headers: {
             'Content-Type': 'application/json',
@@ -226,7 +232,7 @@ export default function App() {
   const handleRefillInventory = async (key) => {
     const token = localStorage.getItem('adminToken') || '';
     try {
-      await fetch('http://localhost:5000/api/machines/CFX-MC-01/refill', {
+      await fetch(`${API_BASE}/machines/CFX-MC-01/refill`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -245,7 +251,7 @@ export default function App() {
     const token = localStorage.getItem('adminToken') || '';
     try {
       // Classic price update
-      await fetch('http://localhost:5000/api/products/1/price', {
+      await fetch(`${API_BASE}/products/1/price`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -255,7 +261,7 @@ export default function App() {
       });
       
       // Vanilla price update
-      await fetch('http://localhost:5000/api/products/2/price', {
+      await fetch(`${API_BASE}/products/2/price`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -265,7 +271,7 @@ export default function App() {
       });
 
       // Hazelnut price update
-      await fetch('http://localhost:5000/api/products/3/price', {
+      await fetch(`${API_BASE}/products/3/price`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -285,7 +291,7 @@ export default function App() {
     const token = localStorage.getItem('adminToken') || '';
     const newStatus = maintenanceMode ? 'online' : 'maintenance';
     try {
-      await fetch('http://localhost:5000/api/machines/CFX-MC-01/status', {
+      await fetch(`${API_BASE}/machines/CFX-MC-01/status`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -306,7 +312,7 @@ export default function App() {
 
   const handleAdminSuccess = async () => {
     try {
-      const res = await fetch('http://localhost:5000/api/auth/login', {
+      const res = await fetch(`${API_BASE}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: 'admin@caffix.com', password: 'admin123' })

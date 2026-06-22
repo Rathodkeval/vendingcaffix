@@ -35,6 +35,31 @@ try {
   logger.error('Failed to load Swagger YAML definition file:', error);
 }
 
+// Lazy Database Initialization Middleware (for Serverless / Vercel compatibility)
+let dbInitialized = false;
+let dbPromise: Promise<any> | null = null;
+
+const ensureDB = async () => {
+  if (!dbInitialized) {
+    if (!dbPromise) {
+      dbPromise = initDB().then(() => {
+        dbInitialized = true;
+        logger.info('SQLite database schema parsed and seeded successfully');
+      });
+    }
+    await dbPromise;
+  }
+};
+
+app.use(async (req, res, next) => {
+  try {
+    await ensureDB();
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Mount REST API routes
 app.use('/api', apiRoutes);
 app.use('/', apiRoutes);
@@ -52,20 +77,21 @@ app.get('/health', (req, res) => {
 // Central Error Handler (must be registered last)
 app.use(errorHandler);
 
-// Bootstrap Server
-async function startServer() {
-  try {
-    await initDB();
-    logger.info('SQLite database schema parsed and seeded successfully');
-
-    app.listen(PORT, () => {
-      logger.info(`CAFFIX Vending server running on http://localhost:${PORT}`);
-      logger.info(`Swagger interactive docs: http://localhost:${PORT}/api-docs`);
-    });
-  } catch (error) {
-    logger.error('Server failed to bootstrap:', error);
-    process.exit(1);
+// Bootstrap Server for local environments
+if (!process.env.VERCEL) {
+  async function startServer() {
+    try {
+      await ensureDB();
+      app.listen(PORT, () => {
+        logger.info(`CAFFIX Vending server running on http://localhost:${PORT}`);
+        logger.info(`Swagger interactive docs: http://localhost:${PORT}/api-docs`);
+      });
+    } catch (error) {
+      logger.error('Server failed to bootstrap:', error);
+      process.exit(1);
+    }
   }
+  startServer();
 }
 
-startServer();
+export default app;

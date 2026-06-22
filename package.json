@@ -1,0 +1,11 @@
+{
+  "name": "caffix-monorepo",
+  "private": true,
+  "workspaces": [
+    "caffix-app",
+    "caffix-backend"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=caffix-backend && npm run build --workspace=caffix-app"
+  }
+}

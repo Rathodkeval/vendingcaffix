@@ -1,6 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { ArrowLeft, RefreshCw, CreditCard, QrCode, Smartphone, Landmark, Check, Wallet } from 'lucide-react';
 
+const API_BASE = import.meta.env.VITE_API_URL || (
+  window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.port === '8000' || window.location.port === '5173'
+    ? 'http://localhost:5000/api'
+    : '/api'
+);
+
 export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymentFailed, onCancel }) {
   const [timeLeft, setTimeLeft] = useState(180); // 3 minutes
   const [activeTab, setActiveTab] = useState('UPI'); // UPI, QR, CARD, NETBANKING
@@ -52,7 +58,7 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
         setIsProcessing(true);
         setProcessingStatus('Verifying secure signature...');
         try {
-          const verifyRes = await fetch('http://localhost:5000/api/payments/verify', {
+          const verifyRes = await fetch(`${API_BASE}/payments/verify`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -119,7 +125,7 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
       const mockSignature = 'sig_mock_' + Math.floor(100000 + Math.random() * 900000);
 
       try {
-        const verifyRes = await fetch('http://localhost:5000/api/payments/verify', {
+        const verifyRes = await fetch(`${API_BASE}/payments/verify`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/index.js" },
+    { "source": "/assets/(.*)", "destination": "/caffix-app/dist/assets/$1" },
+    { "source": "/(.*)", "destination": "/caffix-app/dist/index.html" }
+  ]
+}

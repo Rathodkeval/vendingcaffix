@@ -6,7 +6,9 @@ import bcrypt from 'bcryptjs';
 let db: Database;
 
 export async function initDB(): Promise<Database> {
-  const dbPath = path.resolve(__dirname, '../../caffix.db');
+  const dbPath = process.env.VERCEL
+    ? '/tmp/caffix.db'
+    : path.resolve(__dirname, '../../caffix.db');
   
   db = await open({
     filename: dbPath,
