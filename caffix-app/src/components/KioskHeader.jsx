@@ -28,10 +28,11 @@ export default function KioskHeader({ onAdminAccess }) {
     <header className="flex justify-between items-center px-6 py-4 bg-coffee-dark text-cream-light border-b border-coffee/20 shadow-md">
       {/* Brand Section */}
       <div className="flex items-center gap-3 cursor-pointer" onClick={handleLogoClick}>
-        <svg className="w-8 h-8 fill-gold animate-bounce" viewBox="0 0 24 24">
-          <path d="M2 21h18v-2H2v2zM20 8h-2V5h2V2h-2v3H4v8c0 3.31 2.69 6 6 6h4c3.31 0 6-2.69 6-6v-3h2c1.1 0 2-.9 2-2V9c0-1.1-.9-2-2-2zm-2 5c0 2.21-1.79 4-4 4h-4c-2.21 0-4-1.79-4-4V7h12v6zm2-3h-2V9h2v1z" />
-        </svg>
-        <span className="font-sans font-extrabold text-2xl tracking-wider uppercase text-gold">Caffix</span>
+        <img 
+          src="/assets/logo.png" 
+          alt="Caffix Logo" 
+          className="h-10 w-auto object-contain rounded-xl bg-white shadow-inner p-0.5 animate-bounce" 
+        />
       </div>
 
       {/* Clock & Status */}

@@ -1,5 +1,4 @@
 import React, { useEffect, useRef } from 'react';
-import { Coffee } from 'lucide-react';
 
 export default function WelcomeScreen({ onStart, onAdminAccess }) {
   const canvasRef = useRef(null);
@@ -113,14 +112,13 @@ export default function WelcomeScreen({ onStart, onAdminAccess }) {
       <div className="absolute -bottom-32 -right-32 w-80 h-80 bg-gold/10 rounded-full blur-3xl pointer-events-none" />
 
       {/* Brand & Logo Section */}
-      <div className="z-10 flex flex-col items-center text-center mt-6 cursor-pointer" onClick={handleLogoClick}>
-        <div className="bg-coffee-dark p-4 rounded-full shadow-lg border-2 border-gold/40 mb-4 animate-status-pulse">
-          <Coffee className="w-16 h-16 text-gold" />
-        </div>
-        <h1 className="font-sans font-extrabold text-5xl tracking-widest text-coffee-dark mb-2">
-          CAFFIX
-        </h1>
-        <p className="text-coffee-light font-medium tracking-wide text-lg max-w-sm">
+      <div className="z-10 flex flex-col items-center text-center mt-6 cursor-pointer animate-status-pulse" onClick={handleLogoClick}>
+        <img 
+          src="/assets/logo.png" 
+          alt="CAFFIX Brand Logo" 
+          className="w-56 h-auto object-contain rounded-3xl shadow-xl border-2 border-gold/30 mb-4 bg-white" 
+        />
+        <p className="text-coffee-light font-medium tracking-wide text-lg max-w-sm mt-2">
           Stay Caffeinated!
         </p>
       </div>
