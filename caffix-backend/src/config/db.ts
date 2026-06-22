@@ -329,6 +329,13 @@ export async function initDB(): Promise<any> {
   // Seed default data if empty
   await seedData();
 
+  // Ensure default products are set to 100
+  try {
+    await db.run('UPDATE products SET price = 100 WHERE id IN (1, 2, 3)');
+  } catch (err) {
+    console.error('Failed to update product prices to 100:', err);
+  }
+
   return db;
 }
 
