@@ -1,6 +1,9 @@
 {
   "name": "caffix-monorepo",
   "private": true,
+  "engines": {
+    "node": "20.x"
+  },
   "workspaces": [
     "caffix-app",
     "caffix-backend"
