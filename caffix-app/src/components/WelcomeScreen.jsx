@@ -113,10 +113,10 @@ export default function WelcomeScreen({ onStart, onAdminAccess }) {
 
       {/* Brand & Logo Section */}
       <div className="z-10 flex flex-col items-center text-center mt-6 cursor-pointer animate-status-pulse" onClick={handleLogoClick}>
-        <img 
-          src="/assets/logo.png" 
-          alt="CAFFIX Brand Logo" 
-          className="w-56 h-auto object-contain rounded-3xl shadow-xl border-2 border-gold/30 mb-4 bg-white" 
+        <img
+          src="/assets/logo.png"
+          alt="CAFFIX Brand Logo"
+          className="w-56 h-auto object-contain rounded-3xl shadow-xl border-2 border-gold/30 mb-4 bg-white"
         />
         <p className="text-coffee-light font-medium tracking-wide text-lg max-w-sm mt-2">
           Stay Caffeinated!
@@ -129,7 +129,7 @@ export default function WelcomeScreen({ onStart, onAdminAccess }) {
           onClick={onStart}
           className="w-full py-5 bg-coffee text-cream-light font-sans font-bold text-2xl rounded-2xl shadow-xl hover:bg-coffee-dark border-2 border-gold/30 transition-all duration-300 transform active:scale-95 flex items-center justify-center gap-3 active-touch-feedback"
         >
-          <span>Start Order</span>
+          <span>Select Caffix</span>
           <svg className="w-6 h-6 stroke-cream-light fill-none stroke-[2.5]" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
           </svg>
