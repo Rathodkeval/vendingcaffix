@@ -234,10 +234,20 @@ export async function executeOrderStatusUpdate(id: string, status: string): Prom
     WHERE o.id = ?
   `, [id]);
 
-  if (updatedOrder) {
-    // Sync status updates to Firebase asynchronously
-    syncOrderToFirebase(updatedOrder);
+if (updatedOrder) {
+
+  // If payment is completed and machine_status is not set,
+  // mark it as PENDING for the vending machine.
+  if (
+    updatedOrder.status === "COMPLETED" &&
+    !updatedOrder.machine_status
+  ) {
+    updatedOrder.machine_status = "PENDING";
   }
+
+  // Sync status updates to Firebase
+  syncOrderToFirebase(updatedOrder);
+}
 
   return updatedOrder;
 }
