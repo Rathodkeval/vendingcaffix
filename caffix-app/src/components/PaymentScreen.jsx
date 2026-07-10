@@ -200,7 +200,7 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
             <div className="bg-cream-light/40 rounded-xl p-3 border border-cream space-y-1.5 shadow-inner">
               <span className="text-[10px] uppercase font-black text-coffee-light/85 tracking-widest block">Selected Drink</span>
               <div className="text-sm font-extrabold text-coffee-dark leading-snug">{orderDetails?.name}</div>
-              <div className="text-xs text-coffee-light">Size: {orderDetails?.size}</div>
+              <div className="text-xs text-coffee-light">Cup Size: Standard</div>
               <div className="flex justify-between items-center pt-2 border-t border-cream-dark/30 mt-2 font-bold text-sm text-coffee">
                 <span>Amount Due:</span>
                 <span className="text-lg text-coffee-dark font-black">₹{orderDetails?.price}</span>

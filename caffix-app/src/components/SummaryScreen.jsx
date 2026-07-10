@@ -2,18 +2,12 @@ import React, { useState } from 'react';
 import { ArrowLeft, Check } from 'lucide-react';
 
 export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
-  const [size, setSize] = useState('Medium');
-  const [sugar, setSugar] = useState('Medium');
-  const [strength, setStrength] = useState('Regular');
-  const [extraFoam, setExtraFoam] = useState(false);
+  const size = 'Medium';
+  const [extraSugar, setExtraSugar] = useState(false);
 
   // Price calculations based on sizes
   const getPrice = () => {
-    let basePrice = selectedCoffee.price;
-    if (size === 'Small') basePrice -= 5;
-    if (size === 'Large') basePrice += 10;
-    if (extraFoam) basePrice += 5;
-    return basePrice;
+    return selectedCoffee.price;
   };
 
   const currentPrice = getPrice();
@@ -60,83 +54,33 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
               Specifications
             </span>
             <div className="text-[11px] text-coffee font-semibold mt-0.5 space-y-0.5">
-              <div>Size: <span className="text-gold-dark">{size}</span></div>
-              <div>Sugar: <span className="text-gold-dark">{sugar}</span></div>
-              <div>Strength: <span className="text-gold-dark">{strength}</span></div>
+              <div>Cup Size: <span className="text-gold-dark">Standard</span></div>
+              <div>Sugar: <span className="text-gold-dark">{extraSugar ? 'Extra Sugar' : 'Standard'}</span></div>
             </div>
           </div>
         </div>
 
         {/* Right Panel: Interactive Customizers */}
         <div className="col-span-3 bg-white rounded-2xl border border-coffee-light/10 p-3 flex flex-col justify-between shadow-sm">
-          <div className="space-y-2">
-            {/* Cup Size */}
-            <div>
-              <span className="text-[11px] font-bold uppercase tracking-wider text-coffee-light">Cup Size</span>
-              <div className="grid grid-cols-3 gap-1.5 mt-1">
-                {['Small', 'Medium', 'Large'].map((s) => (
-                  <button
-                    key={s}
-                    onClick={() => setSize(s)}
-                    className={`py-1 px-2 text-xs font-bold rounded-xl transition-all border ${
-                      size === s
-                        ? 'bg-coffee text-cream-light border-coffee shadow-sm'
-                        : 'bg-cream-light/35 text-coffee-light border-coffee-light/10 hover:bg-cream-dark'
-                    }`}
-                  >
-                    {s} {s === 'Small' ? '-₹5' : s === 'Large' ? '+₹10' : ''}
-                  </button>
-                ))}
-              </div>
+          <div className="space-y-4">
+            {/* Standard Recipe Message */}
+            <div className="bg-cream-light/20 border border-coffee-light/5 p-3.5 rounded-xl">
+              <h4 className="text-xs font-bold text-coffee-dark uppercase tracking-wider">Caffix Recipe Standard</h4>
+              <p className="text-[11px] text-coffee-light mt-1 leading-relaxed">
+                This vending machine prepares beverages using a balanced recipe with standard water, milk, and coffee strength, dispensed in a standard cup.
+              </p>
             </div>
 
-            {/* Sugar Level */}
-            <div>
-              <span className="text-[11px] font-bold uppercase tracking-wider text-coffee-light">Sugar Level</span>
-              <div className="grid grid-cols-3 gap-1.5 mt-1">
-                {['Low', 'Medium', 'High'].map((s) => (
-                  <button
-                    key={s}
-                    onClick={() => setSugar(s)}
-                    className={`py-1 px-2 text-xs font-bold rounded-xl transition-all border ${
-                      sugar === s
-                        ? 'bg-coffee text-cream-light border-coffee shadow-sm'
-                        : 'bg-cream-light/35 text-coffee-light border-coffee-light/10 hover:bg-cream-dark'
-                    }`}
-                  >
-                    {s}
-                  </button>
-                ))}
+            {/* Extra Sugar Toggle */}
+            <div className="flex justify-between items-center bg-cream-light/30 p-2 rounded-xl border border-cream hover:bg-cream-light/40 transition-colors">
+              <div className="flex flex-col">
+                <span className="text-xs font-bold text-coffee">Extra Sugar</span>
+                <span className="text-[10px] text-coffee-light/75">Add sweetness to your drink</span>
               </div>
-            </div>
-
-            {/* Coffee Strength */}
-            <div>
-              <span className="text-[11px] font-bold uppercase tracking-wider text-coffee-light">Coffee Strength</span>
-              <div className="grid grid-cols-3 gap-1.5 mt-1">
-                {['Mild', 'Regular', 'Strong'].map((s) => (
-                  <button
-                    key={s}
-                    onClick={() => setStrength(s)}
-                    className={`py-1 px-2 text-xs font-bold rounded-xl transition-all border ${
-                      strength === s
-                        ? 'bg-coffee text-cream-light border-coffee shadow-sm'
-                        : 'bg-cream-light/35 text-coffee-light border-coffee-light/10 hover:bg-cream-dark'
-                    }`}
-                  >
-                    {s}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Extra Foam Toggle */}
-            <div className="flex justify-between items-center bg-cream-light/30 p-1.5 rounded-xl border border-cream">
-              <span className="text-xs font-bold text-coffee">Extra Creamy Foam (+₹5)</span>
               <button
-                onClick={() => setExtraFoam(!extraFoam)}
+                onClick={() => setExtraSugar(!extraSugar)}
                 className={`w-10 h-6 flex items-center rounded-full p-0.5 cursor-pointer transition-all duration-300 border ${
-                  extraFoam ? 'bg-coffee border-coffee justify-end' : 'bg-cream-dark border-coffee-light/15 justify-start'
+                  extraSugar ? 'bg-coffee border-coffee justify-end' : 'bg-cream-dark border-coffee-light/15 justify-start'
                 }`}
               >
                 <span className="w-5 h-5 rounded-full bg-white shadow-md block" />
@@ -151,7 +95,7 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
               <div className="text-2xl font-black text-coffee-dark leading-none mt-0.5">₹{currentPrice}</div>
             </div>
             <button
-              onClick={() => onConfirm({ name: selectedCoffee.name, size, price: currentPrice })}
+              onClick={() => onConfirm({ name: selectedCoffee.name, size, price: currentPrice, extraSugar })}
               className="py-2.5 px-6 bg-emerald-700 hover:bg-emerald-800 text-cream-light font-bold text-sm rounded-xl shadow-md transition-all flex items-center gap-2 active:scale-95 active-touch-feedback"
             >
               <Check className="w-4 h-4" />
