@@ -116,7 +116,7 @@ export default function WelcomeScreen({ onStart, onAdminAccess }) {
         <img
           src="/assets/logo.png"
           alt="CAFFIX Brand Logo"
-          className="w-56 h-auto object-contain rounded-3xl shadow-xl border-2 border-gold/30 mb-4 bg-white"
+          className="w-72 h-auto object-contain rounded-none shadow-xl border-2 border-gold/30 mb-4 bg-white"
         />
         <p className="text-coffee-light font-medium tracking-wide text-lg max-w-sm mt-2">
           Stay Caffeinated!
@@ -130,7 +130,7 @@ export default function WelcomeScreen({ onStart, onAdminAccess }) {
           className="w-full py-5 bg-coffee text-cream-light font-sans font-bold text-2xl rounded-2xl shadow-xl hover:bg-coffee-dark border-2 border-gold/30 transition-all duration-300 transform active:scale-95 flex items-center justify-center gap-3 active-touch-feedback"
         >
           <span>Select Caffix</span>
-          <svg className="w-6 h-6 stroke-cream-light fill-none stroke-[2.5]" viewBox="0 0 24 24">
+          <svg className="w-8 h-8 stroke-cream-light fill-none stroke-[2.5]" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
           </svg>
         </button>
