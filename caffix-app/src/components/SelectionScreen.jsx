@@ -7,27 +7,21 @@ const COFFEES = [
     name: 'Classic Coffee',
     desc: 'Rich and authentic coffee experience made from premium Arabica beans.',
     price: 100,
-    image: '/assets/classic_coffee.png',
-    badge: 'Best Seller',
-    badgeColor: 'bg-gold/90 text-coffee-dark border border-gold-dark/20'
+    image: '/assets/classic_coffee.png'
   },
   {
     id: 'vanilla',
     name: 'Vanilla Coffee',
     desc: 'Smooth coffee blended with sweet vanilla notes for a creamy, comforting taste.',
     price: 100,
-    image: '/assets/vanilla_coffee.png',
-    badge: 'Creamy & Sweet',
-    badgeColor: 'bg-coffee-light/80 text-cream-light border border-coffee-light/20'
+    image: '/assets/vanilla_coffee.png'
   },
   {
     id: 'hazelnut',
     name: 'Hazelnut Coffee',
     desc: 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.',
     price: 100,
-    image: '/assets/hazelnut_coffee.png',
-    badge: 'Rich & Nutty',
-    badgeColor: 'bg-[#805A3B] text-cream-light border border-[#805A3B]/20'
+    image: '/assets/hazelnut_coffee.png'
   }
 ];
 
@@ -66,10 +60,7 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
             onClick={() => onSelect(coffee)}
             className="flex flex-col justify-between bg-white rounded-2xl border border-coffee-light/10 shadow-sm overflow-hidden transform transition-all duration-300 hover:shadow-md active:scale-[0.98] cursor-pointer group active-touch-feedback relative"
           >
-            {/* Badge Overlay */}
-            <div className={`absolute top-2 left-2 z-10 px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wider uppercase shadow-sm ${coffee.badgeColor}`}>
-              {coffee.badge}
-            </div>
+
 
             {/* Coffee Image Section */}
             <div className="relative h-[120px] bg-cream/30 overflow-hidden flex items-center justify-center">
