@@ -234,10 +234,10 @@ export async function executeOrderStatusUpdate(id: string, status: string): Prom
     WHERE o.id = ?
   `, [id]);
 
-  if (updatedOrder) {
-    // Sync status updates to Firebase asynchronously
-    syncOrderToFirebase(updatedOrder);
-  }
+if (updatedOrder) {
+  // Sync status updates to Firebase asynchronously
+  syncOrderToFirebase(updatedOrder);
+}
 
   return updatedOrder;
 }
