@@ -7,7 +7,9 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
 
   // Price calculations based on sizes
   const getPrice = () => {
-    return selectedCoffee.price;
+    let basePrice = selectedCoffee.price;
+    if (extraSugar) basePrice += 5;
+    return basePrice;
   };
 
   const currentPrice = getPrice();
@@ -74,7 +76,7 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
             {/* Extra Sugar Toggle */}
             <div className="flex justify-between items-center bg-cream-light/30 p-2 rounded-xl border border-cream hover:bg-cream-light/40 transition-colors">
               <div className="flex flex-col">
-                <span className="text-xs font-bold text-coffee">Extra Sugar</span>
+                <span className="text-xs font-bold text-coffee">Extra Sugar (+₹5)</span>
                 <span className="text-[10px] text-coffee-light/75">Add sweetness to your drink</span>
               </div>
               <button
