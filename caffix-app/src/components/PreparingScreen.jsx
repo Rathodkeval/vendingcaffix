@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Thermometer, Gauge, Check } from 'lucide-react';
+import { Check } from 'lucide-react';
 
 // Web Audio API Kiosk Sound Synthesizer Class
 class BrewingAudioController {
@@ -804,33 +804,8 @@ export default function PreparingScreen({ onComplete }) {
               />
             </div>
 
-            {/* Diagnostic Telemetry gauges */}
-            <div className="flex justify-center gap-6 mt-4.5">
-              <div className="flex items-center gap-2 bg-slate-50 px-3.5 py-1.5 rounded-xl border border-coffee-light/10 shadow-sm min-w-[100px]">
-                <Thermometer className="w-4 h-4 text-orange-500" />
-                <div className="text-left leading-none">
-                  <span className="text-[9px] uppercase font-bold text-coffee-light block">Temperature</span>
-                  <span className="font-mono text-xs font-bold text-coffee-dark">{activeStep.temp}</span>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2 bg-slate-50 px-3.5 py-1.5 rounded-xl border border-coffee-light/10 shadow-sm min-w-[100px]">
-                <Gauge className="w-4 h-4 text-blue-500" />
-                <div className="text-left leading-none">
-                  <span className="text-[9px] uppercase font-bold text-coffee-light block">Pressure</span>
-                  <span className="font-mono text-xs font-bold text-coffee-dark">{activeStep.press}</span>
-                </div>
-              </div>
-            </div>
           </>
         )}
-      </div>
-
-      {/* Dynamic Safety / Completion cautions */}
-      <div className={`text-center text-[10px] font-bold uppercase tracking-wider transition-colors duration-500 ${progress === 100 ? 'text-red-600 font-extrabold animate-pulse' : 'text-red-700/60'}`}>
-        {progress === 100 
-          ? '⚠ CAUTION: HOT BEVERAGE DISPENSING. PLEASE TAKE YOUR CUP CAREFULLY.' 
-          : '⚠ CAUTION: Hot beverage dispensing. Keep hands away from cup tray.'}
       </div>
     </div>
   );
