@@ -33,6 +33,7 @@ html, body, #root {
   overflow: hidden;
   font-family: 'Inter', sans-serif;
   background-color: #FAF6F0;
+  touch-action: none;
 }
 
 /* Touch optimization */
