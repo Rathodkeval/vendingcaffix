@@ -1,5 +1,21 @@
 @import "tailwindcss";
 
+@theme {
+  --color-cream-light: #FAF6F0;
+  --color-cream-DEFAULT: #F5E6D3;
+  --color-cream-dark: #EED9C4;
+  --color-coffee-light: #8C6246;
+  --color-coffee-DEFAULT: #4E3629;
+  --color-coffee: #4E3629;
+  --color-coffee-dark: #2C1E17;
+  --color-gold-light: #DCC39A;
+  --color-gold-DEFAULT: #C9A66B;
+  --color-gold: #C9A66B;
+  --color-gold-dark: #B08E55;
+  --color-success: #2E7D32;
+  --font-sans: "Outfit", "Inter", sans-serif;
+}
+
 /* Disable Scrollbars entirely for kiosk look */
 ::-webkit-scrollbar {
   display: none;

@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import { ArrowLeft, Check } from 'lucide-react';
+import { ArrowLeft, Check, Droplet, Milk } from 'lucide-react';
 
 export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
   const size = 'Medium';
   const [extraSugar, setExtraSugar] = useState(false);
+  const [base, setBase] = useState('water');
 
   // Price calculations based on sizes
   const getPrice = () => {
@@ -58,6 +59,7 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
             <div className="text-[11px] text-coffee font-semibold mt-0.5 space-y-0.5">
               <div>Cup Size: <span className="text-gold-dark">Standard</span></div>
               <div>Sugar: <span className="text-gold-dark">{extraSugar ? 'Extra Sugar' : 'Standard'}</span></div>
+              <div>Base: <span className="text-gold-dark">{base === 'water' ? 'Water' : 'Milk'}</span></div>
             </div>
           </div>
         </div>
@@ -82,22 +84,82 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
               <button
                 onClick={() => setExtraSugar(!extraSugar)}
                 className={`w-10 h-6 flex items-center rounded-full p-0.5 cursor-pointer transition-all duration-300 border ${
-                  extraSugar ? 'bg-coffee border-coffee justify-end' : 'bg-cream-dark border-coffee-light/15 justify-start'
+                  extraSugar ? 'bg-coffee-dark border-coffee-dark justify-end' : 'bg-cream-dark border-coffee-light/15 justify-start'
                 }`}
               >
                 <span className="w-5 h-5 rounded-full bg-white shadow-md block" />
               </button>
             </div>
+
+            {/* Choose Your Base */}
+            <div className="border-t border-cream pt-3">
+              <h4 className="text-xs font-extrabold text-coffee-dark uppercase tracking-wider mb-0.5">Choose Your Base</h4>
+              <p className="text-[10px] text-coffee-light/80 font-medium mb-3">
+                Select either water or milk. You can choose only one.
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                {/* Water Card */}
+                <button
+                  onClick={() => setBase('water')}
+                  className={`flex flex-col items-center justify-center py-3.5 px-4 rounded-2xl border-2 transition-all duration-300 cursor-pointer ${
+                    base === 'water'
+                      ? 'bg-coffee-dark border-coffee-dark text-cream-light shadow-md'
+                      : 'bg-cream-light/30 border-cream hover:bg-cream-light/50 text-coffee-dark'
+                  }`}
+                >
+                  <div
+                    className={`w-11 h-11 rounded-full flex items-center justify-center mb-2.5 transition-all duration-300 ${
+                      base === 'water'
+                        ? 'bg-white text-coffee-dark shadow-sm'
+                        : 'border border-coffee-light/35 bg-transparent text-coffee-dark'
+                    }`}
+                  >
+                    <Droplet className="w-5.5 h-5.5" />
+                  </div>
+                  <span className="text-[11px] font-extrabold tracking-tight">Go Strong with Water</span>
+                </button>
+
+                {/* Milk Card */}
+                <button
+                  onClick={() => setBase('milk')}
+                  className={`flex flex-col items-center justify-center py-3.5 px-4 rounded-2xl border-2 transition-all duration-300 cursor-pointer ${
+                    base === 'milk'
+                      ? 'bg-coffee-dark border-coffee-dark text-cream-light shadow-md'
+                      : 'bg-cream-light/30 border-cream hover:bg-cream-light/50 text-coffee-dark'
+                  }`}
+                >
+                  <div
+                    className={`w-11 h-11 rounded-full flex items-center justify-center mb-2.5 transition-all duration-300 ${
+                      base === 'milk'
+                        ? 'bg-white text-coffee-dark shadow-sm'
+                        : 'border border-coffee-light/35 bg-transparent text-coffee-dark'
+                    }`}
+                  >
+                    <Milk className="w-5.5 h-5.5" />
+                  </div>
+                  <span className="text-[11px] font-extrabold tracking-tight">Go Creamy with MILK</span>
+                </button>
+              </div>
+            </div>
           </div>
 
           {/* Pricing & Checkout Block */}
           <div className="flex items-center justify-between border-t border-cream pt-2 mt-2">
-            <div>
-              <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wide">Total Amount</span>
-              <div className="text-2xl font-black text-coffee-dark leading-none mt-0.5">₹{currentPrice}</div>
+            <div className="flex items-center gap-3">
+              <div>
+                <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wide">Total Amount</span>
+                <div className="text-2xl font-black text-coffee-dark leading-none mt-0.5">₹{currentPrice}</div>
+              </div>
+              <span className={`text-[10px] font-bold px-2 py-1 rounded-md transition-all duration-300 border ${
+                extraSugar 
+                  ? 'bg-coffee-dark border-coffee-dark text-white' 
+                  : 'bg-cream-dark/45 border-coffee-light/15 text-coffee'
+              }`}>
+                {extraSugar ? 'Extra Sugar: +₹5 active' : 'Extra Sugar: +₹5 when enabled'}
+              </span>
             </div>
             <button
-              onClick={() => onConfirm({ name: selectedCoffee.name, size, price: currentPrice, extraSugar })}
+              onClick={() => onConfirm({ name: selectedCoffee.name, size, price: currentPrice, extraSugar, base })}
               className="py-2.5 px-6 bg-emerald-700 hover:bg-emerald-800 text-cream-light font-bold text-sm rounded-xl shadow-md transition-all flex items-center gap-2 active:scale-95 active-touch-feedback"
             >
               <Check className="w-4 h-4" />
