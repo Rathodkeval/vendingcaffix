@@ -126,7 +126,7 @@ class MockDatabase {
     const query = sql.toLowerCase();
     
     if (query.includes('insert into orders')) {
-      const [id, product_id, amount, status, machine_id, created_at, razorpay_order_id] = params;
+      const [id, product_id, amount, status, machine_id, created_at, razorpay_order_id, extra_sugar, base] = params;
       const newOrder = {
         id,
         product_id,
@@ -136,7 +136,9 @@ class MockDatabase {
         created_at,
         razorpay_order_id,
         razorpay_payment_id: null,
-        razorpay_signature: null
+        razorpay_signature: null,
+        extra_sugar: extra_sugar ?? 0,
+        base: base ?? 'water'
       };
       mockStore.orders.push(newOrder);
       return { lastID: id };
@@ -306,6 +308,8 @@ export async function initDB(): Promise<any> {
       razorpay_order_id TEXT,
       razorpay_payment_id TEXT,
       razorpay_signature TEXT,
+      extra_sugar INTEGER DEFAULT 0,
+      base TEXT DEFAULT 'water',
       FOREIGN KEY (product_id) REFERENCES products(id),
       FOREIGN KEY (machine_id) REFERENCES machines(id)
     )
@@ -320,6 +324,18 @@ export async function initDB(): Promise<any> {
         ALTER TABLE orders ADD COLUMN razorpay_order_id TEXT;
         ALTER TABLE orders ADD COLUMN razorpay_payment_id TEXT;
         ALTER TABLE orders ADD COLUMN razorpay_signature TEXT;
+      `);
+    }
+    const hasExtraSugar = tableInfo.some((col: any) => col.name === 'extra_sugar');
+    if (!hasExtraSugar) {
+      await db.exec(`
+        ALTER TABLE orders ADD COLUMN extra_sugar INTEGER DEFAULT 0;
+      `);
+    }
+    const hasBase = tableInfo.some((col: any) => col.name === 'base');
+    if (!hasBase) {
+      await db.exec(`
+        ALTER TABLE orders ADD COLUMN base TEXT DEFAULT 'water';
       `);
     }
   } catch (err) {

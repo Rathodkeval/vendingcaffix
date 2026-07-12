@@ -10,7 +10,9 @@ const createOrderSchema = z.object({
   body: z.object({
     product_id: z.number().int().positive('Product ID must be a positive integer'),
     amount: z.number().int().positive('Amount must be a positive integer').optional(),
-    machine_id: z.string().min(3, 'Machine ID is required')
+    machine_id: z.string().min(3, 'Machine ID is required'),
+    extra_sugar: z.boolean().optional(),
+    base: z.string().optional()
   })
 });
 

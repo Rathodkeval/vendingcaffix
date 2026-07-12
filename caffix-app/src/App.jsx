@@ -143,7 +143,9 @@ export default function App() {
         body: JSON.stringify({
           product_id: idMap[selectedCoffee.id],
           amount: details.price,
-          machine_id: 'CFX-MC-01'
+          machine_id: 'CFX-MC-01',
+          extra_sugar: details.extraSugar,
+          base: details.base
         })
       });
       
