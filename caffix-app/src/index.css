@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+html {
+  zoom: 1.25;
+}
+
 @theme {
   --color-cream-light: #FAF6F0;
   --color-cream-DEFAULT: #F5E6D3;
