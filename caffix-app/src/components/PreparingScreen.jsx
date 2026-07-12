@@ -394,10 +394,7 @@ export default function PreparingScreen({ onComplete }) {
   // 4. Auto transition redirect timer
   useEffect(() => {
     if (progress === 100) {
-      const autoRedirect = setTimeout(() => {
-        onComplete();
-      }, 5000); // 5 seconds hold on completed screen
-      return () => clearTimeout(autoRedirect);
+      onComplete();
     }
   }, [progress, onComplete]);
 
@@ -789,10 +786,8 @@ export default function PreparingScreen({ onComplete }) {
             </button>
           </div>
         ) : (
-          // Active progress & telemetry status cards
           <>
-            <div className="flex justify-between items-center text-xs font-bold text-coffee-dark mb-1.5">
-              <span className="text-[11px] font-sans tracking-tight">{activeStep.text}</span>
+            <div className="flex justify-end items-center text-xs font-bold text-coffee-dark mb-1.5">
               <span className="font-mono">{progress}%</span>
             </div>
             
@@ -803,7 +798,6 @@ export default function PreparingScreen({ onComplete }) {
                 style={{ width: `${progress}%` }}
               />
             </div>
-
           </>
         )}
       </div>
