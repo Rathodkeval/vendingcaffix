@@ -4,7 +4,6 @@ import WelcomeScreen from './components/WelcomeScreen';
 import SelectionScreen from './components/SelectionScreen';
 import SummaryScreen from './components/SummaryScreen';
 import PaymentScreen from './components/PaymentScreen';
-import PreparingScreen from './components/PreparingScreen';
 import SuccessScreen from './components/SuccessScreen';
 import AdminPasscode from './components/AdminPasscode';
 import AdminDashboard from './components/AdminDashboard';
@@ -167,23 +166,6 @@ export default function App() {
   };
 
   const handlePaymentSuccess = async () => {
-    const token = localStorage.getItem('kioskToken') || '';
-    try {
-      await fetch(`${API_BASE}/orders/${orderDetails.dbId}/status`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ status: 'PAID' })
-      });
-      setScreen('PREPARING');
-    } catch (e) {
-      console.error('Update status to PAID failed:', e);
-    }
-  };
-
-  const handleBrewComplete = async () => {
     const token = localStorage.getItem('kioskToken') || '';
     try {
       await fetch(`${API_BASE}/orders/${orderDetails.dbId}/status`, {
@@ -416,9 +398,7 @@ export default function App() {
                 onCancel={handleCancelOrder}
               />
             )}
-            {screen === 'PREPARING' && (
-              <PreparingScreen onComplete={handleBrewComplete} />
-            )}
+
             {screen === 'SUCCESS' && (
               <SuccessScreen onFinished={handleFinishOrder} />
             )}
