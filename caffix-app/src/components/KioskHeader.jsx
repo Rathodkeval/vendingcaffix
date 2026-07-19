@@ -39,7 +39,7 @@ export default function KioskHeader({ onAdminAccess }) {
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
         <span 
           style={{ fontFamily: "'Playfair Display', serif" }}
-          className="italic text-2xl font-bold tracking-wider text-[#FAF6F0] bg-[#FAF6F0]/10 px-8 py-2 rounded-full border border-[#FAF6F0]/25 shadow-inner"
+          className="italic text-3xl font-extrabold tracking-wider text-[#FAF6F0]"
         >
           Your AI Barista
         </span>
