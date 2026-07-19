@@ -34,14 +34,18 @@ export default function AdminDashboard({
   const [tempPrices, setTempPrices] = useState({
     classic: prices.classic === 100 || !prices.classic ? 100 : prices.classic,
     vanilla: prices.vanilla === 100 || !prices.vanilla ? 100 : prices.vanilla,
-    hazelnut: prices.hazelnut === 100 || !prices.hazelnut ? 100 : prices.hazelnut
+    hazelnut: prices.hazelnut === 100 || !prices.hazelnut ? 100 : prices.hazelnut,
+    irish: prices.irish === 100 || !prices.irish ? 100 : prices.irish,
+    mocha: prices.mocha === 100 || !prices.mocha ? 100 : prices.mocha
   });
 
   useEffect(() => {
     setTempPrices({
       classic: prices.classic === 100 || !prices.classic ? 100 : prices.classic,
       vanilla: prices.vanilla === 100 || !prices.vanilla ? 100 : prices.vanilla,
-      hazelnut: prices.hazelnut === 100 || !prices.hazelnut ? 100 : prices.hazelnut
+      hazelnut: prices.hazelnut === 100 || !prices.hazelnut ? 100 : prices.hazelnut,
+      irish: prices.irish === 100 || !prices.irish ? 100 : prices.irish,
+      mocha: prices.mocha === 100 || !prices.mocha ? 100 : prices.mocha
     });
   }, [prices]);
 
@@ -85,9 +89,11 @@ export default function AdminDashboard({
   ];
 
   const bestSellers = [
-    { name: 'Classic Coffee', sales: 68, percentage: 48, color: 'bg-coffee' },
-    { name: 'Vanilla Coffee', sales: 42, percentage: 30, color: 'bg-coffee-light' },
-    { name: 'Hazelnut Coffee', sales: 31, percentage: 22, color: 'bg-gold' }
+    { name: 'Classic Coffee', sales: 68, percentage: 35, color: 'bg-coffee' },
+    { name: 'Vanilla Coffee', sales: 42, percentage: 22, color: 'bg-coffee-light' },
+    { name: 'Hazelnut Coffee', sales: 31, percentage: 16, color: 'bg-gold' },
+    { name: 'Irish Coffee', sales: 25, percentage: 13, color: 'bg-emerald-600' },
+    { name: 'Mocha Coffee', sales: 28, percentage: 14, color: 'bg-amber-900' }
   ];
 
   // Calculated Stats based on order history
@@ -225,7 +231,9 @@ export default function AdminDashboard({
                       { label: 'Milk Level', value: inventory.coffee, color: 'bg-amber-800' },
                       { label: 'Classic Coffee', value: inventory.milk, color: 'bg-orange-400' },
                       { label: 'Vanilla Coffee', value: inventory.vanilla, color: 'bg-yellow-400' },
-                      { label: 'Hazelnut Coffee', value: inventory.hazelnut, color: 'bg-amber-600' }
+                      { label: 'Hazelnut Coffee', value: inventory.hazelnut, color: 'bg-amber-600' },
+                      { label: 'Irish Coffee', value: inventory.irish, color: 'bg-emerald-600' },
+                      { label: 'Mocha Coffee', value: inventory.mocha, color: 'bg-amber-900' }
                     ].map((item, idx) => (
                       <div key={idx} className="space-y-1">
                         <div className="flex justify-between text-xs font-semibold">
@@ -291,7 +299,9 @@ export default function AdminDashboard({
                   { key: 'coffee', label: 'Milk Level', icon: Coffee, value: inventory.coffee, color: 'bg-amber-800' },
                   { key: 'milk', label: 'Classic Coffee', icon: Activity, value: inventory.milk, color: 'bg-orange-400' },
                   { key: 'vanilla', label: 'Vanilla Coffee', icon: Layers, value: inventory.vanilla, color: 'bg-yellow-400' },
-                  { key: 'hazelnut', label: 'Hazelnut Coffee', icon: Layers, value: inventory.hazelnut, color: 'bg-amber-600' }
+                  { key: 'hazelnut', label: 'Hazelnut Coffee', icon: Layers, value: inventory.hazelnut, color: 'bg-amber-600' },
+                  { key: 'irish', label: 'Irish Coffee', icon: Layers, value: inventory.irish, color: 'bg-emerald-600' },
+                  { key: 'mocha', label: 'Mocha Coffee', icon: Layers, value: inventory.mocha, color: 'bg-amber-900' }
                 ].map((item) => {
                   const Icon = item.icon;
                   return (
@@ -608,6 +618,26 @@ export default function AdminDashboard({
                         type="number"
                         value={tempPrices.hazelnut === 100 || !tempPrices.hazelnut ? 100 : tempPrices.hazelnut}
                         onChange={(e) => setTempPrices({ ...tempPrices, hazelnut: parseInt(e.target.value) || 0 })}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-semibold focus:outline-none focus:border-coffee"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-slate-500 block mb-1">Irish Coffee Base Price (₹)</label>
+                      <input
+                        type="number"
+                        value={tempPrices.irish === 100 || !tempPrices.irish ? 100 : tempPrices.irish}
+                        onChange={(e) => setTempPrices({ ...tempPrices, irish: parseInt(e.target.value) || 0 })}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-semibold focus:outline-none focus:border-coffee"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-slate-500 block mb-1">Mocha Coffee Base Price (₹)</label>
+                      <input
+                        type="number"
+                        value={tempPrices.mocha === 100 || !tempPrices.mocha ? 100 : tempPrices.mocha}
+                        onChange={(e) => setTempPrices({ ...tempPrices, mocha: parseInt(e.target.value) || 0 })}
                         className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-semibold focus:outline-none focus:border-coffee"
                       />
                     </div>

@@ -41,7 +41,7 @@ export const registerMachine = async (
 
     // Create default full inventory for this machine
     await db.run(
-      'INSERT INTO inventory (machine_id, milk_level, coffee_level, vanilla_level, hazelnut_level, water_level) VALUES (?, 100, 100, 100, 100, 100)',
+      'INSERT INTO inventory (machine_id, milk_level, coffee_level, vanilla_level, hazelnut_level, irish_level, mocha_level, water_level) VALUES (?, 100, 100, 100, 100, 100, 100, 100)',
       [id]
     );
 
@@ -125,13 +125,13 @@ export const refillMachineInventory = async (
 
     if (ingredient === 'ALL') {
       await db.run(
-        'UPDATE inventory SET milk_level = 100, coffee_level = 100, vanilla_level = 100, hazelnut_level = 100, water_level = 100 WHERE machine_id = ?',
+        'UPDATE inventory SET milk_level = 100, coffee_level = 100, vanilla_level = 100, hazelnut_level = 100, irish_level = 100, mocha_level = 100, water_level = 100 WHERE machine_id = ?',
         [machine_id]
       );
     } else {
       const field = `${ingredient}_level`;
       // Protect against SQL injection by verifying column whitelist
-      const validIngredients = ['milk', 'coffee', 'vanilla', 'hazelnut', 'water'];
+      const validIngredients = ['milk', 'coffee', 'vanilla', 'hazelnut', 'irish', 'mocha', 'water'];
       if (!validIngredients.includes(ingredient)) {
         return next(new BadRequestError(`Invalid ingredient name: ${ingredient}`));
       }
@@ -183,6 +183,8 @@ export const getMachineStatus = async (
           coffee: inventory.coffee_level,
           vanilla: inventory.vanilla_level,
           hazelnut: inventory.hazelnut_level,
+          irish: inventory.irish_level,
+          mocha: inventory.mocha_level,
           water: inventory.water_level
         }
       }

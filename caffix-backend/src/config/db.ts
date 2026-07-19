@@ -23,13 +23,15 @@ const mockStore = {
   products: [
     { id: 1, name: 'Classic Coffee', price: 100, description: 'Rich and authentic coffee experience made from premium Arabica beans.', image: '/assets/classic_coffee.png' },
     { id: 2, name: 'Vanilla Coffee', price: 100, description: 'Smooth coffee blended with sweet vanilla notes for a creamy, comforting taste.', image: '/assets/vanilla_coffee.png' },
-    { id: 3, name: 'Hazelnut Coffee', price: 100, description: 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.', image: '/assets/hazelnut_coffee.png' }
+    { id: 3, name: 'Hazelnut Coffee', price: 100, description: 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.', image: '/assets/hazelnut_coffee.png' },
+    { id: 4, name: 'Irish Coffee', price: 100, description: 'Classic espresso combined with rich Irish cream flavor and velvety smooth milk.', image: '/assets/irish_coffee.png' },
+    { id: 5, name: 'Mocha Coffee', price: 100, description: 'Decadent chocolate syrup blended with robust espresso and creamy milk.', image: '/assets/mocha_coffee.png' }
   ],
   machines: [
     { id: 'CFX-MC-01', machine_name: 'Kiosk-One', location: 'Delhi Airport T3', status: 'online', last_seen: new Date().toISOString() }
   ],
   inventory: [
-    { id: 1, machine_id: 'CFX-MC-01', milk_level: 92, coffee_level: 78, vanilla_level: 65, hazelnut_level: 55, water_level: 85 }
+    { id: 1, machine_id: 'CFX-MC-01', milk_level: 92, coffee_level: 78, vanilla_level: 65, hazelnut_level: 55, irish_level: 60, mocha_level: 50, water_level: 85 }
   ],
   orders: [
     { id: 'CFX-4912', product_id: 1, amount: 100, status: 'COMPLETED', machine_id: 'CFX-MC-01', created_at: new Date().toISOString(), razorpay_order_id: null, razorpay_payment_id: null, razorpay_signature: null },
@@ -171,10 +173,12 @@ class MockDatabase {
           inv.coffee_level = 100;
           inv.vanilla_level = 100;
           inv.hazelnut_level = 100;
+          (inv as any).irish_level = 100;
+          (inv as any).mocha_level = 100;
           inv.water_level = 100;
         }
       } else if (query.includes('water_level = water_level - ?')) {
-        const [water, coffee, milk, vanilla, hazelnut, machineId] = params;
+        const [water, coffee, milk, vanilla, hazelnut, irish, mocha, machineId] = params;
         const inv = mockStore.inventory.find(i => i.machine_id === machineId);
         if (inv) {
           inv.water_level -= water;
@@ -182,6 +186,8 @@ class MockDatabase {
           inv.milk_level -= milk;
           inv.vanilla_level -= vanilla;
           inv.hazelnut_level -= hazelnut;
+          (inv as any).irish_level -= irish;
+          (inv as any).mocha_level -= mocha;
         }
       } else {
         const [machineId] = params;
@@ -223,7 +229,7 @@ class MockDatabase {
 
     if (query.includes('insert into inventory')) {
       const [machine_id] = params;
-      mockStore.inventory.push({ id: mockStore.inventory.length + 1, machine_id, milk_level: 100, coffee_level: 100, vanilla_level: 100, hazelnut_level: 100, water_level: 100 });
+      mockStore.inventory.push({ id: mockStore.inventory.length + 1, machine_id, milk_level: 100, coffee_level: 100, vanilla_level: 100, hazelnut_level: 100, irish_level: 100, mocha_level: 100, water_level: 100 });
       return { lastID: mockStore.inventory.length };
     }
     
@@ -291,6 +297,8 @@ export async function initDB(): Promise<any> {
       coffee_level INTEGER NOT NULL DEFAULT 100,
       vanilla_level INTEGER NOT NULL DEFAULT 100,
       hazelnut_level INTEGER NOT NULL DEFAULT 100,
+      irish_level INTEGER NOT NULL DEFAULT 100,
+      mocha_level INTEGER NOT NULL DEFAULT 100,
       water_level INTEGER NOT NULL DEFAULT 100,
       FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE
     )
@@ -342,12 +350,31 @@ export async function initDB(): Promise<any> {
     console.error('Database migration check failed:', err);
   }
 
+  // Run dynamic schema migration check for inventory table
+  try {
+    const invTableInfo = await db.all("PRAGMA table_info(inventory)");
+    const hasIrish = invTableInfo.some((col: any) => col.name === 'irish_level');
+    if (!hasIrish) {
+      await db.exec(`
+        ALTER TABLE inventory ADD COLUMN irish_level INTEGER NOT NULL DEFAULT 100;
+      `);
+    }
+    const hasMocha = invTableInfo.some((col: any) => col.name === 'mocha_level');
+    if (!hasMocha) {
+      await db.exec(`
+        ALTER TABLE inventory ADD COLUMN mocha_level INTEGER NOT NULL DEFAULT 100;
+      `);
+    }
+  } catch (err) {
+    console.error('Database migration check for inventory failed:', err);
+  }
+
   // Seed default data if empty
   await seedData();
 
   // Ensure default products are set to 100
   try {
-    await db.run('UPDATE products SET price = 100 WHERE id IN (1, 2, 3)');
+    await db.run('UPDATE products SET price = 100 WHERE id IN (1, 2, 3, 4, 5)');
   } catch (err) {
     console.error('Failed to update product prices to 100:', err);
   }
@@ -396,6 +423,23 @@ async function seedData() {
     );
   }
 
+  // Seed new products dynamically if they do not exist
+  const hasIrishProd = await db.get('SELECT id FROM products WHERE id = 4');
+  if (!hasIrishProd) {
+    await db.run(
+      'INSERT INTO products (id, name, price, description, image) VALUES (?, ?, ?, ?, ?)',
+      [4, 'Irish Coffee', 100, 'Classic espresso combined with rich Irish cream flavor and velvety smooth milk.', '/assets/irish_coffee.png']
+    );
+  }
+
+  const hasMochaProd = await db.get('SELECT id FROM products WHERE id = 5');
+  if (!hasMochaProd) {
+    await db.run(
+      'INSERT INTO products (id, name, price, description, image) VALUES (?, ?, ?, ?, ?)',
+      [5, 'Mocha Coffee', 100, 'Decadent chocolate syrup blended with robust espresso and creamy milk.', '/assets/mocha_coffee.png']
+    );
+  }
+
   // 3. Seed Machines
   const machineCount = await db.get('SELECT COUNT(*) as count FROM machines');
   if (machineCount && machineCount.count === 0) {
@@ -409,8 +453,8 @@ async function seedData() {
   const inventoryCount = await db.get('SELECT COUNT(*) as count FROM inventory');
   if (inventoryCount && inventoryCount.count === 0) {
     await db.run(
-      'INSERT INTO inventory (machine_id, milk_level, coffee_level, vanilla_level, hazelnut_level, water_level) VALUES (?, ?, ?, ?, ?, ?)',
-      ['CFX-MC-01', 92, 78, 65, 55, 85]
+      'INSERT INTO inventory (machine_id, milk_level, coffee_level, vanilla_level, hazelnut_level, irish_level, mocha_level, water_level) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      ['CFX-MC-01', 92, 78, 65, 55, 60, 50, 85]
     );
   }
 

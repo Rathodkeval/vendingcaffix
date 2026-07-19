@@ -22,10 +22,24 @@ const COFFEES = [
     desc: 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.',
     price: 100,
     image: '/assets/hazelnut_coffee.png'
+  },
+  {
+    id: 'irish',
+    name: 'Irish Coffee',
+    desc: 'Classic espresso combined with rich Irish cream flavor and velvety smooth milk.',
+    price: 100,
+    image: '/assets/irish_coffee.png'
+  },
+  {
+    id: 'mocha',
+    name: 'Mocha Coffee',
+    desc: 'Decadent chocolate syrup blended with robust espresso and creamy milk.',
+    price: 100,
+    image: '/assets/mocha_coffee.png'
   }
 ];
 
-export default function SelectionScreen({ onSelect, onBack, prices = { classic: 100, vanilla: 100, hazelnut: 100 } }) {
+export default function SelectionScreen({ onSelect, onBack, prices = { classic: 100, vanilla: 100, hazelnut: 100, irish: 100, mocha: 100 } }) {
   const coffeesWithPrices = COFFEES.map((c) => ({
     ...c,
     price: prices[c.id] ?? c.price
@@ -53,7 +67,7 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
       </div>
 
       {/* Coffee Cards Grid */}
-      <div className="grid grid-cols-3 gap-4 flex-grow items-stretch my-2">
+      <div className="grid grid-cols-3 gap-4 flex-grow items-stretch my-2 overflow-y-auto pr-1">
         {coffeesWithPrices.map((coffee) => (
           <div
             key={coffee.id}

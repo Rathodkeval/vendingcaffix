@@ -34,7 +34,7 @@ const refillSchema = z.object({
     machine_id: z.string()
   }),
   body: z.object({
-    ingredient: z.enum(['milk', 'coffee', 'vanilla', 'hazelnut', 'water', 'ALL'])
+    ingredient: z.enum(['milk', 'coffee', 'vanilla', 'hazelnut', 'irish', 'mocha', 'water', 'ALL'])
   })
 });
 

@@ -248,7 +248,7 @@ paths:
               properties:
                 ingredient:
                   type: string
-                  enum: [milk, coffee, vanilla, hazelnut, water, ALL]
+                  enum: [milk, coffee, vanilla, hazelnut, irish, mocha, water, ALL]
                   example: ALL
       responses:
         '200':

@@ -22,14 +22,16 @@ export default function App() {
   const [orderDetails, setOrderDetails] = useState(null);
   
   // Admin & Settings States
-  const [prices, setPrices] = useState({ classic: 100, vanilla: 100, hazelnut: 100 });
+  const [prices, setPrices] = useState({ classic: 100, vanilla: 100, hazelnut: 100, irish: 100, mocha: 100 });
   const [maintenanceMode, setMaintenanceMode] = useState(false);
   const [inventory, setInventory] = useState({
     water: 100,
     coffee: 100,
     milk: 100,
     vanilla: 100,
-    hazelnut: 100
+    hazelnut: 100,
+    irish: 100,
+    mocha: 100
   });
 
   // Orders Log history
@@ -48,6 +50,8 @@ export default function App() {
           if (p.id === 1) priceMap.classic = p.price;
           if (p.id === 2) priceMap.vanilla = p.price;
           if (p.id === 3) priceMap.hazelnut = p.price;
+          if (p.id === 4) priceMap.irish = p.price;
+          if (p.id === 5) priceMap.mocha = p.price;
         });
         setPrices(priceMap);
       }
@@ -65,7 +69,9 @@ export default function App() {
           coffee: m.inventory.coffee,
           milk: m.inventory.milk,
           vanilla: m.inventory.vanilla,
-          hazelnut: m.inventory.hazelnut
+          hazelnut: m.inventory.hazelnut,
+          irish: m.inventory.irish,
+          mocha: m.inventory.mocha
         });
       }
     } catch (error) {
@@ -83,7 +89,7 @@ export default function App() {
       if (ordersData.status === 'success') {
         const formatted = ordersData.data.map((o) => ({
           id: o.id,
-          name: o.product_name || (o.product_id === 1 ? 'Classic Coffee' : o.product_id === 2 ? 'Vanilla Coffee' : 'Hazelnut Coffee'),
+          name: o.product_name || (o.product_id === 1 ? 'Classic Coffee' : o.product_id === 2 ? 'Vanilla Coffee' : o.product_id === 3 ? 'Hazelnut Coffee' : o.product_id === 4 ? 'Irish Coffee' : 'Mocha Coffee'),
           size: 'Medium',
           price: o.amount,
           time: `${new Date(o.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}, ${new Date(o.created_at).toLocaleDateString()}`
@@ -130,7 +136,7 @@ export default function App() {
 
   const handleConfirmOrder = async (details) => {
     const token = localStorage.getItem('kioskToken') || '';
-    const idMap = { classic: 1, vanilla: 2, hazelnut: 3 };
+    const idMap = { classic: 1, vanilla: 2, hazelnut: 3, irish: 4, mocha: 5 };
     
     try {
       const res = await fetch(`${API_BASE}/orders/create`, {
@@ -262,6 +268,26 @@ export default function App() {
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({ price: tempPrices.hazelnut })
+      });
+
+      // Irish price update
+      await fetch(`${API_BASE}/products/4/price`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ price: tempPrices.irish })
+      });
+
+      // Mocha price update
+      await fetch(`${API_BASE}/products/5/price`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ price: tempPrices.mocha })
       });
 
       await refreshAdminData(token);

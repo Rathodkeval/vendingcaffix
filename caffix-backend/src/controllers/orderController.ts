@@ -186,11 +186,17 @@ export async function executeOrderStatusUpdate(id: string, status: string): Prom
     const milkNeeded = 5;
     let vanillaNeeded = 0;
     let hazelnutNeeded = 0;
+    let irishNeeded = 0;
+    let mochaNeeded = 0;
 
     if (lowerName.includes('vanilla')) {
       vanillaNeeded = 8;
     } else if (lowerName.includes('hazelnut')) {
       hazelnutNeeded = 8;
+    } else if (lowerName.includes('irish')) {
+      irishNeeded = 8;
+    } else if (lowerName.includes('mocha')) {
+      mochaNeeded = 8;
     }
 
     // Verify availability
@@ -209,6 +215,12 @@ export async function executeOrderStatusUpdate(id: string, status: string): Prom
     if (hazelnutNeeded > 0 && inventory.hazelnut_level < hazelnutNeeded) {
       throw new BadRequestError('Ingredients depleted: Hazelnut syrup refill required');
     }
+    if (irishNeeded > 0 && inventory.irish_level < irishNeeded) {
+      throw new BadRequestError('Ingredients depleted: Irish syrup refill required');
+    }
+    if (mochaNeeded > 0 && inventory.mocha_level < mochaNeeded) {
+      throw new BadRequestError('Ingredients depleted: Mocha syrup refill required');
+    }
 
     // Deduct inventory levels
     await db.run(
@@ -217,9 +229,11 @@ export async function executeOrderStatusUpdate(id: string, status: string): Prom
         coffee_level = coffee_level - ?,
         milk_level = milk_level - ?,
         vanilla_level = vanilla_level - ?,
-        hazelnut_level = hazelnut_level - ?
+        hazelnut_level = hazelnut_level - ?,
+        irish_level = irish_level - ?,
+        mocha_level = mocha_level - ?
        WHERE machine_id = ?`,
-      [waterNeeded, coffeeNeeded, milkNeeded, vanillaNeeded, hazelnutNeeded, order.machine_id]
+      [waterNeeded, coffeeNeeded, milkNeeded, vanillaNeeded, hazelnutNeeded, irishNeeded, mochaNeeded, order.machine_id]
     );
     
     logger.info(`Deducted ingredients for order ID ${id} on transition from ${currentStatus} to ${newStatus}`);
