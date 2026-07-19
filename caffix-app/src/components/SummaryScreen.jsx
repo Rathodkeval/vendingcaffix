@@ -147,13 +147,6 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
                 <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wide">Total Amount</span>
                 <div className="text-2xl font-black text-coffee-dark leading-none mt-0.5">₹{currentPrice}</div>
               </div>
-              <span className={`text-[10px] font-bold px-2 py-1 rounded-md transition-all duration-300 border ${
-                extraSugar 
-                  ? 'bg-coffee-dark border-coffee-dark text-white' 
-                  : 'bg-cream-dark/45 border-coffee-light/15 text-coffee'
-              }`}>
-                {extraSugar ? 'Extra Sugar: +₹5 active' : 'Extra Sugar: +₹5 when enabled'}
-              </span>
             </div>
             <button
               onClick={() => onConfirm({ name: selectedCoffee.name, size, price: currentPrice, extraSugar, base })}
