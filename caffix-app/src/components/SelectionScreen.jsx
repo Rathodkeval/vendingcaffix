@@ -110,11 +110,6 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
           </div>
         ))}
       </div>
-
-      {/* Footer hint */}
-      <div className="text-center text-[10px] text-coffee-light/40 uppercase tracking-widest font-bold">
-        Secure touchless payment enabled
-      </div>
     </div>
   );
 }
