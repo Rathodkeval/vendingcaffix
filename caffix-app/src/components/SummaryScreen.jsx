@@ -16,7 +16,7 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
   const currentPrice = getPrice();
 
   return (
-    <div className="absolute inset-0 flex flex-col justify-between px-4 pt-3 pb-2 bg-cream-light overflow-hidden">
+    <div className="absolute inset-0 flex flex-col justify-between px-4 pt-3 pb-10 bg-cream-light overflow-hidden">
       {/* Header */}
       <div className="flex items-center gap-3 mb-1">
         <button
