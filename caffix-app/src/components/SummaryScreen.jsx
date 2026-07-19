@@ -165,11 +165,6 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
           </div>
         </div>
       </div>
-
-      {/* Touch footer spacing */}
-      <div className="text-center text-[9px] text-coffee-light/30 uppercase tracking-widest font-bold mt-1">
-        Tap option to select • Caffix smart brewer
-      </div>
     </div>
   );
 }
