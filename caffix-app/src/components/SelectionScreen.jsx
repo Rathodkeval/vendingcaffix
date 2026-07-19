@@ -5,35 +5,35 @@ const COFFEES = [
   {
     id: 'classic',
     name: 'Classic Crest',
-    desc: 'Rich and authentic coffee experience made from premium Arabica beans.',
+    desc: 'Some coffees need a personality. Ours has 100% Arabica.',
     price: 100,
     image: '/assets/classic_coffee.png'
   },
   {
     id: 'vanilla',
     name: 'Vanilla Velvet',
-    desc: 'Smooth coffee blended with sweet vanilla notes for a creamy, comforting taste.',
+    desc: 'Some people meditate. We made vanilla coffee',
     price: 100,
     image: '/assets/vanilla_coffee.png'
   },
   {
     id: 'hazelnut',
     name: 'Hazel Gold',
-    desc: 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.',
+    desc: 'Your life deserves a little golden treatment. Meet Hazel Gold',
     price: 100,
     image: '/assets/hazelnut_coffee.png'
   },
   {
     id: 'irish',
     name: 'Irish Emerald',
-    desc: 'Classic espresso combined with rich Irish cream flavor and velvety smooth milk.',
+    desc: 'Bold enough to feel illegal All the Irish attitude',
     price: 100,
     image: '/assets/irish_coffee.png'
   },
   {
     id: 'mocha',
     name: 'Mocha Bliss',
-    desc: 'Decadent chocolate syrup blended with robust espresso and creamy milk.',
+    desc: 'Coffee with dessert energy = mocha bliss',
     price: 100,
     image: '/assets/mocha_coffee.png'
   }
@@ -58,11 +58,8 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
         </button>
         <div>
           <h2 className="font-sans font-extrabold text-2xl text-coffee-dark tracking-tight leading-none">
-            Choose Your Beverage
+            The Reason You're Here
           </h2>
-          <p className="text-xs text-coffee-light font-medium tracking-wide mt-0.5">
-            Select a flavor to customize your drink
-          </p>
         </div>
       </div>
 

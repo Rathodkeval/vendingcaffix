@@ -411,27 +411,27 @@ async function seedData() {
   if (productCount && productCount.count === 0) {
     await db.run(
       'INSERT INTO products (id, name, price, description, image) VALUES (?, ?, ?, ?, ?)',
-      [1, 'Classic Crest', 100, 'Rich and authentic coffee experience made from premium Arabica beans.', '/assets/classic_coffee.png']
+      [1, 'Classic Crest', 100, 'Some coffees need a personality. Ours has 100% Arabica.', '/assets/classic_coffee.png']
     );
     await db.run(
       'INSERT INTO products (id, name, price, description, image) VALUES (?, ?, ?, ?, ?)',
-      [2, 'Vanilla Velvet', 100, 'Smooth coffee blended with sweet vanilla notes for a creamy, comforting taste.', '/assets/vanilla_coffee.png']
+      [2, 'Vanilla Velvet', 100, 'Some people meditate. We made vanilla coffee', '/assets/vanilla_coffee.png']
     );
     await db.run(
       'INSERT INTO products (id, name, price, description, image) VALUES (?, ?, ?, ?, ?)',
-      [3, 'Hazel Gold', 100, 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.', '/assets/hazelnut_coffee.png']
+      [3, 'Hazel Gold', 100, 'Your life deserves a little golden treatment. Meet Hazel Gold', '/assets/hazelnut_coffee.png']
     );
   }
 
-  // Ensure existing product names are updated to match new names
+  // Ensure existing product names and descriptions are updated to match new names
   try {
-    await db.run("UPDATE products SET name = 'Classic Crest' WHERE id = 1");
-    await db.run("UPDATE products SET name = 'Vanilla Velvet' WHERE id = 2");
-    await db.run("UPDATE products SET name = 'Hazel Gold' WHERE id = 3");
-    await db.run("UPDATE products SET name = 'Irish Emerald' WHERE id = 4");
-    await db.run("UPDATE products SET name = 'Mocha Bliss' WHERE id = 5");
+    await db.run("UPDATE products SET name = 'Classic Crest', description = 'Some coffees need a personality. Ours has 100% Arabica.' WHERE id = 1");
+    await db.run("UPDATE products SET name = 'Vanilla Velvet', description = 'Some people meditate. We made vanilla coffee' WHERE id = 2");
+    await db.run("UPDATE products SET name = 'Hazel Gold', description = 'Your life deserves a little golden treatment. Meet Hazel Gold' WHERE id = 3");
+    await db.run("UPDATE products SET name = 'Irish Emerald', description = 'Bold enough to feel illegal All the Irish attitude' WHERE id = 4");
+    await db.run("UPDATE products SET name = 'Mocha Bliss', description = 'Coffee with dessert energy = mocha bliss' WHERE id = 5");
   } catch (err) {
-    console.error('Failed to update product names in database:', err);
+    console.error('Failed to update product names/descriptions in database:', err);
   }
 
   // Seed new products dynamically if they do not exist
@@ -439,7 +439,7 @@ async function seedData() {
   if (!hasIrishProd) {
     await db.run(
       'INSERT INTO products (id, name, price, description, image) VALUES (?, ?, ?, ?, ?)',
-      [4, 'Irish Emerald', 100, 'Classic espresso combined with rich Irish cream flavor and velvety smooth milk.', '/assets/irish_coffee.png']
+      [4, 'Irish Emerald', 100, 'Bold enough to feel illegal All the Irish attitude', '/assets/irish_coffee.png']
     );
   }
 
@@ -447,7 +447,7 @@ async function seedData() {
   if (!hasMochaProd) {
     await db.run(
       'INSERT INTO products (id, name, price, description, image) VALUES (?, ?, ?, ?, ?)',
-      [5, 'Mocha Bliss', 100, 'Decadent chocolate syrup blended with robust espresso and creamy milk.', '/assets/mocha_coffee.png']
+      [5, 'Mocha Bliss', 100, 'Coffee with dessert energy = mocha bliss', '/assets/mocha_coffee.png']
     );
   }
 

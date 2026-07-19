@@ -30,9 +30,6 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
           <h2 className="font-sans font-extrabold text-2xl text-coffee-dark tracking-tight leading-none">
             Customize & Confirm
           </h2>
-          <p className="text-xs text-coffee-light font-medium tracking-wide mt-0.5">
-            Review your order selection details below
-          </p>
         </div>
       </div>
 
