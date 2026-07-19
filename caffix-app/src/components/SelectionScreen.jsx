@@ -124,7 +124,7 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
             return (
               <motion.div
                 key={coffee.id}
-                style={{ pointerEvents: isActive ? 'auto' : 'none' }}
+                style={{ pointerEvents: 'auto' }}
                 animate={{
                   x: diff * 240, // Horizontal separation of cups
                   scale: isActive ? 1.05 : 0.85,
@@ -132,7 +132,8 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
                   zIndex: 10 - Math.abs(diff),
                 }}
                 transition={{ type: 'spring', stiffness: 260, damping: 28 }}
-                className="absolute flex flex-col items-center justify-center"
+                className="absolute flex flex-col items-center justify-center cursor-pointer active-touch-feedback"
+                onClick={() => onSelect(coffee)}
               >
                 {/* Floating Breathing Coffee Cup Image */}
                 <motion.div
