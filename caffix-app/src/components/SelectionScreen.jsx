@@ -162,8 +162,8 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
                 </motion.div>
 
                 {/* Cup Specification Labels & Price */}
-                <div className="text-center mt-3 max-w-[190px]">
-                  <h3 className="font-sans font-extrabold text-sm text-coffee-dark tracking-tight leading-none mb-0.5">
+                <div className="text-center mt-3 max-w-[220px]">
+                  <h3 className="font-sans font-black text-2xl text-coffee-dark tracking-tight uppercase leading-none mb-1">
                     {coffee.name}
                   </h3>
                   <p className="text-[10px] text-coffee-light/75 leading-tight mb-2 h-7 flex items-center justify-center px-1 font-medium">
