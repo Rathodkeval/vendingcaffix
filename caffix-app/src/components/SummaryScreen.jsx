@@ -16,7 +16,7 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
   const currentPrice = getPrice();
 
   return (
-    <div className="w-full h-full flex flex-col justify-between px-4 pt-3 pb-2 bg-cream-light relative overflow-hidden">
+    <div className="absolute inset-0 flex flex-col justify-between px-4 pt-3 pb-2 bg-cream-light overflow-hidden">
       {/* Header */}
       <div className="flex items-center gap-3 mb-1">
         <button
@@ -39,7 +39,7 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
         <div className="col-span-2 bg-white rounded-2xl border border-coffee-light/10 p-3 flex flex-col justify-between shadow-sm">
           <div>
             <div
-              className="w-full h-[110px] rounded-xl bg-cover bg-center border border-cream shadow-inner mb-1.5"
+              className="w-full h-[95px] rounded-xl bg-cover bg-center border border-cream shadow-inner mb-1.5"
               style={{ backgroundImage: `url('${selectedCoffee.image}')` }}
             />
             <h3 className="font-sans font-extrabold text-lg text-coffee-dark tracking-tight leading-snug">
@@ -49,7 +49,7 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
               {selectedCoffee.desc}
             </p>
           </div>
-          <div className="bg-cream-light/60 p-2.5 rounded-xl border border-cream mt-2">
+          <div className="bg-cream-light/60 p-2 rounded-xl border border-cream mt-1.5">
             <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wider block">
               Specifications
             </span>
@@ -89,29 +89,29 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
             </div>
 
             {/* Choose Your Base */}
-            <div className="border-t border-cream pt-3">
+            <div className="border-t border-cream pt-2">
               <h4 className="text-xs font-extrabold text-coffee-dark uppercase tracking-wider mb-0.5">Choose Your Base</h4>
-              <p className="text-[10px] text-coffee-light/80 font-medium mb-3">
+              <p className="text-[10px] text-coffee-light/80 font-medium mb-2">
                 Select either water or milk. You can choose only one.
               </p>
               <div className="grid grid-cols-2 gap-3">
                 {/* Water Card */}
                 <button
                   onClick={() => setBase('water')}
-                  className={`flex flex-col items-center justify-center py-3.5 px-4 rounded-2xl border-2 transition-all duration-300 cursor-pointer ${
+                  className={`flex flex-col items-center justify-center py-2.5 px-3 rounded-2xl border-2 transition-all duration-300 cursor-pointer ${
                     base === 'water'
                       ? 'bg-coffee-dark border-coffee-dark text-cream-light shadow-md'
                       : 'bg-cream-light/30 border-cream hover:bg-cream-light/50 text-coffee-dark'
                   }`}
                 >
                   <div
-                    className={`w-11 h-11 rounded-full flex items-center justify-center mb-2.5 transition-all duration-300 ${
+                    className={`w-9 h-9 rounded-full flex items-center justify-center mb-1.5 transition-all duration-300 ${
                       base === 'water'
                         ? 'bg-white text-coffee-dark shadow-sm'
                         : 'border border-coffee-light/35 bg-transparent text-coffee-dark'
                     }`}
                   >
-                    <Droplet className="w-5.5 h-5.5" />
+                    <Droplet className="w-4.5 h-4.5" />
                   </div>
                   <span className="text-[11px] font-extrabold tracking-tight">Go Strong with Water</span>
                 </button>
@@ -119,20 +119,20 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
                 {/* Milk Card */}
                 <button
                   onClick={() => setBase('milk')}
-                  className={`flex flex-col items-center justify-center py-3.5 px-4 rounded-2xl border-2 transition-all duration-300 cursor-pointer ${
+                  className={`flex flex-col items-center justify-center py-2.5 px-3 rounded-2xl border-2 transition-all duration-300 cursor-pointer ${
                     base === 'milk'
                       ? 'bg-coffee-dark border-coffee-dark text-cream-light shadow-md'
                       : 'bg-cream-light/30 border-cream hover:bg-cream-light/50 text-coffee-dark'
                   }`}
                 >
                   <div
-                    className={`w-11 h-11 rounded-full flex items-center justify-center mb-2.5 transition-all duration-300 ${
+                    className={`w-9 h-9 rounded-full flex items-center justify-center mb-1.5 transition-all duration-300 ${
                       base === 'milk'
                         ? 'bg-white text-coffee-dark shadow-sm'
                         : 'border border-coffee-light/35 bg-transparent text-coffee-dark'
                     }`}
                   >
-                    <Milk className="w-5.5 h-5.5" />
+                    <Milk className="w-4.5 h-4.5" />
                   </div>
                   <span className="text-[11px] font-extrabold tracking-tight">Go Creamy with MILK</span>
                 </button>
