@@ -21,11 +21,11 @@ const mockStore = {
     { id: 2, name: 'kiosk-one', email: 'kiosk01@caffix.com', password: bcrypt.hashSync('kiosk123', 10), role: 'kiosk' }
   ],
   products: [
-    { id: 1, name: 'Classic Coffee', price: 100, description: 'Rich and authentic coffee experience made from premium Arabica beans.', image: '/assets/classic_coffee.png' },
-    { id: 2, name: 'Vanilla Coffee', price: 100, description: 'Smooth coffee blended with sweet vanilla notes for a creamy, comforting taste.', image: '/assets/vanilla_coffee.png' },
-    { id: 3, name: 'Hazelnut Coffee', price: 100, description: 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.', image: '/assets/hazelnut_coffee.png' },
-    { id: 4, name: 'Irish Coffee', price: 100, description: 'Classic espresso combined with rich Irish cream flavor and velvety smooth milk.', image: '/assets/irish_coffee.png' },
-    { id: 5, name: 'Mocha Coffee', price: 100, description: 'Decadent chocolate syrup blended with robust espresso and creamy milk.', image: '/assets/mocha_coffee.png' }
+    { id: 1, name: 'Classic Crest', price: 100, description: 'Rich and authentic coffee experience made from premium Arabica beans.', image: '/assets/classic_coffee.png' },
+    { id: 2, name: 'Vanilla Velvet', price: 100, description: 'Smooth coffee blended with sweet vanilla notes for a creamy, comforting taste.', image: '/assets/vanilla_coffee.png' },
+    { id: 3, name: 'Hazel Gold', price: 100, description: 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.', image: '/assets/hazelnut_coffee.png' },
+    { id: 4, name: 'Irish Emerald', price: 100, description: 'Classic espresso combined with rich Irish cream flavor and velvety smooth milk.', image: '/assets/irish_coffee.png' },
+    { id: 5, name: 'Mocha Bliss', price: 100, description: 'Decadent chocolate syrup blended with robust espresso and creamy milk.', image: '/assets/mocha_coffee.png' }
   ],
   machines: [
     { id: 'CFX-MC-01', machine_name: 'Kiosk-One', location: 'Delhi Airport T3', status: 'online', last_seen: new Date().toISOString() }
@@ -411,16 +411,27 @@ async function seedData() {
   if (productCount && productCount.count === 0) {
     await db.run(
       'INSERT INTO products (id, name, price, description, image) VALUES (?, ?, ?, ?, ?)',
-      [1, 'Classic Coffee', 100, 'Rich and authentic coffee experience made from premium Arabica beans.', '/assets/classic_coffee.png']
+      [1, 'Classic Crest', 100, 'Rich and authentic coffee experience made from premium Arabica beans.', '/assets/classic_coffee.png']
     );
     await db.run(
       'INSERT INTO products (id, name, price, description, image) VALUES (?, ?, ?, ?, ?)',
-      [2, 'Vanilla Coffee', 100, 'Smooth coffee blended with sweet vanilla notes for a creamy, comforting taste.', '/assets/vanilla_coffee.png']
+      [2, 'Vanilla Velvet', 100, 'Smooth coffee blended with sweet vanilla notes for a creamy, comforting taste.', '/assets/vanilla_coffee.png']
     );
     await db.run(
       'INSERT INTO products (id, name, price, description, image) VALUES (?, ?, ?, ?, ?)',
-      [3, 'Hazelnut Coffee', 100, 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.', '/assets/hazelnut_coffee.png']
+      [3, 'Hazel Gold', 100, 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.', '/assets/hazelnut_coffee.png']
     );
+  }
+
+  // Ensure existing product names are updated to match new names
+  try {
+    await db.run("UPDATE products SET name = 'Classic Crest' WHERE id = 1");
+    await db.run("UPDATE products SET name = 'Vanilla Velvet' WHERE id = 2");
+    await db.run("UPDATE products SET name = 'Hazel Gold' WHERE id = 3");
+    await db.run("UPDATE products SET name = 'Irish Emerald' WHERE id = 4");
+    await db.run("UPDATE products SET name = 'Mocha Bliss' WHERE id = 5");
+  } catch (err) {
+    console.error('Failed to update product names in database:', err);
   }
 
   // Seed new products dynamically if they do not exist
@@ -428,7 +439,7 @@ async function seedData() {
   if (!hasIrishProd) {
     await db.run(
       'INSERT INTO products (id, name, price, description, image) VALUES (?, ?, ?, ?, ?)',
-      [4, 'Irish Coffee', 100, 'Classic espresso combined with rich Irish cream flavor and velvety smooth milk.', '/assets/irish_coffee.png']
+      [4, 'Irish Emerald', 100, 'Classic espresso combined with rich Irish cream flavor and velvety smooth milk.', '/assets/irish_coffee.png']
     );
   }
 
@@ -436,7 +447,7 @@ async function seedData() {
   if (!hasMochaProd) {
     await db.run(
       'INSERT INTO products (id, name, price, description, image) VALUES (?, ?, ?, ?, ?)',
-      [5, 'Mocha Coffee', 100, 'Decadent chocolate syrup blended with robust espresso and creamy milk.', '/assets/mocha_coffee.png']
+      [5, 'Mocha Bliss', 100, 'Decadent chocolate syrup blended with robust espresso and creamy milk.', '/assets/mocha_coffee.png']
     );
   }
 

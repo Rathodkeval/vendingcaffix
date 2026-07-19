@@ -191,7 +191,7 @@ export async function executeOrderStatusUpdate(id: string, status: string): Prom
 
     if (lowerName.includes('vanilla')) {
       vanillaNeeded = 8;
-    } else if (lowerName.includes('hazelnut')) {
+    } else if (lowerName.includes('hazel')) {
       hazelnutNeeded = 8;
     } else if (lowerName.includes('irish')) {
       irishNeeded = 8;

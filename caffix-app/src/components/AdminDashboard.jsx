@@ -89,11 +89,11 @@ export default function AdminDashboard({
   ];
 
   const bestSellers = [
-    { name: 'Classic Coffee', sales: 68, percentage: 35, color: 'bg-coffee' },
-    { name: 'Vanilla Coffee', sales: 42, percentage: 22, color: 'bg-coffee-light' },
-    { name: 'Hazelnut Coffee', sales: 31, percentage: 16, color: 'bg-gold' },
-    { name: 'Irish Coffee', sales: 25, percentage: 13, color: 'bg-emerald-600' },
-    { name: 'Mocha Coffee', sales: 28, percentage: 14, color: 'bg-amber-900' }
+    { name: 'Classic Crest', sales: 68, percentage: 35, color: 'bg-coffee' },
+    { name: 'Vanilla Velvet', sales: 42, percentage: 22, color: 'bg-coffee-light' },
+    { name: 'Hazel Gold', sales: 31, percentage: 16, color: 'bg-gold' },
+    { name: 'Irish Emerald', sales: 25, percentage: 13, color: 'bg-emerald-600' },
+    { name: 'Mocha Bliss', sales: 28, percentage: 14, color: 'bg-amber-900' }
   ];
 
   // Calculated Stats based on order history
@@ -229,11 +229,11 @@ export default function AdminDashboard({
                     {[
                       { label: 'Water Level', value: inventory.water, color: 'bg-blue-500' },
                       { label: 'Milk Level', value: inventory.coffee, color: 'bg-amber-800' },
-                      { label: 'Classic Coffee', value: inventory.milk, color: 'bg-orange-400' },
-                      { label: 'Vanilla Coffee', value: inventory.vanilla, color: 'bg-yellow-400' },
-                      { label: 'Hazelnut Coffee', value: inventory.hazelnut, color: 'bg-amber-600' },
-                      { label: 'Irish Coffee', value: inventory.irish, color: 'bg-emerald-600' },
-                      { label: 'Mocha Coffee', value: inventory.mocha, color: 'bg-amber-900' }
+                      { label: 'Classic Crest', value: inventory.milk, color: 'bg-orange-400' },
+                      { label: 'Vanilla Velvet', value: inventory.vanilla, color: 'bg-yellow-400' },
+                      { label: 'Hazel Gold', value: inventory.hazelnut, color: 'bg-amber-600' },
+                      { label: 'Irish Emerald', value: inventory.irish, color: 'bg-emerald-600' },
+                      { label: 'Mocha Bliss', value: inventory.mocha, color: 'bg-amber-900' }
                     ].map((item, idx) => (
                       <div key={idx} className="space-y-1">
                         <div className="flex justify-between text-xs font-semibold">
@@ -297,11 +297,11 @@ export default function AdminDashboard({
                 {[
                   { key: 'water', label: 'Water Level', icon: Droplet, value: inventory.water, color: 'bg-blue-500' },
                   { key: 'coffee', label: 'Milk Level', icon: Coffee, value: inventory.coffee, color: 'bg-amber-800' },
-                  { key: 'milk', label: 'Classic Coffee', icon: Activity, value: inventory.milk, color: 'bg-orange-400' },
-                  { key: 'vanilla', label: 'Vanilla Coffee', icon: Layers, value: inventory.vanilla, color: 'bg-yellow-400' },
-                  { key: 'hazelnut', label: 'Hazelnut Coffee', icon: Layers, value: inventory.hazelnut, color: 'bg-amber-600' },
-                  { key: 'irish', label: 'Irish Coffee', icon: Layers, value: inventory.irish, color: 'bg-emerald-600' },
-                  { key: 'mocha', label: 'Mocha Coffee', icon: Layers, value: inventory.mocha, color: 'bg-amber-900' }
+                  { key: 'milk', label: 'Classic Crest', icon: Activity, value: inventory.milk, color: 'bg-orange-400' },
+                  { key: 'vanilla', label: 'Vanilla Velvet', icon: Layers, value: inventory.vanilla, color: 'bg-yellow-400' },
+                  { key: 'hazelnut', label: 'Hazel Gold', icon: Layers, value: inventory.hazelnut, color: 'bg-amber-600' },
+                  { key: 'irish', label: 'Irish Emerald', icon: Layers, value: inventory.irish, color: 'bg-emerald-600' },
+                  { key: 'mocha', label: 'Mocha Bliss', icon: Layers, value: inventory.mocha, color: 'bg-amber-900' }
                 ].map((item) => {
                   const Icon = item.icon;
                   return (
@@ -593,7 +593,7 @@ export default function AdminDashboard({
                 <form onSubmit={handleSavePrices} className="space-y-4">
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="text-xs font-bold text-slate-500 block mb-1">Classic Coffee Base Price (₹)</label>
+                      <label className="text-xs font-bold text-slate-500 block mb-1">Classic Crest Base Price (₹)</label>
                       <input
                         type="number"
                         value={tempPrices.classic === 100 || !tempPrices.classic ? 100 : tempPrices.classic}
@@ -603,7 +603,7 @@ export default function AdminDashboard({
                     </div>
 
                     <div>
-                      <label className="text-xs font-bold text-slate-500 block mb-1">Vanilla Coffee Base Price (₹)</label>
+                      <label className="text-xs font-bold text-slate-500 block mb-1">Vanilla Velvet Base Price (₹)</label>
                       <input
                         type="number"
                         value={tempPrices.vanilla === 100 || !tempPrices.vanilla ? 100 : tempPrices.vanilla}
@@ -613,7 +613,7 @@ export default function AdminDashboard({
                     </div>
 
                     <div>
-                      <label className="text-xs font-bold text-slate-500 block mb-1">Hazelnut Coffee Base Price (₹)</label>
+                      <label className="text-xs font-bold text-slate-500 block mb-1">Hazel Gold Base Price (₹)</label>
                       <input
                         type="number"
                         value={tempPrices.hazelnut === 100 || !tempPrices.hazelnut ? 100 : tempPrices.hazelnut}
@@ -623,7 +623,7 @@ export default function AdminDashboard({
                     </div>
 
                     <div>
-                      <label className="text-xs font-bold text-slate-500 block mb-1">Irish Coffee Base Price (₹)</label>
+                      <label className="text-xs font-bold text-slate-500 block mb-1">Irish Emerald Base Price (₹)</label>
                       <input
                         type="number"
                         value={tempPrices.irish === 100 || !tempPrices.irish ? 100 : tempPrices.irish}
@@ -633,7 +633,7 @@ export default function AdminDashboard({
                     </div>
 
                     <div>
-                      <label className="text-xs font-bold text-slate-500 block mb-1">Mocha Coffee Base Price (₹)</label>
+                      <label className="text-xs font-bold text-slate-500 block mb-1">Mocha Bliss Base Price (₹)</label>
                       <input
                         type="number"
                         value={tempPrices.mocha === 100 || !tempPrices.mocha ? 100 : tempPrices.mocha}

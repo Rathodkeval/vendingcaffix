@@ -89,7 +89,7 @@ export default function App() {
       if (ordersData.status === 'success') {
         const formatted = ordersData.data.map((o) => ({
           id: o.id,
-          name: o.product_name || (o.product_id === 1 ? 'Classic Coffee' : o.product_id === 2 ? 'Vanilla Coffee' : o.product_id === 3 ? 'Hazelnut Coffee' : o.product_id === 4 ? 'Irish Coffee' : 'Mocha Coffee'),
+          name: o.product_name || (o.product_id === 1 ? 'Classic Crest' : o.product_id === 2 ? 'Vanilla Velvet' : o.product_id === 3 ? 'Hazel Gold' : o.product_id === 4 ? 'Irish Emerald' : 'Mocha Bliss'),
           size: 'Medium',
           price: o.amount,
           time: `${new Date(o.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}, ${new Date(o.created_at).toLocaleDateString()}`

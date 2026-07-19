@@ -4,35 +4,35 @@ import { ArrowLeft } from 'lucide-react';
 const COFFEES = [
   {
     id: 'classic',
-    name: 'Classic Coffee',
+    name: 'Classic Crest',
     desc: 'Rich and authentic coffee experience made from premium Arabica beans.',
     price: 100,
     image: '/assets/classic_coffee.png'
   },
   {
     id: 'vanilla',
-    name: 'Vanilla Coffee',
+    name: 'Vanilla Velvet',
     desc: 'Smooth coffee blended with sweet vanilla notes for a creamy, comforting taste.',
     price: 100,
     image: '/assets/vanilla_coffee.png'
   },
   {
     id: 'hazelnut',
-    name: 'Hazelnut Coffee',
+    name: 'Hazel Gold',
     desc: 'Rich nutty aroma with a smooth coffee finish delivering a premium café experience.',
     price: 100,
     image: '/assets/hazelnut_coffee.png'
   },
   {
     id: 'irish',
-    name: 'Irish Coffee',
+    name: 'Irish Emerald',
     desc: 'Classic espresso combined with rich Irish cream flavor and velvety smooth milk.',
     price: 100,
     image: '/assets/irish_coffee.png'
   },
   {
     id: 'mocha',
-    name: 'Mocha Coffee',
+    name: 'Mocha Bliss',
     desc: 'Decadent chocolate syrup blended with robust espresso and creamy milk.',
     price: 100,
     image: '/assets/mocha_coffee.png'
@@ -67,17 +67,15 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
       </div>
 
       {/* Coffee Cards Grid */}
-      <div className="grid grid-cols-3 gap-4 flex-grow items-stretch my-2 overflow-y-auto pr-1">
+      <div className="grid grid-cols-5 gap-3 flex-grow items-stretch my-2 overflow-hidden">
         {coffeesWithPrices.map((coffee) => (
           <div
             key={coffee.id}
             onClick={() => onSelect(coffee)}
-            className="flex flex-col justify-between bg-white rounded-2xl border border-coffee-light/10 shadow-sm overflow-hidden transform transition-all duration-300 hover:shadow-md active:scale-[0.98] cursor-pointer group active-touch-feedback relative"
+            className="flex flex-col justify-between bg-white rounded-xl border border-coffee-light/10 shadow-sm overflow-hidden transform transition-all duration-300 hover:shadow-md active:scale-[0.98] cursor-pointer group active-touch-feedback relative"
           >
-
-
             {/* Coffee Image Section */}
-            <div className="relative h-[120px] bg-cream/30 overflow-hidden flex items-center justify-center">
+            <div className="relative h-[100px] bg-cream/30 overflow-hidden flex items-center justify-center">
               <div
                 className="w-full h-full bg-cover bg-center transition-transform duration-500 group-hover:scale-105"
                 style={{ backgroundImage: `url('${coffee.image}')` }}
@@ -86,23 +84,23 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
             </div>
 
             {/* Information Section */}
-            <div className="px-3 pb-3 flex-grow flex flex-col justify-between">
+            <div className="px-2.5 pb-2.5 flex-grow flex flex-col justify-between">
               <div>
-                <h3 className="font-sans font-bold text-base text-coffee-dark tracking-tight leading-tight group-hover:text-gold-dark transition-colors">
+                <h3 className="font-sans font-bold text-sm text-coffee-dark tracking-tight leading-tight group-hover:text-gold-dark transition-colors">
                   {coffee.name}
                 </h3>
-                <p className="text-[11px] text-coffee-light/80 leading-tight mt-1 line-clamp-2">
+                <p className="text-[10px] text-coffee-light/80 leading-tight mt-1 line-clamp-3">
                   {coffee.desc}
                 </p>
               </div>
 
               {/* Price & Action Button */}
-              <div className="mt-3 flex items-center justify-between pt-2 border-t border-cream">
-                <span className="font-sans font-black text-lg text-coffee">
+              <div className="mt-2 flex items-center justify-between pt-1.5 border-t border-cream">
+                <span className="font-sans font-black text-base text-coffee">
                   ₹{coffee.price}
                 </span>
                 <button
-                  className="px-3.5 py-1.5 bg-coffee text-cream-light font-bold text-xs rounded-xl shadow-md group-hover:bg-gold-dark transition-all"
+                  className="px-2.5 py-1 bg-coffee text-cream-light font-bold text-[10px] rounded-lg shadow-md group-hover:bg-gold-dark transition-all"
                   onClick={(e) => {
                     e.stopPropagation(); // Avoid double click trigger
                     onSelect(coffee);
