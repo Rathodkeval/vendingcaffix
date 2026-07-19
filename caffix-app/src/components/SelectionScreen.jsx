@@ -159,12 +159,6 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
                     }}
                   />
 
-                  {/* Most Loved Gold Badge */}
-                  {coffee.id === 'hazelnut' && (
-                    <span className="absolute -top-3 left-1/2 -translate-x-1/2 bg-coffee text-cream font-bold text-[9px] uppercase tracking-widest px-2.5 py-0.5 rounded-full shadow border border-gold/45 flex items-center gap-1 whitespace-nowrap z-30">
-                      ★ Most Loved
-                    </span>
-                  )}
                 </motion.div>
 
                 {/* Cup Specification Labels & Price */}
