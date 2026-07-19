@@ -37,7 +37,10 @@ export default function KioskHeader({ onAdminAccess }) {
 
       {/* Centered Tagline */}
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-        <span className="font-sans text-lg font-black tracking-widest text-[#FAF6F0] bg-[#FAF6F0]/10 px-6 py-1 rounded-full border border-[#FAF6F0]/20 shadow-inner">
+        <span 
+          style={{ fontFamily: "'Playfair Display', serif" }}
+          className="italic text-2xl font-bold tracking-wider text-[#FAF6F0] bg-[#FAF6F0]/10 px-8 py-2 rounded-full border border-[#FAF6F0]/25 shadow-inner"
+        >
           Your AI Barista
         </span>
       </div>
