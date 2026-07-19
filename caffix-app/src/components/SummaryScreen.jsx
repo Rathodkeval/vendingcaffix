@@ -16,9 +16,9 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
   const currentPrice = getPrice();
 
   return (
-    <div className="w-full h-full flex flex-col justify-between p-4 bg-cream-light relative overflow-hidden">
+    <div className="w-full h-full flex flex-col justify-between px-4 pt-3 pb-2 bg-cream-light relative overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-3 mb-2">
+      <div className="flex items-center gap-3 mb-1">
         <button
           onClick={onBack}
           className="p-2 rounded-xl bg-cream border border-coffee-light/20 hover:bg-cream-dark active:scale-95 active-touch-feedback"
@@ -39,7 +39,7 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
         <div className="col-span-2 bg-white rounded-2xl border border-coffee-light/10 p-3 flex flex-col justify-between shadow-sm">
           <div>
             <div
-              className="w-full h-32 rounded-xl bg-cover bg-center border border-cream shadow-inner mb-2"
+              className="w-full h-[110px] rounded-xl bg-cover bg-center border border-cream shadow-inner mb-1.5"
               style={{ backgroundImage: `url('${selectedCoffee.image}')` }}
             />
             <h3 className="font-sans font-extrabold text-lg text-coffee-dark tracking-tight leading-snug">

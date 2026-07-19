@@ -46,9 +46,9 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
   }));
 
   return (
-    <div className="w-full h-full flex flex-col justify-between p-4 bg-cream-light relative overflow-hidden">
+    <div className="w-full h-full flex flex-col justify-between px-4 pt-3 pb-2 bg-cream-light relative overflow-hidden">
       {/* Title Header Row */}
-      <div className="flex items-center gap-4 mb-2">
+      <div className="flex items-center gap-4 mb-1">
         <button
           onClick={onBack}
           className="p-2 rounded-xl bg-cream border border-coffee-light/20 hover:bg-cream-dark active:scale-95 active-touch-feedback"
@@ -64,7 +64,7 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
       </div>
 
       {/* Coffee Cards Grid */}
-      <div className="grid grid-cols-5 gap-3 flex-grow items-stretch my-2 overflow-hidden">
+      <div className="grid grid-cols-5 gap-3 flex-grow items-stretch my-1 overflow-hidden">
         {coffeesWithPrices.map((coffee) => (
           <div
             key={coffee.id}
@@ -72,7 +72,7 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
             className="flex flex-col justify-between bg-white rounded-xl border border-coffee-light/10 shadow-sm overflow-hidden transform transition-all duration-300 hover:shadow-md active:scale-[0.98] cursor-pointer group active-touch-feedback relative"
           >
             {/* Coffee Image Section */}
-            <div className="relative h-[100px] bg-cream/30 overflow-hidden flex items-center justify-center">
+            <div className="relative h-[85px] bg-cream/30 overflow-hidden flex items-center justify-center">
               <div
                 className="w-full h-full bg-cover bg-center transition-transform duration-500 group-hover:scale-105"
                 style={{ backgroundImage: `url('${coffee.image}')` }}
