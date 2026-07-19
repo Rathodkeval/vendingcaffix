@@ -46,7 +46,7 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
   }));
 
   return (
-    <div className="absolute inset-0 flex flex-col justify-between px-4 pt-3 pb-10 bg-cream-light overflow-hidden">
+    <div className="absolute inset-0 flex flex-col justify-between px-4 pt-3 pb-3 bg-cream-light overflow-hidden">
       {/* Title Header Row */}
       <div className="flex items-center gap-4 mb-1">
         <button
@@ -72,7 +72,7 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
             className="flex flex-col justify-between bg-white rounded-xl border border-coffee-light/10 shadow-sm overflow-hidden transform transition-all duration-300 hover:shadow-md active:scale-[0.98] cursor-pointer group active-touch-feedback relative"
           >
             {/* Coffee Image Section */}
-            <div className="relative h-[75px] bg-cream/30 overflow-hidden flex items-center justify-center">
+            <div className="relative h-[100px] bg-cream/30 overflow-hidden flex items-center justify-center">
               <div
                 className="w-full h-full bg-cover bg-center transition-transform duration-500 group-hover:scale-105"
                 style={{ backgroundImage: `url('${coffee.image}')` }}
@@ -81,23 +81,23 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
             </div>
 
             {/* Information Section */}
-            <div className="px-2 pb-2 flex-grow flex flex-col justify-between">
+            <div className="px-2.5 pb-2.5 flex-grow flex flex-col justify-between">
               <div>
-                <h3 className="font-sans font-bold text-xs text-coffee-dark tracking-tight leading-tight group-hover:text-gold-dark transition-colors mt-1">
+                <h3 className="font-sans font-bold text-sm text-coffee-dark tracking-tight leading-tight group-hover:text-gold-dark transition-colors mt-1">
                   {coffee.name}
                 </h3>
-                <p className="text-[9px] text-coffee-light/80 leading-tight mt-0.5 line-clamp-2">
+                <p className="text-[10px] text-coffee-light/80 leading-tight mt-1 line-clamp-3">
                   {coffee.desc}
                 </p>
               </div>
 
               {/* Price & Action Button */}
-              <div className="mt-1.5 flex items-center justify-between pt-1 border-t border-cream">
-                <span className="font-sans font-black text-sm text-coffee">
+              <div className="mt-2 flex items-center justify-between pt-1.5 border-t border-cream">
+                <span className="font-sans font-black text-base text-coffee">
                   ₹{coffee.price}
                 </span>
                 <button
-                  className="px-2 py-0.5 bg-coffee text-cream-light font-bold text-[9px] rounded shadow-md group-hover:bg-gold-dark transition-all"
+                  className="px-2.5 py-1 bg-coffee text-cream-light font-bold text-[10px] rounded-lg shadow-md group-hover:bg-gold-dark transition-all"
                   onClick={(e) => {
                     e.stopPropagation(); // Avoid double click trigger
                     onSelect(coffee);
