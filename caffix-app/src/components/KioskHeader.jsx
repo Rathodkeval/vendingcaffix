@@ -25,9 +25,9 @@ export default function KioskHeader({ onAdminAccess }) {
   };
 
   return (
-    <header className="flex justify-between items-center px-6 py-4 bg-coffee-dark text-cream-light border-b border-coffee/20 shadow-md">
+    <header className="relative flex justify-between items-center px-6 py-4 bg-coffee-dark text-cream-light border-b border-coffee/20 shadow-md">
       {/* Brand Section */}
-      <div className="flex items-center gap-3 cursor-pointer" onClick={handleLogoClick}>
+      <div className="flex items-center gap-3 cursor-pointer z-10" onClick={handleLogoClick}>
         <img 
           src="/assets/logo.png" 
           alt="Caffix Logo" 
@@ -35,8 +35,15 @@ export default function KioskHeader({ onAdminAccess }) {
         />
       </div>
 
+      {/* Centered Tagline */}
+      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+        <span className="font-sans text-lg font-black tracking-widest text-[#FAF6F0] bg-[#FAF6F0]/10 px-6 py-1 rounded-full border border-[#FAF6F0]/20 shadow-inner">
+          Your AI Barista
+        </span>
+      </div>
+
       {/* Clock & Status */}
-      <div className="flex items-center gap-6">
+      <div className="flex items-center gap-6 z-10">
         <span className="font-mono text-lg font-semibold tracking-wider text-cream/80">
           {formatTime(time)}
         </span>

@@ -66,9 +66,9 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
           <div className="space-y-4">
             {/* Standard Recipe Message */}
             <div className="bg-cream-light/20 border border-coffee-light/5 p-3.5 rounded-xl">
-              <h4 className="text-xs font-bold text-coffee-dark uppercase tracking-wider">Caffix Recipe Standard</h4>
+              <h4 className="text-xs font-bold text-coffee-dark uppercase tracking-wider">CAFFIX BREW CODE</h4>
               <p className="text-[11px] text-coffee-light mt-1 leading-relaxed">
-                This vending machine prepares beverages using a balanced recipe with standard water, milk, and coffee strength, dispensed in a standard cup.
+                Precision In Every Pour. Perfection In Every Sip
               </p>
             </div>
 
