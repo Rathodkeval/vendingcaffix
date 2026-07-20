@@ -54,6 +54,16 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
       name: 'CAFFIX',
       description: `Order ${orderDetails.name} (${orderDetails.size})`,
       order_id: orderDetails.razorpay_order_id,
+      prefill: {
+        name: "CAFFIX",
+        email: "support@caffix.com",
+        contact: "9999999999"
+      },
+      readonly: {
+        name: true,
+        email: true,
+        contact: true
+      },
       handler: async function (response) {
         setIsProcessing(true);
         setProcessingStatus('Verifying secure signature...');
@@ -82,10 +92,6 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
           console.error('Signature verification call failed:', e);
           onPaymentFailed();
         }
-      },
-      prefill: {
-        name: 'Kiosk User',
-        email: 'kiosk01@caffix.com'
       },
       theme: {
         color: '#2C1E17'
