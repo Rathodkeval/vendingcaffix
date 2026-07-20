@@ -71,12 +71,12 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
   };
 
   return (
-    <div className="absolute inset-0 flex flex-col justify-between px-6 pt-4 pb-3 bg-gradient-to-b from-[#FAF6F0] via-[#F5ECE2] to-[#FAF6F0] overflow-hidden select-none">
+    <div className="absolute inset-0 flex flex-col justify-between px-6 pt-4 pb-3 bg-gradient-to-b from-[#FAF6F0] via-[#F5ECE2] to-[#FAF6F0] overflow-x-hidden overflow-y-hidden select-none">
       {/* Title Header Row */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-4 z-10">
         <button
           onClick={onBack}
-          className="p-2 rounded-xl bg-white/70 border border-coffee-light/10 hover:bg-cream active:scale-95 active-touch-feedback shadow-sm"
+          className="p-2 rounded-xl bg-white/70 border border-coffee-light/10 hover:bg-cream active:scale-95 active-touch-feedback shadow-sm cursor-pointer"
           aria-label="Go back"
         >
           <ArrowLeft className="w-5 h-5 text-coffee" />
@@ -89,12 +89,12 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
       </div>
 
       {/* Swipe Carousel Area */}
-      <div className="relative flex-grow flex items-center justify-center my-2 overflow-hidden">
-        {/* Navigation Arrows */}
+      <div className="relative flex-grow flex items-center justify-center my-1 w-full overflow-visible">
+        {/* Navigation Arrows with 24px (left-6 / right-6) margin */}
         {activeIndex > 0 && (
           <button
             onClick={handlePrev}
-            className="absolute left-4 p-3 rounded-full bg-white/80 border border-coffee-light/10 text-coffee hover:bg-white shadow-md active:scale-90 transition-all z-20 cursor-pointer active-touch-feedback"
+            className="absolute left-6 p-3 rounded-full bg-white/80 border border-coffee-light/10 text-coffee hover:bg-white shadow-md active:scale-90 transition-all z-30 cursor-pointer active-touch-feedback"
             aria-label="Previous flavor"
           >
             <ChevronLeft className="w-6 h-6" />
@@ -103,7 +103,7 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
         {activeIndex < coffeesWithPrices.length - 1 && (
           <button
             onClick={handleNext}
-            className="absolute right-4 p-3 rounded-full bg-white/80 border border-coffee-light/10 text-coffee hover:bg-white shadow-md active:scale-90 transition-all z-20 cursor-pointer active-touch-feedback"
+            className="absolute right-6 p-3 rounded-full bg-white/80 border border-coffee-light/10 text-coffee hover:bg-white shadow-md active:scale-90 transition-all z-30 cursor-pointer active-touch-feedback"
             aria-label="Next flavor"
           >
             <ChevronRight className="w-6 h-6" />
@@ -115,21 +115,27 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
           drag="x"
           dragConstraints={{ left: 0, right: 0 }}
           onDragEnd={handleDragEnd}
-          className="relative w-[1000px] h-[340px] flex items-center justify-center cursor-grab active:cursor-grabbing"
+          className="relative w-full max-w-[1100px] h-[340px] flex items-center justify-center cursor-grab active:cursor-grabbing overflow-visible"
         >
           {coffeesWithPrices.map((coffee, index) => {
             const isActive = index === activeIndex;
             const diff = index - activeIndex;
+            const absDiff = Math.abs(diff);
+
+            // Scale & Opacity calculations for 1280x800 touchscreen fit
+            const scale = isActive ? 1.15 : absDiff === 1 ? 0.85 : absDiff === 2 ? 0.72 : 0;
+            const opacity = isActive ? 1.0 : absDiff === 1 ? 0.65 : absDiff === 2 ? 0.35 : 0;
+            const horizontalOffset = diff * 190; // 190px separation
 
             return (
               <motion.div
                 key={coffee.id}
-                style={{ pointerEvents: 'auto' }}
+                style={{ pointerEvents: absDiff > 2 ? 'none' : 'auto' }}
                 animate={{
-                  x: diff * 240, // Horizontal separation of cups
-                  scale: isActive ? 1.05 : 0.85,
-                  opacity: isActive ? 1.0 : 0.4,
-                  zIndex: 10 - Math.abs(diff),
+                  x: horizontalOffset,
+                  scale: scale,
+                  opacity: opacity,
+                  zIndex: 10 - absDiff,
                 }}
                 transition={{ type: 'spring', stiffness: 260, damping: 28 }}
                 className="absolute flex flex-col items-center justify-center cursor-pointer active-touch-feedback"
@@ -145,32 +151,31 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
                     duration: 3.5,
                     ease: "easeInOut"
                   }}
-                  className="relative w-[190px] h-[190px] flex items-center justify-center"
+                  className="relative w-[160px] h-[160px] flex items-center justify-center"
                 >
                   <img
                     src={coffee.image}
                     alt={coffee.name}
                     className="w-full h-full object-contain pointer-events-none"
                     style={{
-                      // Premium radial golden glow filter under the active cup
+                      // Premium radial golden glow filter under active cup
                       filter: isActive 
                         ? 'drop-shadow(0 15px 20px rgba(212, 163, 115, 0.45)) drop-shadow(0 4px 6px rgba(139, 90, 43, 0.15))' 
                         : 'drop-shadow(0 8px 12px rgba(0, 0, 0, 0.08))'
                     }}
                   />
-
                 </motion.div>
 
                 {/* Cup Specification Labels & Price */}
-                <div className="text-center mt-3 max-w-[220px]">
-                  <h3 className="font-sans font-black text-2xl text-coffee-dark tracking-tight uppercase leading-none mb-1">
+                <div className="text-center mt-2 max-w-[185px]">
+                  <h3 className="font-sans font-black text-xl text-coffee-dark tracking-tight uppercase leading-none mb-1">
                     {coffee.name}
                   </h3>
-                  <p className="text-[10px] text-coffee-light/75 leading-tight mb-2 h-7 flex items-center justify-center px-1 font-medium">
+                  <p className="text-[9.5px] text-coffee-light/75 leading-tight mb-1.5 h-6 flex items-center justify-center px-1 font-medium">
                     {coffee.desc}
                   </p>
 
-                  <div className="flex flex-col items-center gap-1 mt-1">
+                  <div className="flex flex-col items-center gap-1 mt-0.5">
                     <span className="font-sans font-black text-base text-coffee">
                       ₹{coffee.price}
                     </span>
@@ -178,7 +183,7 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
                       <motion.button
                         initial={{ opacity: 0, scale: 0.9 }}
                         animate={{ opacity: 1, scale: 1 }}
-                        className="px-4 py-1.5 bg-coffee hover:bg-coffee-dark text-cream-light font-bold text-[10.5px] rounded-full shadow-lg border border-coffee-light/10 transition-all active:scale-95 active-touch-feedback cursor-pointer"
+                        className="px-3.5 py-1 bg-coffee hover:bg-coffee-dark text-cream-light font-bold text-[10px] rounded-full shadow-lg border border-coffee-light/10 transition-all active:scale-95 active-touch-feedback cursor-pointer"
                         onClick={(e) => {
                           e.stopPropagation();
                           onSelect(coffee);
@@ -196,15 +201,15 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
       </div>
 
       {/* Pagination indicators and helper instruction */}
-      <div className="flex flex-col items-center select-none pb-1">
+      <div className="flex flex-col items-center select-none pb-1 z-10">
         {/* Pagination Dots */}
         <div className="flex justify-center gap-2 mb-1.5">
           {coffeesWithPrices.map((_, index) => (
             <button
               key={index}
               onClick={() => setActiveIndex(index)}
-              className={`w-2 h-2 rounded-full transition-all duration-300 cursor-pointer ${
-                index === activeIndex ? 'bg-coffee-dark w-4' : 'bg-coffee-light/35'
+              className={`h-2 rounded-full transition-all duration-300 cursor-pointer ${
+                index === activeIndex ? 'bg-coffee-dark w-4' : 'bg-coffee-light/35 w-2'
               }`}
               aria-label={`Go to flavor ${index + 1}`}
             />
