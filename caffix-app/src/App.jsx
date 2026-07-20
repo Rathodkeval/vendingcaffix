@@ -8,7 +8,7 @@ import SuccessScreen from './components/SuccessScreen';
 import AdminPasscode from './components/AdminPasscode';
 import AdminDashboard from './components/AdminDashboard';
 import PaymentFailedScreen from './components/PaymentFailedScreen';
-import { Wrench } from 'lucide-react';
+import { Wrench, Loader2, ShieldAlert } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || (
   window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.port === '8000' || window.location.port === '5173'
@@ -17,6 +17,7 @@ const API_BASE = import.meta.env.VITE_API_URL || (
 );
 
 export default function App() {
+  const [kioskStatus, setKioskStatus] = useState('VERIFYING'); // 'VERIFYING' | 'AUTHORIZED' | 'UNAUTHORIZED'
   const [screen, setScreen] = useState('WELCOME');
   const [selectedCoffee, setSelectedCoffee] = useState(null);
   const [orderDetails, setOrderDetails] = useState(null);
@@ -121,8 +122,38 @@ export default function App() {
         console.error('Kiosk silent login failed:', e);
       }
     }
-    initKiosk();
+
+    async function verifyKioskDevice() {
+      const urlParams = new URLSearchParams(window.location.search);
+      const kioskParam = urlParams.get('kiosk');
+
+      if (!kioskParam) {
+        setKioskStatus('UNAUTHORIZED');
+        return;
+      }
+
+      try {
+        const res = await fetch(`${API_BASE}/kiosk/verify?kiosk=${encodeURIComponent(kioskParam)}`);
+        if (!res.ok) {
+          setKioskStatus('UNAUTHORIZED');
+          return;
+        }
+        const data = await res.json();
+        if (data && data.authorized === true) {
+          setKioskStatus('AUTHORIZED');
+          await initKiosk();
+        } else {
+          setKioskStatus('UNAUTHORIZED');
+        }
+      } catch (err) {
+        console.error('Kiosk verification failed:', err);
+        setKioskStatus('UNAUTHORIZED');
+      }
+    }
+
+    verifyKioskDevice();
   }, []);
+
 
   // Transition handlers
   const handleStartOrder = () => {
@@ -358,7 +389,36 @@ export default function App() {
     }
   };
 
+  if (kioskStatus === 'VERIFYING') {
+    return (
+      <div className="flex flex-col items-center justify-center h-full w-full bg-[#FAF6F0] text-coffee p-8 select-none">
+        <Loader2 className="w-12 h-12 text-gold animate-spin mb-4" />
+        <p className="font-sans font-semibold text-lg text-coffee-dark tracking-wide">
+          Verifying kiosk...
+        </p>
+      </div>
+    );
+  }
+
+  if (kioskStatus === 'UNAUTHORIZED') {
+    return (
+      <div className="flex flex-col items-center justify-center h-full w-full bg-[#FAF6F0] text-coffee p-8 text-center select-none">
+        <div className="p-5 bg-red-100 border-2 border-red-300 rounded-full mb-6 shadow-sm">
+          <ShieldAlert className="w-16 h-16 text-red-600" />
+        </div>
+        <h1 className="font-sans font-extrabold text-3xl md:text-4xl text-coffee-dark tracking-tight mb-4">
+          Unauthorized Device
+        </h1>
+        <p className="font-sans text-base md:text-lg text-coffee-light max-w-md leading-relaxed">
+          This ordering system is available only on authorized CAFFIX vending machines.
+        </p>
+
+      </div>
+    );
+  }
+
   return (
+
     <div className="flex flex-col h-full w-full bg-[#FAF6F0] overflow-hidden select-none">
       {/* Show header on normal customer screens, hide in Welcome and Admin panels */}
       {screen !== 'WELCOME' && screen !== 'ADMIN' && screen !== 'PASSCODE' && !maintenanceMode && (
