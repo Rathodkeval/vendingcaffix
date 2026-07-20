@@ -12,7 +12,7 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
   const [activeTab, setActiveTab] = useState('UPI'); // UPI, QR, CARD, NETBANKING
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStatus, setProcessingStatus] = useState('');
-  
+
   // Form states for mock checkout
   const [vpa, setVpa] = useState('kiosk01@caffix');
   const [cardNumber, setCardNumber] = useState('4111 2222 3333 4444');
@@ -57,7 +57,7 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
       prefill: {
         name: "CAFFIX",
         email: "support@caffix.com",
-        contact: "9999999999"
+        contact: "9426412200"
       },
       readonly: {
         name: true,
@@ -233,7 +233,7 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
 
         {/* Right Side: Interactive Payment Client */}
         <div className="col-span-3 flex flex-col items-center justify-center self-stretch bg-white rounded-2xl border border-coffee-light/10 p-4 shadow-sm relative overflow-hidden">
-          
+
           {/* Overlay loading states */}
           {isProcessing ? (
             <div className="absolute inset-0 bg-white/95 flex flex-col justify-center items-center z-20 p-6 text-center animate-fade-in">
@@ -291,11 +291,10 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
                     <button
                       key={tab.id}
                       onClick={() => setActiveTab(tab.id)}
-                      className={`flex-grow flex items-center justify-center gap-1.5 py-2 rounded-lg transition-all ${
-                        activeTab === tab.id
-                          ? 'bg-white text-blue-600 shadow-sm'
-                          : 'text-slate-500 hover:text-slate-800'
-                      }`}
+                      className={`flex-grow flex items-center justify-center gap-1.5 py-2 rounded-lg transition-all ${activeTab === tab.id
+                        ? 'bg-white text-blue-600 shadow-sm'
+                        : 'text-slate-500 hover:text-slate-800'
+                        }`}
                     >
                       <Icon className="w-3.5 h-3.5" />
                       <span>{tab.label}</span>
@@ -311,7 +310,7 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
                   <div className="space-y-3.5 text-center">
                     <div className="flex justify-center gap-6 items-center">
                       {/* Fake Vector QR */}
-                      <div 
+                      <div
                         onClick={handleMockPay}
                         title="Click to quickly simulate QR Scan payment!"
                         className="p-2 bg-white rounded-xl border border-slate-200 shadow-sm cursor-pointer hover:border-blue-500 transition-colors group relative"
@@ -426,11 +425,10 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
                         <button
                           key={bank.id}
                           onClick={() => setSelectedBank(bank.id)}
-                          className={`p-2 border text-[11px] font-semibold rounded-lg text-left flex justify-between items-center transition-colors ${
-                            selectedBank === bank.id
-                              ? 'border-blue-600 bg-blue-50/50 text-blue-800'
-                              : 'border-slate-100 bg-slate-50 hover:bg-slate-100 text-slate-700'
-                          }`}
+                          className={`p-2 border text-[11px] font-semibold rounded-lg text-left flex justify-between items-center transition-colors ${selectedBank === bank.id
+                            ? 'border-blue-600 bg-blue-50/50 text-blue-800'
+                            : 'border-slate-100 bg-slate-50 hover:bg-slate-100 text-slate-700'
+                            }`}
                         >
                           <span>{bank.name}</span>
                           {selectedBank === bank.id && <Check className="w-3.5 h-3.5 text-blue-600" />}
@@ -440,11 +438,10 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
                     <button
                       onClick={handleMockPay}
                       disabled={!selectedBank}
-                      className={`w-full py-2 font-bold text-xs rounded-lg mt-1 transition-all active:scale-95 ${
-                        selectedBank
-                          ? 'bg-blue-600 hover:bg-blue-700 text-white cursor-pointer'
-                          : 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                      }`}
+                      className={`w-full py-2 font-bold text-xs rounded-lg mt-1 transition-all active:scale-95 ${selectedBank
+                        ? 'bg-blue-600 hover:bg-blue-700 text-white cursor-pointer'
+                        : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                        }`}
                     >
                       Pay ₹{orderDetails?.price}
                     </button>
@@ -464,11 +461,10 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
                         <button
                           key={wallet.id}
                           onClick={() => setSelectedWallet(wallet.id)}
-                          className={`p-2 border text-[11px] font-semibold rounded-lg text-left flex justify-between items-center transition-colors ${
-                            selectedWallet === wallet.id
-                              ? 'border-blue-600 bg-blue-50/50 text-blue-800'
-                              : 'border-slate-100 bg-slate-50 hover:bg-slate-100 text-slate-700'
-                          }`}
+                          className={`p-2 border text-[11px] font-semibold rounded-lg text-left flex justify-between items-center transition-colors ${selectedWallet === wallet.id
+                            ? 'border-blue-600 bg-blue-50/50 text-blue-800'
+                            : 'border-slate-100 bg-slate-50 hover:bg-slate-100 text-slate-700'
+                            }`}
                         >
                           <span>{wallet.name}</span>
                           {selectedWallet === wallet.id && <Check className="w-3.5 h-3.5 text-blue-600" />}
@@ -478,11 +474,10 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
                     <button
                       onClick={handleMockPay}
                       disabled={!selectedWallet}
-                      className={`w-full py-2 font-bold text-xs rounded-lg mt-1 transition-all active:scale-95 ${
-                        selectedWallet
-                          ? 'bg-blue-600 hover:bg-blue-700 text-white cursor-pointer'
-                          : 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                      }`}
+                      className={`w-full py-2 font-bold text-xs rounded-lg mt-1 transition-all active:scale-95 ${selectedWallet
+                        ? 'bg-blue-600 hover:bg-blue-700 text-white cursor-pointer'
+                        : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                        }`}
                     >
                       Pay ₹{orderDetails?.price}
                     </button>
