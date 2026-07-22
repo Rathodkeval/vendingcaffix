@@ -49,7 +49,7 @@ export default function FlavorAndCustomizationView({
   onBackToWelcome
 }) {
   // Step state: 'SELECTION' | 'SUMMARY'
-  const [step, setStep] = useState(initialStep);
+  const [step, setStep] = useState(initialStep === 'WELCOME' ? 'SELECTION' : initialStep);
   const [activeIndex, setActiveIndex] = useState(2); // Default to Hazel Gold (index 2)
   const [selectedCoffee, setSelectedCoffeeState] = useState(
     propSelectedCoffee || COFFEES[2]
@@ -82,6 +82,31 @@ export default function FlavorAndCustomizationView({
     });
   }, []);
 
+  // Sync initialStep prop with step state
+  useEffect(() => {
+    if (initialStep === 'SELECTION' || initialStep === 'SUMMARY') {
+      setStep(initialStep);
+    } else if (initialStep === 'WELCOME') {
+      setStep('SELECTION');
+    }
+  }, [initialStep]);
+
+  // Sync propSelectedCoffee with selectedCoffeeState and activeIndex
+  useEffect(() => {
+    if (!propSelectedCoffee) {
+      setSelectedCoffeeState(coffeesWithPrices[2]);
+      setExtraSugar(false);
+      setBase('water');
+      setActiveIndex(2);
+    } else {
+      setSelectedCoffeeState(propSelectedCoffee);
+      const idx = coffeesWithPrices.findIndex((c) => c.id === propSelectedCoffee.id);
+      if (idx !== -1) {
+        setActiveIndex(idx);
+      }
+    }
+  }, [propSelectedCoffee]);
+
   // Update selected coffee when activeIndex changes in selection mode
   const handleNext = () => {
     if (isAnimatingRef.current || step === 'SUMMARY') return;
@@ -113,6 +138,10 @@ export default function FlavorAndCustomizationView({
       containerRef.current.style.pointerEvents = 'none';
     }
 
+    // Ensure the selected flavor is updated BEFORE navigation starts
+    setSelectedCoffeeState({ ...coffeeToSelect });
+    if (onSelectCoffee) onSelectCoffee({ ...coffeeToSelect });
+
     // Set step to SUMMARY, which triggers Framer Motion's shared-element transition
     setStep('SUMMARY');
 
@@ -141,6 +170,12 @@ export default function FlavorAndCustomizationView({
         if (containerRef.current) {
           containerRef.current.style.pointerEvents = 'auto';
         }
+        // Reset selection and customization state when returning to the flavor selection screen
+        setSelectedCoffeeState(coffeesWithPrices[2]);
+        if (onSelectCoffee) onSelectCoffee(null);
+        setExtraSugar(false);
+        setBase('water');
+        setActiveIndex(2);
       }, 650);
     } else {
       onBackToWelcome();

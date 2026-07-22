@@ -372,6 +372,7 @@ export default function App() {
   };
 
   const handleAdminCancel = () => {
+    setSelectedCoffee(null);
     setScreen('WELCOME');
   };
 
@@ -451,14 +452,31 @@ export default function App() {
           </div>
         ) : (
           <LayoutGroup>
-            {screen === 'WELCOME' && (
+            {/* Welcome Screen Wrapper */}
+            <div
+              className="absolute inset-0 transition-opacity duration-300"
+              style={{
+                opacity: screen === 'WELCOME' ? 1 : 0,
+                pointerEvents: screen === 'WELCOME' ? 'auto' : 'none',
+                zIndex: screen === 'WELCOME' ? 10 : 0
+              }}
+            >
               <WelcomeScreen 
                 key="welcome"
                 onStart={handleStartOrder} 
                 onAdminAccess={handleTriggerAdmin}
               />
-            )}
-            {(screen === 'SELECTION' || screen === 'SUMMARY') && (
+            </div>
+            
+            {/* Flavor Selection Screen Wrapper (Always mounted/preloaded) */}
+            <div
+              className="absolute inset-0 transition-opacity duration-300"
+              style={{
+                opacity: (screen === 'SELECTION' || screen === 'SUMMARY') ? 1 : 0,
+                pointerEvents: (screen === 'SELECTION' || screen === 'SUMMARY') ? 'auto' : 'none',
+                zIndex: (screen === 'SELECTION' || screen === 'SUMMARY') ? 20 : 0
+              }}
+            >
               <FlavorAndCustomizationView
                 key="flavor_and_summary"
                 initialStep={screen}
@@ -466,9 +484,12 @@ export default function App() {
                 selectedCoffee={selectedCoffee}
                 onSelectCoffee={(coffee) => setSelectedCoffee(coffee)}
                 onConfirmOrder={handleConfirmOrder}
-                onBackToWelcome={() => setScreen('WELCOME')}
+                onBackToWelcome={() => {
+                  setSelectedCoffee(null);
+                  setScreen('WELCOME');
+                }}
               />
-            )}
+            </div>
 
             <AnimatePresence mode="popLayout">
               {screen === 'PAYMENT' && (
