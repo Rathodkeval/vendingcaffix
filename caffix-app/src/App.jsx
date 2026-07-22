@@ -451,25 +451,26 @@ export default function App() {
           </div>
         ) : (
           <LayoutGroup>
+            {screen === 'WELCOME' && (
+              <WelcomeScreen 
+                key="welcome"
+                onStart={handleStartOrder} 
+                onAdminAccess={handleTriggerAdmin}
+              />
+            )}
+            {(screen === 'SELECTION' || screen === 'SUMMARY') && (
+              <FlavorAndCustomizationView
+                key="flavor_and_summary"
+                initialStep={screen}
+                prices={prices}
+                selectedCoffee={selectedCoffee}
+                onSelectCoffee={(coffee) => setSelectedCoffee(coffee)}
+                onConfirmOrder={handleConfirmOrder}
+                onBackToWelcome={() => setScreen('WELCOME')}
+              />
+            )}
+
             <AnimatePresence mode="popLayout">
-              {screen === 'WELCOME' && (
-                <WelcomeScreen 
-                  key="welcome"
-                  onStart={handleStartOrder} 
-                  onAdminAccess={handleTriggerAdmin}
-                />
-              )}
-              {(screen === 'SELECTION' || screen === 'SUMMARY') && (
-                <FlavorAndCustomizationView
-                  key="flavor_and_summary"
-                  initialStep={screen}
-                  prices={prices}
-                  selectedCoffee={selectedCoffee}
-                  onSelectCoffee={(coffee) => setSelectedCoffee(coffee)}
-                  onConfirmOrder={handleConfirmOrder}
-                  onBackToWelcome={() => setScreen('WELCOME')}
-                />
-              )}
               {screen === 'PAYMENT' && (
                 <PaymentScreen 
                   key="payment"
