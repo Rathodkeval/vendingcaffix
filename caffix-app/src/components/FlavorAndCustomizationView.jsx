@@ -135,7 +135,7 @@ export default function FlavorAndCustomizationView({
 
     const deltaX = targetCenterX - cupCenterX;
     const deltaY = targetCenterY - cupCenterY;
-    const globalScaleTarget = (targetRect.height * 0.68) / cupRect.height;
+    const globalScaleTarget = (targetRect.height * 0.98) / cupRect.height;
 
     // Account for active cup parent div scale(1.15) coordinate space
     const parentScale = 1.15;
@@ -277,25 +277,26 @@ export default function FlavorAndCustomizationView({
             step === 'SUMMARY' ? 'pointer-events-auto' : 'pointer-events-none'
           }`}
         >
-          {/* Left Target Card Box for Cup (Always mounted) */}
+          {/* Left Target Product Showcase (Clean, Minimal, Containerless Apple-Style Presentation) */}
           <div
             ref={leftPanelCardRef}
             style={{ opacity: step === 'SUMMARY' ? 1 : 0, willChange: 'opacity' }}
-            className="col-span-2 bg-white rounded-2xl border border-coffee-light/10 p-3 flex flex-col justify-between shadow-sm overflow-hidden"
+            className="col-span-2 flex flex-col items-center justify-between py-1 px-2 overflow-hidden border-none bg-transparent shadow-none"
           >
-            {/* Dedicated Cup Target Frame */}
+            {/* Dedicated Cup Target Frame (No box, no border, no shadow, no background card) */}
             <div
               ref={leftPanelCupBoxRef}
-              className="w-full h-[210px] rounded-xl flex items-center justify-center border border-cream shadow-inner mb-2 bg-[#FAF6F0] p-2 overflow-hidden relative"
+              className="w-full flex-grow flex items-center justify-center relative min-h-[255px] max-h-[285px] overflow-visible border-none bg-transparent shadow-none"
             >
               {/* Cup physically moves here during animation */}
             </div>
 
-            <div className="mt-0.5 px-0.5">
-              <h3 className="font-sans font-bold text-xl text-coffee-dark tracking-[0.5px] uppercase leading-tight">
+            {/* Centered Flavor Name & Description Directly Below Cup */}
+            <div className="flex flex-col items-center text-center mt-1.5 px-2">
+              <h3 className="font-sans font-black text-2xl text-coffee-dark tracking-[0.5px] uppercase leading-none mb-1">
                 {selectedCoffee.name}
               </h3>
-              <p className="text-[11px] text-coffee-dark/85 font-medium mt-0.5 leading-snug line-clamp-2">
+              <p className="text-[11.5px] text-coffee-dark/80 font-medium leading-snug line-clamp-2 max-w-[280px]">
                 {selectedCoffee.desc}
               </p>
             </div>
