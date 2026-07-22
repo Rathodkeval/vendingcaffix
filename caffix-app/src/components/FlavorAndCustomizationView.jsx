@@ -194,44 +194,54 @@ export default function FlavorAndCustomizationView({
       isAnimatingRef.current = true;
       if (containerRef.current) containerRef.current.style.pointerEvents = 'none';
 
-      const cupEl = selectedCupImgRef.current;
-      const rightPanelEl = rightPanelRef.current;
+      // Switch step back to SELECTION to mount active cup in carousel for reverse animation
+      setStep('SELECTION');
 
-      const tl = gsap.timeline({
-        onComplete: () => {
+      requestAnimationFrame(() => {
+        const cupEl = selectedCupImgRef.current;
+        const rightPanelEl = rightPanelRef.current;
+
+        if (!cupEl) {
           isAnimatingRef.current = false;
           if (containerRef.current) containerRef.current.style.pointerEvents = 'auto';
-          setStep('SELECTION');
+          return;
         }
+
+        const tl = gsap.timeline({
+          onComplete: () => {
+            isAnimatingRef.current = false;
+            if (containerRef.current) containerRef.current.style.pointerEvents = 'auto';
+          }
+        });
+
+        // Reverse GSAP Timeline
+        tl.to(rightPanelEl, {
+          opacity: 0,
+          x: 20,
+          duration: 0.20,
+          ease: 'power2.in'
+        }, 0);
+
+        tl.to(cupEl, {
+          x: 0,
+          y: 0,
+          scale: 1,
+          duration: 0.45,
+          ease: 'power2.inOut'
+        }, 0.10);
+
+        tl.to('.carousel-non-selected', {
+          opacity: 1,
+          duration: 0.25,
+          ease: 'power2.out'
+        }, 0.25);
+
+        tl.to(leftPanelCardRef.current, {
+          opacity: 0,
+          duration: 0.20,
+          ease: 'power2.out'
+        }, 0.30);
       });
-
-      // Reverse GSAP Timeline
-      tl.to(rightPanelEl, {
-        opacity: 0,
-        x: 20,
-        duration: 0.20,
-        ease: 'power2.in'
-      }, 0);
-
-      tl.to(cupEl, {
-        x: 0,
-        y: 0,
-        scale: 1,
-        duration: 0.45,
-        ease: 'power2.inOut'
-      }, 0.10);
-
-      tl.to('.carousel-non-selected', {
-        opacity: 1,
-        duration: 0.25,
-        ease: 'power2.out'
-      }, 0.25);
-
-      tl.to(leftPanelCardRef.current, {
-        opacity: 0,
-        duration: 0.20,
-        ease: 'power2.out'
-      }, 0.30);
 
     } else {
       onBackToWelcome();
@@ -288,7 +298,15 @@ export default function FlavorAndCustomizationView({
               ref={leftPanelCupBoxRef}
               className="w-full h-[265px] flex items-center justify-center relative overflow-visible border-none bg-transparent shadow-none"
             >
-              {/* Cup physically moves here during animation */}
+              {/* Cup physically moves here during animation, then handsoff to local DOM centering inside box */}
+              {step === 'SUMMARY' && (
+                <img
+                  src={selectedCoffee.image}
+                  alt={selectedCoffee.name}
+                  className="h-[96%] w-auto object-contain pointer-events-none drop-shadow-md"
+                  style={{ willChange: 'transform, opacity' }}
+                />
+              )}
             </div>
 
             {/* Centered Flavor Name & Description Directly Below Cup */}
@@ -468,7 +486,8 @@ export default function FlavorAndCustomizationView({
               const absDiff = Math.abs(diff);
 
               const scale = isActive ? 1.15 : absDiff === 1 ? 0.85 : absDiff === 2 ? 0.72 : 0;
-              const opacity = isActive ? 1.0 : absDiff === 1 ? 0.65 : absDiff === 2 ? 0.35 : 0;
+              const isSelectedInSummary = step === 'SUMMARY' && isActive;
+              const opacity = isSelectedInSummary ? 0 : (isActive ? 1.0 : absDiff === 1 ? 0.65 : absDiff === 2 ? 0.35 : 0);
               const horizontalOffset = diff * 190;
 
               return (
