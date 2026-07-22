@@ -9,6 +9,7 @@ import AdminPasscode from './components/AdminPasscode';
 import AdminDashboard from './components/AdminDashboard';
 import PaymentFailedScreen from './components/PaymentFailedScreen';
 import { Wrench, Loader2, ShieldAlert } from 'lucide-react';
+import { AnimatePresence } from 'framer-motion';
 
 const API_BASE = import.meta.env.VITE_API_URL || (
   window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.port === '8000' || window.location.port === '5173'
@@ -448,15 +449,17 @@ export default function App() {
             </span>
           </div>
         ) : (
-          <>
+          <AnimatePresence mode="popLayout">
             {screen === 'WELCOME' && (
               <WelcomeScreen 
+                key="welcome"
                 onStart={handleStartOrder} 
                 onAdminAccess={handleTriggerAdmin}
               />
             )}
             {screen === 'SELECTION' && (
               <SelectionScreen 
+                key="selection"
                 onSelect={handleSelectCoffee} 
                 onBack={() => setScreen('WELCOME')}
                 prices={prices}
@@ -464,6 +467,7 @@ export default function App() {
             )}
             {screen === 'SUMMARY' && (
               <SummaryScreen 
+                key="summary"
                 selectedCoffee={selectedCoffee} 
                 onConfirm={handleConfirmOrder} 
                 onBack={() => setScreen('SELECTION')} 
@@ -471,6 +475,7 @@ export default function App() {
             )}
             {screen === 'PAYMENT' && (
               <PaymentScreen 
+                key="payment"
                 orderDetails={orderDetails} 
                 onPaymentSuccess={handlePaymentSuccess} 
                 onPaymentFailed={() => setScreen('PAYMENT_FAILED')}
@@ -479,6 +484,7 @@ export default function App() {
             )}
             {screen === 'PAYMENT_FAILED' && (
               <PaymentFailedScreen 
+                key="payment_failed"
                 orderDetails={orderDetails} 
                 onRetry={() => setScreen('PAYMENT')}
                 onCancel={handleCancelOrder}
@@ -486,16 +492,18 @@ export default function App() {
             )}
 
             {screen === 'SUCCESS' && (
-              <SuccessScreen onFinished={handleFinishOrder} />
+              <SuccessScreen key="success" onFinished={handleFinishOrder} />
             )}
             {screen === 'PASSCODE' && (
               <AdminPasscode 
+                key="passcode"
                 onSuccess={handleAdminSuccess} 
                 onCancel={handleAdminCancel} 
               />
             )}
             {screen === 'ADMIN' && (
               <AdminDashboard
+                key="admin"
                 prices={prices}
                 onUpdatePrices={handleUpdatePrices}
                 maintenanceMode={maintenanceMode}
@@ -506,7 +514,7 @@ export default function App() {
                 onExit={handleFinishOrder}
               />
             )}
-          </>
+          </AnimatePresence>
         )}
       </main>
     </div>
