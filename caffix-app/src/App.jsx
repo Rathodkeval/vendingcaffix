@@ -3,6 +3,7 @@ import KioskHeader from './components/KioskHeader';
 import WelcomeScreen from './components/WelcomeScreen';
 import SelectionScreen from './components/SelectionScreen';
 import SummaryScreen from './components/SummaryScreen';
+import FlavorAndCustomizationView from './components/FlavorAndCustomizationView';
 import PaymentScreen from './components/PaymentScreen';
 import SuccessScreen from './components/SuccessScreen';
 import AdminPasscode from './components/AdminPasscode';
@@ -458,20 +459,15 @@ export default function App() {
                   onAdminAccess={handleTriggerAdmin}
                 />
               )}
-              {screen === 'SELECTION' && (
-                <SelectionScreen 
-                  key="selection"
-                  onSelect={handleSelectCoffee} 
-                  onBack={() => setScreen('WELCOME')}
+              {(screen === 'SELECTION' || screen === 'SUMMARY') && (
+                <FlavorAndCustomizationView
+                  key="flavor_and_summary"
+                  initialStep={screen}
                   prices={prices}
-                />
-              )}
-              {screen === 'SUMMARY' && (
-                <SummaryScreen 
-                  key="summary"
-                  selectedCoffee={selectedCoffee} 
-                  onConfirm={handleConfirmOrder} 
-                  onBack={() => setScreen('SELECTION')} 
+                  selectedCoffee={selectedCoffee}
+                  onSelectCoffee={(coffee) => setSelectedCoffee(coffee)}
+                  onConfirmOrder={handleConfirmOrder}
+                  onBackToWelcome={() => setScreen('WELCOME')}
                 />
               )}
               {screen === 'PAYMENT' && (
