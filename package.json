@@ -2,7 +2,7 @@
   "name": "caffix-monorepo",
   "private": true,
   "engines": {
-    "node": "20.x"
+    "node": "24.x"
   },
   "supportedArchitectures": {
     "os": ["win32", "linux"],
