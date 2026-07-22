@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ArrowLeft, ChevronLeft, ChevronRight, Check, Droplet, Milk } from 'lucide-react';
-import gsap from 'gsap';
+import { motion, LayoutGroup } from 'framer-motion';
 
 const COFFEES = [
   {
@@ -113,78 +113,16 @@ export default function FlavorAndCustomizationView({
       containerRef.current.style.pointerEvents = 'none';
     }
 
-    const cupEl = selectedCupImgRef.current;
-    const leftTargetEl = leftPanelCupBoxRef.current;
-    const rightPanelEl = rightPanelRef.current;
+    // Set step to SUMMARY, which triggers Framer Motion's shared-element transition
+    setStep('SUMMARY');
 
-    if (!cupEl || !leftTargetEl || !rightPanelEl) {
-      setStep('SUMMARY');
+    // Keep pointer events disabled for the 650ms animation duration
+    setTimeout(() => {
       isAnimatingRef.current = false;
-      if (containerRef.current) containerRef.current.style.pointerEvents = 'auto';
-      return;
-    }
-
-    // Measure bounding rectangles for GPU translate3d computation
-    const cupRect = cupEl.getBoundingClientRect();
-    const targetRect = leftTargetEl.getBoundingClientRect();
-
-    const cupCenterX = cupRect.left + cupRect.width / 2;
-    const cupCenterY = cupRect.top + cupRect.height / 2;
-    const targetCenterX = targetRect.left + targetRect.width / 2;
-    const targetCenterY = targetRect.top + targetRect.height / 2;
-
-    const deltaX = targetCenterX - cupCenterX;
-    const deltaY = targetCenterY - cupCenterY;
-    const globalScaleTarget = (targetRect.height * 0.98) / cupRect.height;
-
-    // Account for active cup parent div scale(1.15) coordinate space
-    const parentScale = 1.15;
-    const localDeltaX = deltaX / parentScale;
-    const localDeltaY = deltaY / parentScale;
-    const localScaleTarget = globalScaleTarget / parentScale;
-
-    // Construct Master GSAP Timeline (Requirement 8)
-    const tl = gsap.timeline({
-      onComplete: () => {
-        isAnimatingRef.current = false;
-        if (containerRef.current) {
-          containerRef.current.style.pointerEvents = 'auto';
-        }
-        // Requirement 6: Update React state ONLY after movement completes!
-        setStep('SUMMARY');
+      if (containerRef.current) {
+        containerRef.current.style.pointerEvents = 'auto';
       }
-    });
-
-    // Step 1: Fade out non-selected carousel items & UI (0ms -> 180ms)
-    tl.to('.carousel-non-selected', {
-      opacity: 0,
-      duration: 0.18,
-      ease: 'power2.out'
-    }, 0);
-
-    // Step 2: Fade in Left Panel container box frame (0ms -> 200ms)
-    tl.to(leftPanelCardRef.current, {
-      opacity: 1,
-      duration: 0.20,
-      ease: 'power2.out'
-    }, 0);
-
-    // Step 3: Move continuous coffee cup on GPU (100ms -> 600ms)
-    tl.to(cupEl, {
-      x: localDeltaX,
-      y: localDeltaY,
-      scale: localScaleTarget,
-      duration: 0.50,
-      ease: 'power2.inOut'
-    }, 0.10);
-
-    // Step 4: Fade & slide in Right Customization Panel (Requirement 10: opacity 0->1, x 20->0) (450ms -> 720ms)
-    tl.to(rightPanelEl, {
-      opacity: 1,
-      x: 0,
-      duration: 0.27,
-      ease: 'power2.out'
-    }, 0.45);
+    }, 650);
   };
 
   const handleBack = () => {
@@ -194,55 +132,16 @@ export default function FlavorAndCustomizationView({
       isAnimatingRef.current = true;
       if (containerRef.current) containerRef.current.style.pointerEvents = 'none';
 
-      // Switch step back to SELECTION to mount active cup in carousel for reverse animation
+      // Set step back to SELECTION to trigger reverse layout transition
       setStep('SELECTION');
 
-      requestAnimationFrame(() => {
-        const cupEl = selectedCupImgRef.current;
-        const rightPanelEl = rightPanelRef.current;
-
-        if (!cupEl) {
-          isAnimatingRef.current = false;
-          if (containerRef.current) containerRef.current.style.pointerEvents = 'auto';
-          return;
+      // Keep pointer events disabled for the 650ms animation duration
+      setTimeout(() => {
+        isAnimatingRef.current = false;
+        if (containerRef.current) {
+          containerRef.current.style.pointerEvents = 'auto';
         }
-
-        const tl = gsap.timeline({
-          onComplete: () => {
-            isAnimatingRef.current = false;
-            if (containerRef.current) containerRef.current.style.pointerEvents = 'auto';
-          }
-        });
-
-        // Reverse GSAP Timeline
-        tl.to(rightPanelEl, {
-          opacity: 0,
-          x: 20,
-          duration: 0.20,
-          ease: 'power2.in'
-        }, 0);
-
-        tl.to(cupEl, {
-          x: 0,
-          y: 0,
-          scale: 1,
-          duration: 0.45,
-          ease: 'power2.inOut'
-        }, 0.10);
-
-        tl.to('.carousel-non-selected', {
-          opacity: 1,
-          duration: 0.25,
-          ease: 'power2.out'
-        }, 0.25);
-
-        tl.to(leftPanelCardRef.current, {
-          opacity: 0,
-          duration: 0.20,
-          ease: 'power2.out'
-        }, 0.30);
-      });
-
+      }, 650);
     } else {
       onBackToWelcome();
     }
@@ -288,9 +187,12 @@ export default function FlavorAndCustomizationView({
           }`}
         >
           {/* Left Target Product Showcase (Vertically Centered Cup + Title + Description Block) */}
-          <div
+          {/* Left Target Product Showcase (Vertically Centered Cup + Title + Description Block) */}
+          <motion.div
             ref={leftPanelCardRef}
-            style={{ opacity: step === 'SUMMARY' ? 1 : 0, willChange: 'opacity' }}
+            animate={{ opacity: step === 'SUMMARY' ? 1 : 0 }}
+            transition={{ duration: 0.20, ease: 'easeOut' }}
+            style={{ willChange: 'opacity' }}
             className="col-span-2 flex flex-col items-center justify-center py-2 px-2 overflow-hidden border-none bg-transparent shadow-none gap-2"
           >
             {/* Dedicated Cup Target Frame */}
@@ -300,11 +202,17 @@ export default function FlavorAndCustomizationView({
             >
               {/* Cup physically moves here during animation, then handsoff to local DOM centering inside box */}
               {step === 'SUMMARY' && (
-                <img
+                <motion.img
+                  layoutId={`coffee-cup-image-${selectedCoffee.id}`}
                   src={selectedCoffee.image}
                   alt={selectedCoffee.name}
                   className="h-[96%] w-auto object-contain pointer-events-none drop-shadow-md"
                   style={{ willChange: 'transform, opacity' }}
+                  transition={{
+                    type: 'tween',
+                    ease: [0.22, 1, 0.36, 1],
+                    duration: 0.65
+                  }}
                 />
               )}
             </div>
@@ -318,14 +226,21 @@ export default function FlavorAndCustomizationView({
                 {selectedCoffee.desc}
               </p>
             </div>
-          </div>
+          </motion.div>
 
           {/* Right Customization Panel (Requirement 10: Mounted with opacity: 0, transform: translate3d(20px, 0, 0)) */}
-          <div
+          <motion.div
             ref={rightPanelRef}
-            style={{
+            animate={{
               opacity: step === 'SUMMARY' ? 1 : 0,
-              transform: step === 'SUMMARY' ? 'translate3d(0px, 0, 0)' : 'translate3d(20px, 0, 0)',
+              x: step === 'SUMMARY' ? 0 : 20
+            }}
+            transition={{
+              duration: 0.35,
+              delay: step === 'SUMMARY' ? 0.30 : 0,
+              ease: [0.22, 1, 0.36, 1]
+            }}
+            style={{
               pointerEvents: step === 'SUMMARY' ? 'auto' : 'none',
               willChange: 'transform, opacity'
             }}
@@ -448,12 +363,15 @@ export default function FlavorAndCustomizationView({
                 <span>Confirm Order</span>
               </button>
             </div>
-          </div>
+          </motion.div>
         </div>
 
 
         {/* FLAVOR SELECTION CAROUSEL LAYER (Always mounted in DOM) */}
-        <div
+        <motion.div
+          animate={{ opacity: step === 'SELECTION' ? 1 : 0 }}
+          transition={{ duration: 0.20, ease: 'easeOut' }}
+          style={{ willChange: 'opacity' }}
           className={`absolute inset-0 flex flex-col justify-between ${
             step === 'SELECTION' ? 'pointer-events-auto' : 'pointer-events-none'
           }`}
@@ -514,13 +432,20 @@ export default function FlavorAndCustomizationView({
                 >
                   {/* Single Continuous Coffee Cup Image Element (Requirement 2 & 9) */}
                   <div className="relative w-[160px] h-[160px] flex items-center justify-center">
-                    <img
-                      ref={isActive ? selectedCupImgRef : null}
-                      src={coffee.image}
-                      alt={coffee.name}
-                      style={{ willChange: 'transform, opacity' }}
-                      className="w-full h-full object-contain pointer-events-none drop-shadow-md"
-                    />
+                    {!isSelectedInSummary && (
+                      <motion.img
+                        layoutId={`coffee-cup-image-${coffee.id}`}
+                        src={coffee.image}
+                        alt={coffee.name}
+                        style={{ willChange: 'transform, opacity' }}
+                        className="w-full h-full object-contain pointer-events-none drop-shadow-md"
+                        transition={{
+                          type: 'tween',
+                          ease: [0.22, 1, 0.36, 1],
+                          duration: 0.65
+                        }}
+                      />
+                    )}
                   </div>
 
                   {/* Cup Title & Details (Fades out via .carousel-non-selected) */}
@@ -580,7 +505,7 @@ export default function FlavorAndCustomizationView({
               <span>Swipe left or right to explore our premium flavors</span>
             </div>
           </div>
-        </div>
+        </motion.div>
 
       </div>
     </div>
