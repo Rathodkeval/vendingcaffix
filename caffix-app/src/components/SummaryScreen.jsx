@@ -38,36 +38,40 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
         {/* Left Panel: Beverage details */}
         <div className="col-span-2 bg-white rounded-2xl border border-coffee-light/10 p-3 flex flex-col justify-between shadow-sm">
           <div>
+            {/* Total Amount on Upper Side */}
+            <div className="bg-cream-light/60 p-2 rounded-xl border border-cream mb-2">
+              <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wider block">
+                Total Amount
+              </span>
+              <div className="text-xl font-black text-coffee-dark leading-none mt-0.5">
+                ₹{currentPrice}
+              </div>
+            </div>
+
+            {/* Fully visible cup image */}
             <div
-              className="w-full h-[110px] rounded-xl bg-cover bg-center border border-cream shadow-inner mb-1.5"
+              className="w-full h-[170px] rounded-xl bg-contain bg-no-repeat bg-center border border-cream shadow-inner mb-2 bg-[#FAF6F0]"
               style={{ backgroundImage: `url('${selectedCoffee.image}')` }}
             />
-            <h3 className="font-sans font-extrabold text-lg text-coffee-dark tracking-tight leading-snug">
+          </div>
+
+          <div className="mt-1">
+            <h3 className="font-sans font-extrabold text-base text-coffee-dark tracking-tight leading-snug">
               {selectedCoffee.name}
             </h3>
-            <p className="text-xs text-coffee-light/80 mt-1 leading-snug">
+            <p className="text-[10.5px] text-coffee-light/80 mt-0.5 leading-snug">
               {selectedCoffee.desc}
             </p>
-          </div>
-          <div className="bg-cream-light/60 p-2.5 rounded-xl border border-cream mt-2">
-            <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wider block">
-              Specifications
-            </span>
-            <div className="text-[11px] text-coffee font-semibold mt-0.5 space-y-0.5">
-              <div>Cup Size: <span className="text-gold-dark">Standard</span></div>
-              <div>Sugar: <span className="text-gold-dark">{extraSugar ? 'Extra Sugar' : 'Standard'}</span></div>
-              <div>Base: <span className="text-gold-dark">{base === 'water' ? 'Water' : 'Milk'}</span></div>
-            </div>
           </div>
         </div>
 
         {/* Right Panel: Interactive Customizers */}
         <div className="col-span-3 bg-white rounded-2xl border border-coffee-light/10 p-3 flex flex-col justify-between shadow-sm">
-          <div className="space-y-4">
+          <div className="space-y-3">
             {/* Standard Recipe Message */}
-            <div className="bg-cream-light/20 border border-coffee-light/5 p-3.5 rounded-xl">
-              <h4 className="text-xs font-bold text-coffee-dark uppercase tracking-wider">CAFFIX BREW CODE</h4>
-              <p className="text-[11px] text-coffee-light mt-1 leading-relaxed">
+            <div className="bg-cream-light/20 border border-coffee-light/5 p-2 rounded-xl">
+              <h4 className="text-[10px] font-bold text-coffee-dark uppercase tracking-wider">CAFFIX BREW CODE</h4>
+              <p className="text-[11px] text-coffee-light mt-0.5 leading-relaxed">
                 Precision In Every Pour. Perfection In Every Sip
               </p>
             </div>
@@ -91,27 +95,27 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
             {/* Choose Your Base */}
             <div className="border-t border-cream pt-2">
               <h4 className="text-xs font-extrabold text-coffee-dark uppercase tracking-wider mb-0.5">Choose Your Base</h4>
-              <p className="text-[10px] text-coffee-light/80 font-medium mb-2">
+              <p className="text-[10px] text-coffee-light/80 font-medium mb-1.5">
                 Select either water or milk. You can choose only one.
               </p>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-3 mb-2">
                 {/* Water Card */}
                 <button
                   onClick={() => setBase('water')}
-                  className={`flex flex-col items-center justify-center py-3.5 px-4 rounded-2xl border-2 transition-all duration-300 cursor-pointer ${
+                  className={`flex flex-col items-center justify-center py-2 px-3 rounded-xl border-2 transition-all duration-300 cursor-pointer ${
                     base === 'water'
                       ? 'bg-coffee-dark border-coffee-dark text-cream-light shadow-md'
                       : 'bg-cream-light/30 border-cream hover:bg-cream-light/50 text-coffee-dark'
                   }`}
                 >
                   <div
-                    className={`w-11 h-11 rounded-full flex items-center justify-center mb-2.5 transition-all duration-300 ${
+                    className={`w-9 h-9 rounded-full flex items-center justify-center mb-1 transition-all duration-300 ${
                       base === 'water'
                         ? 'bg-white text-coffee-dark shadow-sm'
                         : 'border border-coffee-light/35 bg-transparent text-coffee-dark'
                     }`}
                   >
-                    <Droplet className="w-5.5 h-5.5" />
+                    <Droplet className="w-5 h-5" />
                   </div>
                   <span className="text-[11px] font-extrabold tracking-tight">Go Strong with Water</span>
                 </button>
@@ -119,38 +123,44 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
                 {/* Milk Card */}
                 <button
                   onClick={() => setBase('milk')}
-                  className={`flex flex-col items-center justify-center py-3.5 px-4 rounded-2xl border-2 transition-all duration-300 cursor-pointer ${
+                  className={`flex flex-col items-center justify-center py-2 px-3 rounded-xl border-2 transition-all duration-300 cursor-pointer ${
                     base === 'milk'
                       ? 'bg-coffee-dark border-coffee-dark text-cream-light shadow-md'
                       : 'bg-cream-light/30 border-cream hover:bg-cream-light/50 text-coffee-dark'
                   }`}
                 >
                   <div
-                    className={`w-11 h-11 rounded-full flex items-center justify-center mb-2.5 transition-all duration-300 ${
+                    className={`w-9 h-9 rounded-full flex items-center justify-center mb-1 transition-all duration-300 ${
                       base === 'milk'
                         ? 'bg-white text-coffee-dark shadow-sm'
                         : 'border border-coffee-light/35 bg-transparent text-coffee-dark'
                     }`}
                   >
-                    <Milk className="w-5.5 h-5.5" />
+                    <Milk className="w-5 h-5" />
                   </div>
                   <span className="text-[11px] font-extrabold tracking-tight">Go Creamy with MILK</span>
                 </button>
               </div>
             </div>
+
+            {/* Specifications (Moved from Left Panel to below Choose Your Base) */}
+            <div className="bg-cream-light/60 p-2 rounded-xl border border-cream">
+              <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wider block mb-1">
+                Specifications
+              </span>
+              <div className="grid grid-cols-3 gap-2 text-[11px] text-coffee font-semibold">
+                <div className="bg-white/80 px-2 py-1 rounded border border-cream/50 text-center">Cup: <span className="text-gold-dark font-extrabold">Standard</span></div>
+                <div className="bg-white/80 px-2 py-1 rounded border border-cream/50 text-center">Sugar: <span className="text-gold-dark font-extrabold">{extraSugar ? 'Extra Sugar' : 'Standard'}</span></div>
+                <div className="bg-white/80 px-2 py-1 rounded border border-cream/50 text-center">Base: <span className="text-gold-dark font-extrabold">{base === 'water' ? 'Water' : 'Milk'}</span></div>
+              </div>
+            </div>
           </div>
 
           {/* Pricing & Checkout Block */}
-          <div className="flex items-center justify-between border-t border-cream pt-2 mt-2">
-            <div className="flex items-center gap-3">
-              <div>
-                <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wide">Total Amount</span>
-                <div className="text-2xl font-black text-coffee-dark leading-none mt-0.5">₹{currentPrice}</div>
-              </div>
-            </div>
+          <div className="border-t border-cream pt-2">
             <button
               onClick={() => onConfirm({ name: selectedCoffee.name, size, price: currentPrice, extraSugar, base })}
-              className="py-2.5 px-6 bg-emerald-700 hover:bg-emerald-800 text-cream-light font-bold text-sm rounded-xl shadow-md transition-all flex items-center gap-2 active:scale-95 active-touch-feedback"
+              className="w-full py-2 bg-emerald-700 hover:bg-emerald-800 text-cream-light font-extrabold text-sm rounded-xl shadow-md transition-all flex items-center justify-center gap-2 active:scale-95 active-touch-feedback cursor-pointer"
             >
               <Check className="w-4 h-4" />
               <span>Confirm Order</span>
