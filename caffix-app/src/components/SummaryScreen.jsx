@@ -155,7 +155,7 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
             <motion.div variants={itemVariants} style={{ willChange: "transform, opacity" }} className="flex justify-between items-center bg-cream-light/30 p-2 rounded-xl border border-cream hover:bg-cream-light/40 transition-colors">
               <div className="flex flex-col">
                 <span className="text-xs font-bold text-coffee">Extra Sugar (+₹5)</span>
-                <span className="text-[10px] text-coffee-light/75">Add sweetness to your drink</span>
+                <span className="text-[10px] text-coffee-light/75">Add sweetness to your Sip</span>
               </div>
               <button
                 onClick={() => setExtraSugar(!extraSugar)}
@@ -171,7 +171,7 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
             <motion.div variants={itemVariants} style={{ willChange: "transform, opacity" }} className="border-t border-cream pt-2">
               <h4 className="text-xs font-extrabold text-coffee-dark uppercase tracking-wider mb-0.5">Choose Your Base</h4>
               <p className="text-[10px] text-coffee-light/80 font-medium mb-1.5">
-                Select either water or milk. You can choose only one.
+                Select either water or milk.
               </p>
               <div className="grid grid-cols-2 gap-3 mb-2">
                 {/* Water Card */}
