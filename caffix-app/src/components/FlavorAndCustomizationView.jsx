@@ -135,7 +135,7 @@ export default function FlavorAndCustomizationView({
 
     const deltaX = targetCenterX - cupCenterX;
     const deltaY = targetCenterY - cupCenterY;
-    const globalScaleTarget = (targetRect.height * 0.90) / cupRect.height;
+    const globalScaleTarget = (targetRect.height * 0.68) / cupRect.height;
 
     // Account for active cup parent div scale(1.15) coordinate space
     const parentScale = 1.15;
@@ -291,11 +291,11 @@ export default function FlavorAndCustomizationView({
               {/* Cup physically moves here during animation */}
             </div>
 
-            <div className="mt-1">
-              <h3 className="font-sans font-extrabold text-base text-coffee-dark tracking-tight leading-snug">
+            <div className="mt-0.5 px-0.5">
+              <h3 className="font-sans font-bold text-xl text-coffee-dark tracking-[0.5px] uppercase leading-tight">
                 {selectedCoffee.name}
               </h3>
-              <p className="text-[10.5px] text-coffee-light/80 mt-0.5 leading-snug">
+              <p className="text-[11px] text-coffee-dark/85 font-medium mt-0.5 leading-snug line-clamp-2">
                 {selectedCoffee.desc}
               </p>
             </div>
