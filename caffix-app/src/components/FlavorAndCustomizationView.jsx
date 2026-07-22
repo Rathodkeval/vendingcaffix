@@ -286,7 +286,7 @@ export default function FlavorAndCustomizationView({
             {/* Dedicated Cup Target Frame */}
             <div
               ref={leftPanelCupBoxRef}
-              className="w-full h-[220px] flex items-center justify-center relative overflow-visible border-none bg-transparent shadow-none"
+              className="w-full h-[265px] flex items-center justify-center relative overflow-visible border-none bg-transparent shadow-none"
             >
               {/* Cup physically moves here during animation */}
             </div>
