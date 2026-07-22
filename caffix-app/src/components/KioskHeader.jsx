@@ -38,8 +38,8 @@ export default function KioskHeader({ onAdminAccess }) {
       {/* Centered Tagline */}
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
         <span 
-          style={{ fontFamily: "'Eurostile', 'Eurostile Extended', 'Microgramma', 'Orbitron', sans-serif" }}
-          className="text-2xl md:text-3xl font-black tracking-widest text-[#FAF6F0] uppercase"
+          style={{ fontFamily: "'Hobo Std', 'Hobo', 'Fredoka', 'Comfortaa', cursive, sans-serif" }}
+          className="text-2xl md:text-3xl font-extrabold tracking-wider text-[#FAF6F0] uppercase"
         >
           YOUR AI BARISTA
         </span>
