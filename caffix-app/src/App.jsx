@@ -458,7 +458,8 @@ export default function App() {
               style={{
                 opacity: screen === 'WELCOME' ? 1 : 0,
                 pointerEvents: screen === 'WELCOME' ? 'auto' : 'none',
-                zIndex: screen === 'WELCOME' ? 10 : 0
+                zIndex: screen === 'WELCOME' ? 10 : 0,
+                display: (screen === 'WELCOME' || screen === 'SELECTION' || screen === 'SUMMARY') ? 'block' : 'none'
               }}
             >
               <WelcomeScreen 
@@ -474,7 +475,8 @@ export default function App() {
               style={{
                 opacity: (screen === 'SELECTION' || screen === 'SUMMARY') ? 1 : 0,
                 pointerEvents: (screen === 'SELECTION' || screen === 'SUMMARY') ? 'auto' : 'none',
-                zIndex: (screen === 'SELECTION' || screen === 'SUMMARY') ? 20 : 0
+                zIndex: (screen === 'SELECTION' || screen === 'SUMMARY') ? 20 : 0,
+                display: (screen === 'WELCOME' || screen === 'SELECTION' || screen === 'SUMMARY') ? 'block' : 'none'
               }}
             >
               <FlavorAndCustomizationView

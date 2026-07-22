@@ -128,6 +128,16 @@ export default function FlavorAndCustomizationView({
     }
   };
 
+  const handleDragEnd = (event, info) => {
+    if (isAnimatingRef.current || step === 'SUMMARY') return;
+    const swipeThreshold = 50; // pixels
+    if (info.offset.x < -swipeThreshold) {
+      handleNext();
+    } else if (info.offset.x > swipeThreshold) {
+      handlePrev();
+    }
+  };
+
   // Main Shared Element GPU Animation Handler
   const triggerSelectAnimation = (coffeeToSelect) => {
     if (isAnimatingRef.current) return;
@@ -432,7 +442,12 @@ export default function FlavorAndCustomizationView({
           )}
 
           {/* Carousel Track */}
-          <div className="relative w-full h-[340px] flex items-center justify-center overflow-visible">
+          <motion.div
+            drag={step === 'SUMMARY' ? false : "x"}
+            dragConstraints={{ left: 0, right: 0 }}
+            onDragEnd={handleDragEnd}
+            className="relative w-full h-[340px] flex items-center justify-center cursor-grab active:cursor-grabbing overflow-visible"
+          >
             {coffeesWithPrices.map((coffee, index) => {
               const isActive = index === activeIndex;
               const diff = index - activeIndex;
@@ -511,7 +526,7 @@ export default function FlavorAndCustomizationView({
                 </div>
               );
             })}
-          </div>
+          </motion.div>
 
           {/* Carousel Footer & Pagination */}
           <div className="carousel-non-selected flex flex-col items-center select-none pb-1 z-10">
