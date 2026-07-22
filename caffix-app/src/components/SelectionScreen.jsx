@@ -256,7 +256,7 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
         className="flex flex-col items-center select-none pb-1 z-10"
       >
         {/* Pagination Dots */}
-        <div className="flex justify-center gap-2 mb-1.5">
+        <div className="flex justify-center gap-2">
           {coffeesWithPrices.map((_, index) => (
             <button
               key={index}
@@ -269,13 +269,20 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
           ))}
         </div>
 
-        {/* Swipe instruction */}
-        <div className="text-center text-[10.5px] text-coffee-light/60 font-semibold flex items-center justify-center gap-1.5">
-          <svg className="w-3.5 h-3.5 text-coffee/60 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-          </svg>
-          <span>Swipe left or right to explore our premium flavors</span>
-        </div>
+        {/* Product Disclaimer */}
+        <p 
+          style={{
+            fontSize: '13px',
+            fontWeight: 400,
+            color: '#9A8B7A',
+            opacity: 0.8,
+            letterSpacing: '0.2px',
+            lineHeight: 1.4
+          }}
+          className="text-center mt-4 mb-1 whitespace-nowrap"
+        >
+          Images are for illustrative purposes only. Actual product appearance may vary.
+        </p>
       </motion.div>
     </motion.div>
   );
