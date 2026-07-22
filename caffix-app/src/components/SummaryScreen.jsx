@@ -38,19 +38,9 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
         {/* Left Panel: Beverage details */}
         <div className="col-span-2 bg-white rounded-2xl border border-coffee-light/10 p-3 flex flex-col justify-between shadow-sm">
           <div>
-            {/* Total Amount on Upper Side */}
-            <div className="bg-cream-light/60 p-2 rounded-xl border border-cream mb-2">
-              <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wider block">
-                Total Amount
-              </span>
-              <div className="text-xl font-black text-coffee-dark leading-none mt-0.5">
-                ₹{currentPrice}
-              </div>
-            </div>
-
             {/* Fully visible cup image */}
             <div
-              className="w-full h-[170px] rounded-xl bg-contain bg-no-repeat bg-center border border-cream shadow-inner mb-2 bg-[#FAF6F0]"
+              className="w-full h-[210px] rounded-xl bg-contain bg-no-repeat bg-center border border-cream shadow-inner mb-2 bg-[#FAF6F0]"
               style={{ backgroundImage: `url('${selectedCoffee.image}')` }}
             />
           </div>
@@ -138,7 +128,7 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
                   >
                     <Milk className="w-5 h-5" />
                   </div>
-                  <span className="text-[11px] font-extrabold tracking-tight">Go Creamy with MILK</span>
+                  <span className="text-[11px] font-extrabold tracking-tight">Go Creamy with Milk</span>
                 </button>
               </div>
             </div>
@@ -157,10 +147,14 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
           </div>
 
           {/* Pricing & Checkout Block */}
-          <div className="border-t border-cream pt-2">
+          <div className="flex items-center justify-between border-t border-cream pt-2">
+            <div className="flex flex-col">
+              <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wide">TOTAL AMOUNT</span>
+              <div className="text-2xl font-black text-coffee-dark leading-none mt-0.5">₹{currentPrice}</div>
+            </div>
             <button
               onClick={() => onConfirm({ name: selectedCoffee.name, size, price: currentPrice, extraSugar, base })}
-              className="w-full py-2 bg-emerald-700 hover:bg-emerald-800 text-cream-light font-extrabold text-sm rounded-xl shadow-md transition-all flex items-center justify-center gap-2 active:scale-95 active-touch-feedback cursor-pointer"
+              className="py-2.5 px-6 bg-coffee-dark hover:bg-coffee-dark/90 text-cream-light font-bold text-sm rounded-xl shadow-md transition-all flex items-center gap-2 active:scale-95 active-touch-feedback cursor-pointer"
             >
               <Check className="w-4 h-4" />
               <span>Confirm Order</span>
