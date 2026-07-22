@@ -227,19 +227,6 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
                     <span className="font-sans font-black text-base text-coffee">
                       ₹{coffee.price}
                     </span>
-                    {isActive && (
-                      <motion.button
-                        initial={{ opacity: 0, scale: 0.9 }}
-                        animate={{ opacity: isAnimatingOut ? 0 : 1, scale: isAnimatingOut ? 0.9 : 1 }}
-                        className="px-3.5 py-1 bg-coffee hover:bg-coffee-dark text-cream-light font-bold text-[10px] rounded-full shadow-lg border border-coffee-light/10 transition-all active:scale-95 active-touch-feedback cursor-pointer"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleCoffeeSelect(coffee);
-                        }}
-                      >
-                        Choose Your Sip
-                      </motion.button>
-                    )}
                   </div>
                 </motion.div>
               </motion.div>
@@ -255,6 +242,19 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
         style={{ willChange: "opacity" }}
         className="flex flex-col items-center select-none pb-1 z-10"
       >
+        {/* Static Choose Your Sip Button */}
+        <motion.button
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: isAnimatingOut ? 0 : 1, scale: isAnimatingOut ? 0.9 : 1 }}
+          className="px-4 py-1.5 bg-coffee hover:bg-coffee-dark text-cream-light font-bold text-xs rounded-full shadow-lg border border-coffee-light/10 transition-all active:scale-95 active-touch-feedback cursor-pointer mb-3"
+          onClick={(e) => {
+            e.stopPropagation();
+            handleCoffeeSelect(coffeesWithPrices[activeIndex]);
+          }}
+        >
+          Choose Your Sip
+        </motion.button>
+
         {/* Pagination Dots */}
         <div className="flex justify-center gap-2">
           {coffeesWithPrices.map((_, index) => (

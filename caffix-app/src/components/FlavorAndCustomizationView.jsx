@@ -510,17 +510,6 @@ export default function FlavorAndCustomizationView({
                       <span className="font-sans font-black text-base text-coffee">
                         ₹{coffee.price}
                       </span>
-                      {isActive && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            triggerSelectAnimation(coffee);
-                          }}
-                          className="px-3.5 py-1 bg-coffee hover:bg-coffee-dark text-cream-light font-bold text-[10px] rounded-full shadow-lg border border-coffee-light/10 transition-all active:scale-95 cursor-pointer"
-                        >
-                          Choose Your Sip
-                        </button>
-                      )}
                     </div>
                   </div>
                 </div>
@@ -530,6 +519,17 @@ export default function FlavorAndCustomizationView({
 
           {/* Carousel Footer & Pagination */}
           <div className="carousel-non-selected flex flex-col items-center select-none pb-1 z-10">
+            {/* Static Choose Your Sip Button */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                triggerSelectAnimation(activeCoffee);
+              }}
+              className="px-4 py-1.5 bg-coffee hover:bg-coffee-dark text-cream-light font-bold text-xs rounded-full shadow-lg border border-coffee-light/10 transition-all active:scale-95 cursor-pointer mb-3"
+            >
+              Choose Your Sip
+            </button>
+
             <div className="flex justify-center gap-2">
               {coffeesWithPrices.map((_, index) => (
                 <button
