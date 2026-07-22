@@ -80,23 +80,26 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
     setSelectingCoffee(coffee);
     setIsAnimatingOut(true);
 
-    // Step 1 micro-interaction: scale 1.05 for 140ms then trigger screen transition
+    // Timeline: 120ms cup scale (1.04x) & 180ms non-selected elements fade -> then trigger screen transition
     setTimeout(() => {
       onSelect(coffee);
-    }, 140);
+    }, 180);
   };
 
   return (
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      exit={{ opacity: 0, transition: { duration: 0.3 } }}
-      className="absolute inset-0 flex flex-col justify-between px-6 pt-4 pb-3 bg-gradient-to-b from-[#FAF6F0] via-[#F5ECE2] to-[#FAF6F0] overflow-x-hidden overflow-y-hidden select-none"
+      exit={{ opacity: 0, transition: { duration: 0.18 } }}
+      className={`absolute inset-0 flex flex-col justify-between px-6 pt-4 pb-3 bg-gradient-to-b from-[#FAF6F0] via-[#F5ECE2] to-[#FAF6F0] overflow-x-hidden overflow-y-hidden select-none ${
+        isAnimatingOut ? 'pointer-events-none' : ''
+      }`}
     >
       {/* Title Header Row */}
       <motion.div
-        animate={{ opacity: isAnimatingOut ? 0 : 1, y: isAnimatingOut ? -10 : 0 }}
-        transition={{ duration: 0.2 }}
+        animate={{ opacity: isAnimatingOut ? 0 : 1 }}
+        transition={{ duration: 0.18, ease: "easeOut" }}
+        style={{ willChange: "opacity" }}
         className="flex items-center gap-4 z-10"
       >
         <button
@@ -148,16 +151,16 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
             const diff = index - activeIndex;
             const absDiff = Math.abs(diff);
 
-            // Calculate opacity & scale
+            // GPU scale & opacity calculations
             let scale = isActive ? 1.15 : absDiff === 1 ? 0.85 : absDiff === 2 ? 0.72 : 0;
             let opacity = isActive ? 1.0 : absDiff === 1 ? 0.65 : absDiff === 2 ? 0.35 : 0;
 
             if (isAnimatingOut) {
               if (isSelected) {
-                scale = 1.22; // Step 1: slightly scale up to 1.05x above normal (1.15 * 1.06 = ~1.22)
+                scale = 1.196; // Scale 1.04x relative to 1.15 base = ~1.196
                 opacity = 1.0;
               } else {
-                opacity = 0.15; // Dim non-selected cups to 15-20%
+                opacity = 0; // Pure opacity fade for non-selected cups over 180ms
               }
             }
 
@@ -166,14 +169,18 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
             return (
               <motion.div
                 key={coffee.id}
-                style={{ pointerEvents: absDiff > 2 || isAnimatingOut ? 'none' : 'auto' }}
+                style={{ pointerEvents: absDiff > 2 || isAnimatingOut ? 'none' : 'auto', willChange: "transform, opacity" }}
                 animate={{
                   x: horizontalOffset,
                   scale: scale,
                   opacity: opacity,
                   zIndex: isSelected ? 30 : 10 - absDiff,
                 }}
-                transition={{ type: 'spring', stiffness: 280, damping: 26 }}
+                transition={
+                  isAnimatingOut
+                    ? { duration: 0.18, ease: "easeOut" }
+                    : { type: 'spring', stiffness: 280, damping: 26 }
+                }
                 className="absolute flex flex-col items-center justify-center cursor-pointer active-touch-feedback"
                 onClick={() => handleCoffeeSelect(coffee)}
               >
@@ -194,20 +201,19 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
                     src={coffee.image}
                     alt={coffee.name}
                     className="w-full h-full object-contain pointer-events-none"
-                    style={{
-                      filter: isSelected
-                        ? 'drop-shadow(0 20px 25px rgba(212, 163, 115, 0.65)) drop-shadow(0 8px 12px rgba(139, 90, 43, 0.35))'
-                        : isActive 
-                          ? 'drop-shadow(0 15px 20px rgba(212, 163, 115, 0.45)) drop-shadow(0 4px 6px rgba(139, 90, 43, 0.15))' 
-                          : 'drop-shadow(0 8px 12px rgba(0, 0, 0, 0.08))'
+                    style={{ willChange: "transform, opacity" }}
+                    transition={{
+                      ease: [0.22, 0.61, 0.36, 1],
+                      duration: 0.55
                     }}
                   />
                 </motion.div>
 
                 {/* Cup Specification Labels & Price */}
                 <motion.div
-                  animate={{ opacity: isAnimatingOut ? 0 : 1, y: isAnimatingOut ? 10 : 0 }}
-                  transition={{ duration: 0.15 }}
+                  animate={{ opacity: isAnimatingOut ? 0 : 1 }}
+                  transition={{ duration: 0.18, ease: "easeOut" }}
+                  style={{ willChange: "opacity" }}
                   className="text-center mt-2 max-w-[185px]"
                 >
                   <h3 className="font-sans font-black text-xl text-coffee-dark tracking-tight uppercase leading-none mb-1">
@@ -245,7 +251,8 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
       {/* Pagination indicators and helper instruction */}
       <motion.div
         animate={{ opacity: isAnimatingOut ? 0 : 1 }}
-        transition={{ duration: 0.15 }}
+        transition={{ duration: 0.18, ease: "easeOut" }}
+        style={{ willChange: "opacity" }}
         className="flex flex-col items-center select-none pb-1 z-10"
       >
         {/* Pagination Dots */}

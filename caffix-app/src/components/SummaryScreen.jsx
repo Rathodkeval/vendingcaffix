@@ -43,35 +43,39 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
 
   const currentPrice = getPrice();
 
-  // Animation variants for right panel staggering
+  // Animation variants for right panel staggering (GPU hardware accelerated)
   const containerVariants = {
-    hidden: { opacity: 0 },
+    hidden: {},
     show: {
-      opacity: 1,
       transition: {
-        staggerChildren: 0.04,
-        delayChildren: 0.1
+        staggerChildren: 0.035, // 35ms stagger between sections
+        delayChildren: 0.12 // starts as cup reaches left card (~550ms mark)
       }
     }
   };
 
   const itemVariants = {
-    hidden: { opacity: 0, y: 12 },
-    show: { opacity: 1, y: 0, transition: { duration: 0.35, ease: "easeOut" } }
+    hidden: { opacity: 0, y: 8 },
+    show: {
+      opacity: 1,
+      y: 0,
+      transition: { duration: 0.22, ease: [0.22, 0.61, 0.36, 1] }
+    }
   };
 
   return (
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      exit={{ opacity: 0, transition: { duration: 0.25 } }}
-      className="absolute inset-0 flex flex-col justify-between px-4 pt-3 pb-3 bg-cream-light overflow-hidden"
+      exit={{ opacity: 0, transition: { duration: 0.18 } }}
+      className="absolute inset-0 flex flex-col justify-between px-4 pt-3 pb-3 bg-cream-light overflow-hidden select-none"
     >
       {/* Header */}
       <motion.div
         initial={{ opacity: 0, y: -8 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.3 }}
+        transition={{ duration: 0.2, ease: "easeOut" }}
+        style={{ willChange: "transform, opacity" }}
         className="flex items-center gap-3 mb-1"
       >
         <button
@@ -92,9 +96,10 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
       <div className="grid grid-cols-5 gap-4 flex-grow items-stretch my-1 overflow-hidden">
         {/* Left Panel: Beverage details (Fades & expands around arriving cup) */}
         <motion.div
-          initial={{ opacity: 0, scale: 0.96 }}
+          initial={{ opacity: 0, scale: 0.98 }}
           animate={{ opacity: 1, scale: 1 }}
-          transition={{ duration: 0.45, ease: [0.4, 0, 0.2, 1] }}
+          transition={{ duration: 0.35, ease: [0.22, 0.61, 0.36, 1] }}
+          style={{ willChange: "transform, opacity" }}
           className="col-span-2 bg-white rounded-2xl border border-coffee-light/10 p-3 flex flex-col justify-between shadow-sm overflow-hidden"
         >
           <div>
@@ -105,21 +110,20 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
                 src={selectedCoffee.image}
                 alt={selectedCoffee.name}
                 className="w-full h-full object-contain pointer-events-none drop-shadow-md"
+                style={{ willChange: "transform, opacity" }}
                 transition={{
-                  type: "spring",
-                  stiffness: 190,
-                  damping: 25,
-                  mass: 0.9,
-                  duration: 0.75
+                  ease: [0.22, 0.61, 0.36, 1],
+                  duration: 0.55
                 }}
               />
             </div>
           </div>
 
           <motion.div
-            initial={{ opacity: 0, y: 15 }}
+            initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.4, delay: 0.15 }}
+            transition={{ duration: 0.25, delay: 0.1 }}
+            style={{ willChange: "transform, opacity" }}
             className="mt-1"
           >
             <h3 className="font-sans font-extrabold text-base text-coffee-dark tracking-tight leading-snug">
@@ -139,16 +143,16 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
           className="col-span-3 bg-white rounded-2xl border border-coffee-light/10 p-3 flex flex-col justify-between shadow-sm"
         >
           <div className="space-y-3">
-            {/* Standard Recipe Message */}
-            <motion.div variants={itemVariants} className="bg-cream-light/20 border border-coffee-light/5 p-2 rounded-xl">
+            {/* 1. Standard Recipe Message Card */}
+            <motion.div variants={itemVariants} style={{ willChange: "transform, opacity" }} className="bg-cream-light/20 border border-coffee-light/5 p-2 rounded-xl">
               <h4 className="text-[10px] font-bold text-coffee-dark uppercase tracking-wider">CAFFIX BREW CODE</h4>
               <p className="text-[11px] text-coffee-light mt-0.5 leading-relaxed">
                 Precision In Every Pour. Perfection In Every Sip
               </p>
             </motion.div>
 
-            {/* Extra Sugar Toggle */}
-            <motion.div variants={itemVariants} className="flex justify-between items-center bg-cream-light/30 p-2 rounded-xl border border-cream hover:bg-cream-light/40 transition-colors">
+            {/* 2. Extra Sugar Toggle Card */}
+            <motion.div variants={itemVariants} style={{ willChange: "transform, opacity" }} className="flex justify-between items-center bg-cream-light/30 p-2 rounded-xl border border-cream hover:bg-cream-light/40 transition-colors">
               <div className="flex flex-col">
                 <span className="text-xs font-bold text-coffee">Extra Sugar (+₹5)</span>
                 <span className="text-[10px] text-coffee-light/75">Add sweetness to your drink</span>
@@ -163,8 +167,8 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
               </button>
             </motion.div>
 
-            {/* Choose Your Base */}
-            <motion.div variants={itemVariants} className="border-t border-cream pt-2">
+            {/* 3. Choose Your Base Section */}
+            <motion.div variants={itemVariants} style={{ willChange: "transform, opacity" }} className="border-t border-cream pt-2">
               <h4 className="text-xs font-extrabold text-coffee-dark uppercase tracking-wider mb-0.5">Choose Your Base</h4>
               <p className="text-[10px] text-coffee-light/80 font-medium mb-1.5">
                 Select either water or milk. You can choose only one.
@@ -172,17 +176,16 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
               <div className="grid grid-cols-2 gap-3 mb-2">
                 {/* Water Card */}
                 <motion.button
-                  whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
                   onClick={() => setBase('water')}
-                  className={`flex flex-col items-center justify-center py-2 px-3 rounded-xl border-2 transition-all duration-300 cursor-pointer ${
+                  className={`flex flex-col items-center justify-center py-2 px-3 rounded-xl border-2 transition-all duration-200 cursor-pointer ${
                     base === 'water'
                       ? 'bg-coffee-dark border-coffee-dark text-cream-light shadow-md scale-[1.02]'
                       : 'bg-cream-light/30 border-cream hover:bg-cream-light/50 text-coffee-dark'
                   }`}
                 >
                   <div
-                    className={`w-9 h-9 rounded-full flex items-center justify-center mb-1 transition-all duration-300 ${
+                    className={`w-9 h-9 rounded-full flex items-center justify-center mb-1 transition-all duration-200 ${
                       base === 'water'
                         ? 'bg-white text-coffee-dark shadow-sm'
                         : 'border border-coffee-light/35 bg-transparent text-coffee-dark'
@@ -195,17 +198,16 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
 
                 {/* Milk Card */}
                 <motion.button
-                  whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
                   onClick={() => setBase('milk')}
-                  className={`flex flex-col items-center justify-center py-2 px-3 rounded-xl border-2 transition-all duration-300 cursor-pointer ${
+                  className={`flex flex-col items-center justify-center py-2 px-3 rounded-xl border-2 transition-all duration-200 cursor-pointer ${
                     base === 'milk'
                       ? 'bg-coffee-dark border-coffee-dark text-cream-light shadow-md scale-[1.02]'
                       : 'bg-cream-light/30 border-cream hover:bg-cream-light/50 text-coffee-dark'
                   }`}
                 >
                   <div
-                    className={`w-9 h-9 rounded-full flex items-center justify-center mb-1 transition-all duration-300 ${
+                    className={`w-9 h-9 rounded-full flex items-center justify-center mb-1 transition-all duration-200 ${
                       base === 'milk'
                         ? 'bg-white text-coffee-dark shadow-sm'
                         : 'border border-coffee-light/35 bg-transparent text-coffee-dark'
@@ -218,8 +220,8 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
               </div>
             </motion.div>
 
-            {/* Specifications */}
-            <motion.div variants={itemVariants} className="bg-cream-light/60 p-2 rounded-xl border border-cream">
+            {/* 4. Specifications Section */}
+            <motion.div variants={itemVariants} style={{ willChange: "transform, opacity" }} className="bg-cream-light/60 p-2 rounded-xl border border-cream">
               <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wider block mb-1">
                 Specifications
               </span>
@@ -231,16 +233,15 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
             </motion.div>
           </div>
 
-          {/* Pricing & Checkout Block (Fades & slides in with animated total amount counter) */}
-          <motion.div variants={itemVariants} className="flex items-center justify-between border-t border-cream pt-2">
+          {/* 5. Pricing & Checkout Footer Block */}
+          <motion.div variants={itemVariants} style={{ willChange: "transform, opacity" }} className="flex items-center justify-between border-t border-cream pt-2">
             <div className="flex flex-col">
               <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wide">TOTAL AMOUNT</span>
               <div className="text-2xl font-black text-coffee-dark leading-none mt-0.5">
-                <AnimatedCounter value={currentPrice} />
+                ₹{currentPrice}
               </div>
             </div>
             <motion.button
-              whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.96 }}
               onClick={() => onConfirm({ name: selectedCoffee.name, size, price: currentPrice, extraSugar, base })}
               className="py-2.5 px-6 bg-coffee-dark hover:bg-coffee-dark/90 text-cream-light font-bold text-sm rounded-xl shadow-md transition-all flex items-center gap-2 cursor-pointer"
