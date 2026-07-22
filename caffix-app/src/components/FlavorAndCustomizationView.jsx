@@ -277,22 +277,22 @@ export default function FlavorAndCustomizationView({
             step === 'SUMMARY' ? 'pointer-events-auto' : 'pointer-events-none'
           }`}
         >
-          {/* Left Target Product Showcase (Clean, Minimal, Containerless Apple-Style Presentation) */}
+          {/* Left Target Product Showcase (Vertically Centered Cup + Title + Description Block) */}
           <div
             ref={leftPanelCardRef}
             style={{ opacity: step === 'SUMMARY' ? 1 : 0, willChange: 'opacity' }}
-            className="col-span-2 flex flex-col items-center justify-between py-1 px-2 overflow-hidden border-none bg-transparent shadow-none"
+            className="col-span-2 flex flex-col items-center justify-center py-2 px-2 overflow-hidden border-none bg-transparent shadow-none gap-2"
           >
-            {/* Dedicated Cup Target Frame (No box, no border, no shadow, no background card) */}
+            {/* Dedicated Cup Target Frame */}
             <div
               ref={leftPanelCupBoxRef}
-              className="w-full flex-grow flex items-center justify-center relative min-h-[255px] max-h-[285px] overflow-visible border-none bg-transparent shadow-none"
+              className="w-full h-[220px] flex items-center justify-center relative overflow-visible border-none bg-transparent shadow-none"
             >
               {/* Cup physically moves here during animation */}
             </div>
 
             {/* Centered Flavor Name & Description Directly Below Cup */}
-            <div className="flex flex-col items-center text-center mt-1.5 px-2">
+            <div className="flex flex-col items-center text-center mt-1 px-2">
               <h3 className="font-sans font-black text-2xl text-coffee-dark tracking-[0.5px] uppercase leading-none mb-1">
                 {selectedCoffee.name}
               </h3>
