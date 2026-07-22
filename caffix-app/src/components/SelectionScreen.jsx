@@ -237,7 +237,7 @@ export default function SelectionScreen({ onSelect, onBack, prices = { classic: 
                           handleCoffeeSelect(coffee);
                         }}
                       >
-                        Select Flavor
+                        Choose Your Sip
                       </motion.button>
                     )}
                   </div>

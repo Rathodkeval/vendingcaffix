@@ -518,7 +518,7 @@ export default function FlavorAndCustomizationView({
                           }}
                           className="px-3.5 py-1 bg-coffee hover:bg-coffee-dark text-cream-light font-bold text-[10px] rounded-full shadow-lg border border-coffee-light/10 transition-all active:scale-95 cursor-pointer"
                         >
-                          Select Flavor
+                          Choose Your Sip
                         </button>
                       )}
                     </div>
