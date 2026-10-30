@@ -86,7 +86,6 @@ function selectFlavour(id) {
     localStorage.setItem('selectedFlavour', id);
     // Initialize default states for next pages
     localStorage.setItem('cupSize', 'Medium');
-    localStorage.setItem('sugarLevel', 'Medium');
     localStorage.setItem('coffeeStrength', 'Regular');
     localStorage.setItem('extraFoam', 'false');
     window.location.href = 'size-selection.html';
@@ -215,7 +214,6 @@ function initCustomPage() {
   document.getElementById('preview-price').textContent = `₹${currentPrice}`;
 
   // Wire toggles
-  setupToggleGroup('sugar-toggles', 'sugarLevel');
   setupToggleGroup('strength-toggles', 'coffeeStrength');
 
   // Extra Foam switch
@@ -259,7 +257,6 @@ function initSummaryPage() {
   const flavour = FLAVOURS[flavourId];
   
   const size = localStorage.getItem('cupSize') || 'Medium';
-  const sugar = localStorage.getItem('sugarLevel') || 'Medium';
   const strength = localStorage.getItem('coffeeStrength') || 'Regular';
   const extraFoam = localStorage.getItem('extraFoam') === 'true' ? 'Yes' : 'No';
   const finalPrice = SIZES[size].price;
@@ -268,7 +265,6 @@ function initSummaryPage() {
   document.getElementById('summary-img').style.backgroundImage = `url('${flavour.image}')`;
   document.getElementById('summary-name').textContent = flavour.name;
   document.getElementById('summary-size-val').textContent = `${size} (${SIZES[size].volume})`;
-  document.getElementById('summary-sugar-val').textContent = sugar;
   document.getElementById('summary-strength-val').textContent = strength;
   document.getElementById('summary-foam-val').textContent = extraFoam;
   document.getElementById('total-amount').textContent = `₹${finalPrice}`;

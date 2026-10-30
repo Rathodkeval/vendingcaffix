@@ -31,14 +31,11 @@ function AnimatedCounter({ value, duration = 300 }) {
 
 export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
   const size = 'Medium';
-  const [extraSugar, setExtraSugar] = useState(false);
   const [base, setBase] = useState('water');
 
   // Price calculations based on sizes
   const getPrice = () => {
-    let basePrice = selectedCoffee.price;
-    if (extraSugar) basePrice += 5;
-    return basePrice;
+    return selectedCoffee.price;
   };
 
   const currentPrice = getPrice();
@@ -151,21 +148,7 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
               </p>
             </motion.div>
 
-            {/* 2. Extra Sugar Toggle Card */}
-            <motion.div variants={itemVariants} style={{ willChange: "transform, opacity" }} className="flex justify-between items-center bg-cream-light/30 p-2 rounded-xl border border-cream hover:bg-cream-light/40 transition-colors">
-              <div className="flex flex-col">
-                <span className="text-xs font-bold text-coffee">Extra Sugar (+₹5)</span>
-                <span className="text-[10px] text-coffee-light/75">Add sweetness to your Sip</span>
-              </div>
-              <button
-                onClick={() => setExtraSugar(!extraSugar)}
-                className={`w-10 h-6 flex items-center rounded-full p-0.5 cursor-pointer transition-all duration-300 border ${
-                  extraSugar ? 'bg-coffee-dark border-coffee-dark justify-end' : 'bg-cream-dark border-coffee-light/15 justify-start'
-                }`}
-              >
-                <span className="w-5 h-5 rounded-full bg-white shadow-md block" />
-              </button>
-            </motion.div>
+
 
             {/* 3. Choose Your Base Section */}
             <motion.div variants={itemVariants} style={{ willChange: "transform, opacity" }} className="border-t border-cream pt-2">
@@ -225,9 +208,8 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
               <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wider block mb-1">
                 Specifications
               </span>
-              <div className="grid grid-cols-3 gap-2 text-[11px] text-coffee font-semibold">
+              <div className="grid grid-cols-2 gap-2 text-[11px] text-coffee font-semibold">
                 <div className="bg-white/80 px-2 py-1 rounded border border-cream/50 text-center">Cup: <span className="text-gold-dark font-extrabold">Standard</span></div>
-                <div className="bg-white/80 px-2 py-1 rounded border border-cream/50 text-center">Sugar: <span className="text-gold-dark font-extrabold">{extraSugar ? 'Extra Sugar' : 'Standard'}</span></div>
                 <div className="bg-white/80 px-2 py-1 rounded border border-cream/50 text-center">Base: <span className="text-gold-dark font-extrabold">{base === 'water' ? 'Water' : 'Milk'}</span></div>
               </div>
             </motion.div>
@@ -243,7 +225,7 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
             </div>
             <motion.button
               whileTap={{ scale: 0.96 }}
-              onClick={() => onConfirm({ name: selectedCoffee.name, size, price: currentPrice, extraSugar, base })}
+              onClick={() => onConfirm({ name: selectedCoffee.name, size, price: currentPrice, extraSugar: false, base })}
               className="py-2.5 px-6 bg-coffee-dark hover:bg-coffee-dark/90 text-cream-light font-bold text-sm rounded-xl shadow-md transition-all flex items-center gap-2 cursor-pointer"
             >
               <Check className="w-4 h-4" />

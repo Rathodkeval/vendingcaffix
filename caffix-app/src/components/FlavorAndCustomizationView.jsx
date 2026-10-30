@@ -56,7 +56,6 @@ export default function FlavorAndCustomizationView({
   );
 
   // Customization Options State
-  const [extraSugar, setExtraSugar] = useState(false);
   const [base, setBase] = useState('water'); // 'water' | 'milk'
 
   // Refs for GSAP animation targets
@@ -95,7 +94,6 @@ export default function FlavorAndCustomizationView({
   useEffect(() => {
     if (!propSelectedCoffee) {
       setSelectedCoffeeState(coffeesWithPrices[2]);
-      setExtraSugar(false);
       setBase('water');
       setActiveIndex(2);
     } else {
@@ -183,7 +181,6 @@ export default function FlavorAndCustomizationView({
         // Reset selection and customization state when returning to the flavor selection screen
         setSelectedCoffeeState(coffeesWithPrices[2]);
         if (onSelectCoffee) onSelectCoffee(null);
-        setExtraSugar(false);
         setBase('water');
         setActiveIndex(2);
       }, 650);
@@ -194,9 +191,7 @@ export default function FlavorAndCustomizationView({
 
   // Price calculations
   const calculateTotal = () => {
-    let basePrice = selectedCoffee.price;
-    if (extraSugar) basePrice += 5;
-    return basePrice;
+    return selectedCoffee.price;
   };
 
   const currentPrice = calculateTotal();
@@ -300,21 +295,6 @@ export default function FlavorAndCustomizationView({
                 </p>
               </div>
 
-              {/* Extra Sugar Toggle */}
-              <div className="flex justify-between items-center bg-cream-light/30 p-2 rounded-xl border border-cream">
-                <div className="flex flex-col">
-                  <span className="text-xs font-bold text-coffee">Extra Sugar (+₹5)</span>
-                  <span className="text-[10px] text-coffee-light/75">Add sweetness to your Sip</span>
-                </div>
-                <button
-                  onClick={() => setExtraSugar(!extraSugar)}
-                  className={`w-10 h-6 flex items-center rounded-full p-0.5 cursor-pointer transition-all duration-300 border ${
-                    extraSugar ? 'bg-coffee-dark border-coffee-dark justify-end' : 'bg-cream-dark border-coffee-light/15 justify-start'
-                  }`}
-                >
-                  <span className="w-5 h-5 rounded-full bg-white shadow-md block" />
-                </button>
-              </div>
 
               {/* Choose Base Section */}
               <div className="border-t border-cream pt-2">
@@ -370,12 +350,9 @@ export default function FlavorAndCustomizationView({
                 <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wider block mb-1">
                   Specifications
                 </span>
-                <div className="grid grid-cols-3 gap-2 text-[11px] text-coffee font-semibold">
+                <div className="grid grid-cols-2 gap-2 text-[11px] text-coffee font-semibold">
                   <div className="bg-white/80 px-2 py-1 rounded border border-cream/50 text-center">
                     Cup: <span className="text-gold-dark font-extrabold">Standard</span>
-                  </div>
-                  <div className="bg-white/80 px-2 py-1 rounded border border-cream/50 text-center">
-                    Sugar: <span className="text-gold-dark font-extrabold">{extraSugar ? 'Extra Sugar' : 'Standard'}</span>
                   </div>
                   <div className="bg-white/80 px-2 py-1 rounded border border-cream/50 text-center">
                     Base: <span className="text-gold-dark font-extrabold">{base === 'water' ? 'Water' : 'Milk'}</span>
@@ -398,7 +375,7 @@ export default function FlavorAndCustomizationView({
                     name: selectedCoffee.name,
                     size: 'Medium',
                     price: currentPrice,
-                    extraSugar,
+                    extraSugar: false,
                     base
                   })
                 }
