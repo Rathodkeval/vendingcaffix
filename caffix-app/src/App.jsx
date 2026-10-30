@@ -182,7 +182,8 @@ export default function App() {
           product_id: idMap[selectedCoffee.id],
           amount: details.price,
           machine_id: 'CFX-MC-01',
-          extra_sugar: details.extraSugar,
+          extra_sugar: true,
+          sugar: 1,
           base: details.base
         })
       });

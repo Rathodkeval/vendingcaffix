@@ -203,16 +203,6 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
               </div>
             </motion.div>
 
-            {/* 4. Specifications Section */}
-            <motion.div variants={itemVariants} style={{ willChange: "transform, opacity" }} className="bg-cream-light/60 p-2 rounded-xl border border-cream">
-              <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wider block mb-1">
-                Specifications
-              </span>
-              <div className="grid grid-cols-2 gap-2 text-[11px] text-coffee font-semibold">
-                <div className="bg-white/80 px-2 py-1 rounded border border-cream/50 text-center">Cup: <span className="text-gold-dark font-extrabold">Standard</span></div>
-                <div className="bg-white/80 px-2 py-1 rounded border border-cream/50 text-center">Base: <span className="text-gold-dark font-extrabold">{base === 'water' ? 'Water' : 'Milk'}</span></div>
-              </div>
-            </motion.div>
           </div>
 
           {/* 5. Pricing & Checkout Footer Block */}
@@ -225,7 +215,7 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
             </div>
             <motion.button
               whileTap={{ scale: 0.96 }}
-              onClick={() => onConfirm({ name: selectedCoffee.name, size, price: currentPrice, extraSugar: false, base })}
+              onClick={() => onConfirm({ name: selectedCoffee.name, size, price: currentPrice, extraSugar: 1, sugar: 1, base })}
               className="py-2.5 px-6 bg-coffee-dark hover:bg-coffee-dark/90 text-cream-light font-bold text-sm rounded-xl shadow-md transition-all flex items-center gap-2 cursor-pointer"
             >
               <Check className="w-4 h-4" />

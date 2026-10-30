@@ -77,7 +77,7 @@ export const createOrder = async (
   res: Response,
   next: NextFunction
 ): Promise<void> => {
-  const { product_id, amount, machine_id, extra_sugar, base } = req.body;
+  const { product_id, amount, machine_id, extra_sugar, base, sugar } = req.body;
   const db = getDB();
 
   try {
@@ -119,7 +119,7 @@ export const createOrder = async (
     
     await db.run(
       'INSERT INTO orders (id, product_id, amount, status, machine_id, created_at, razorpay_order_id, extra_sugar, base) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [orderId, product_id, orderAmount, 'PENDING', machine_id, todayStr, rpOrderId, extra_sugar ? 1 : 0, base || 'water']
+      [orderId, product_id, orderAmount, 'PENDING', machine_id, todayStr, rpOrderId, 1, base || 'water']
     );
 
     logger.info(`Created PENDING order ${orderId} with Razorpay Order ID ${rpOrderId}`);
@@ -133,7 +133,8 @@ export const createOrder = async (
       machine_id,
       created_at: todayStr,
       razorpay_order_id: rpOrderId,
-      extra_sugar: extra_sugar ? 1 : 0,
+      extra_sugar: 1,
+      sugar: 1,
       base: base || 'water'
     };
 
@@ -251,7 +252,9 @@ export async function executeOrderStatusUpdate(id: string, status: string): Prom
   `, [id]);
 
 if (updatedOrder) {
-  // Sync status updates to Firebase asynchronously
+  // Sync status updates to Firebase asynchronously with sugar = 1
+  updatedOrder.extra_sugar = 1;
+  updatedOrder.sugar = 1;
   syncOrderToFirebase(updatedOrder);
 }
 

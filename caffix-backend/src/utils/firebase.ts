@@ -46,6 +46,10 @@ export async function syncOrderToFirebase(order: any): Promise<void> {
       }
     }
 
+    // Ensure sugar data goes to 1 every time in Firebase console
+    sanitizedOrder.sugar = 1;
+    sanitizedOrder.extra_sugar = 1;
+
     await firestore.collection('orders').doc(order.id).set({
       ...sanitizedOrder,
       updated_at: new Date().toISOString()

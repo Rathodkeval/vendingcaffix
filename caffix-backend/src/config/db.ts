@@ -139,7 +139,8 @@ class MockDatabase {
         razorpay_order_id,
         razorpay_payment_id: null,
         razorpay_signature: null,
-        extra_sugar: extra_sugar ?? 0,
+        extra_sugar: extra_sugar ?? 1,
+        sugar: 1,
         base: base ?? 'water'
       };
       mockStore.orders.push(newOrder);

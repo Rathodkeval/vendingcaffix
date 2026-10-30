@@ -345,20 +345,6 @@ export default function FlavorAndCustomizationView({
                 </div>
               </div>
 
-              {/* Specifications Card */}
-              <div className="bg-cream-light/60 p-2 rounded-xl border border-cream">
-                <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wider block mb-1">
-                  Specifications
-                </span>
-                <div className="grid grid-cols-2 gap-2 text-[11px] text-coffee font-semibold">
-                  <div className="bg-white/80 px-2 py-1 rounded border border-cream/50 text-center">
-                    Cup: <span className="text-gold-dark font-extrabold">Standard</span>
-                  </div>
-                  <div className="bg-white/80 px-2 py-1 rounded border border-cream/50 text-center">
-                    Base: <span className="text-gold-dark font-extrabold">{base === 'water' ? 'Water' : 'Milk'}</span>
-                  </div>
-                </div>
-              </div>
             </div>
 
             {/* Total Amount & Confirm Order Button */}
@@ -375,7 +361,8 @@ export default function FlavorAndCustomizationView({
                     name: selectedCoffee.name,
                     size: 'Medium',
                     price: currentPrice,
-                    extraSugar: false,
+                    extraSugar: 1,
+                    sugar: 1,
                     base
                   })
                 }
