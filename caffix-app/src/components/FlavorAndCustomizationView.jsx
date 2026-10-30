@@ -362,7 +362,6 @@ export default function FlavorAndCustomizationView({
                     size: 'Medium',
                     price: currentPrice,
                     extraSugar: 1,
-                    sugar: 1,
                     base
                   })
                 }

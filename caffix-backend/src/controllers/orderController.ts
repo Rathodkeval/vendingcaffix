@@ -77,7 +77,7 @@ export const createOrder = async (
   res: Response,
   next: NextFunction
 ): Promise<void> => {
-  const { product_id, amount, machine_id, extra_sugar, base, sugar } = req.body;
+  const { product_id, amount, machine_id, extra_sugar, base } = req.body;
   const db = getDB();
 
   try {
@@ -134,7 +134,6 @@ export const createOrder = async (
       created_at: todayStr,
       razorpay_order_id: rpOrderId,
       extra_sugar: 1,
-      sugar: 1,
       base: base || 'water'
     };
 
@@ -252,9 +251,8 @@ export async function executeOrderStatusUpdate(id: string, status: string): Prom
   `, [id]);
 
 if (updatedOrder) {
-  // Sync status updates to Firebase asynchronously with sugar = 1
+  // Sync status updates to Firebase asynchronously with extra_sugar = 1
   updatedOrder.extra_sugar = 1;
-  updatedOrder.sugar = 1;
   syncOrderToFirebase(updatedOrder);
 }
 

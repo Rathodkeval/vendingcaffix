@@ -183,7 +183,6 @@ export default function App() {
           amount: details.price,
           machine_id: 'CFX-MC-01',
           extra_sugar: true,
-          sugar: 1,
           base: details.base
         })
       });

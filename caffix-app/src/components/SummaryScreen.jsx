@@ -215,7 +215,7 @@ export default function SummaryScreen({ selectedCoffee, onConfirm, onBack }) {
             </div>
             <motion.button
               whileTap={{ scale: 0.96 }}
-              onClick={() => onConfirm({ name: selectedCoffee.name, size, price: currentPrice, extraSugar: 1, sugar: 1, base })}
+              onClick={() => onConfirm({ name: selectedCoffee.name, size, price: currentPrice, extraSugar: 1, base })}
               className="py-2.5 px-6 bg-coffee-dark hover:bg-coffee-dark/90 text-cream-light font-bold text-sm rounded-xl shadow-md transition-all flex items-center gap-2 cursor-pointer"
             >
               <Check className="w-4 h-4" />

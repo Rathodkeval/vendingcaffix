@@ -46,8 +46,8 @@ export async function syncOrderToFirebase(order: any): Promise<void> {
       }
     }
 
-    // Ensure sugar data goes to 1 every time in Firebase console
-    sanitizedOrder.sugar = 1;
+    // Keep only extra_sugar in Firebase console (always 1)
+    delete sanitizedOrder.sugar;
     sanitizedOrder.extra_sugar = 1;
 
     await firestore.collection('orders').doc(order.id).set({
