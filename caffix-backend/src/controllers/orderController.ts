@@ -1,8 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import { getDB } from '../config/db';
-import { NotFoundError, BadRequestError } from '../utils/errors';
+import { AuthRequest } from '../middleware/auth';
+import { NotFoundError, BadRequestError, ForbiddenError } from '../utils/errors';
 import logger from '../utils/logger';
 import { syncOrderToFirebase } from '../utils/firebase';
+import { ensureMachineRegisteredInLocalDB } from './kioskController';
 const Razorpay = require('razorpay');
 
 const razorpayKeyId = (process.env.RAZORPAY_KEY_ID || '').trim();
@@ -22,19 +24,37 @@ if (!isMockMode) {
   }
 }
 
+// Per-order mutex to prevent race conditions on concurrent payment verification / webhook callbacks
+const orderUpdateLocks = new Map<string, Promise<any>>();
+
 export const getOrders = async (
-  req: Request,
+  req: AuthRequest,
   res: Response,
   next: NextFunction
 ): Promise<void> => {
   const db = getDB();
   try {
-    const orders = await db.all(`
-      SELECT o.*, p.name as product_name 
-      FROM orders o
-      JOIN products p ON o.product_id = p.id
-      ORDER BY o.created_at DESC
-    `);
+    const queryMachineId = typeof req.query.machine_id === 'string' ? req.query.machine_id.trim() : '';
+    const filterMachineId = queryMachineId || req.user?.machine_id || '';
+
+    let orders: any[];
+    if (filterMachineId) {
+      orders = await db.all(`
+        SELECT o.*, p.name as product_name 
+        FROM orders o
+        JOIN products p ON o.product_id = p.id
+        WHERE o.machine_id = ?
+        ORDER BY o.created_at DESC
+      `, [filterMachineId]);
+    } else {
+      orders = await db.all(`
+        SELECT o.*, p.name as product_name 
+        FROM orders o
+        JOIN products p ON o.product_id = p.id
+        ORDER BY o.created_at DESC
+      `);
+    }
+
     res.status(200).json({
       status: 'success',
       data: orders
@@ -73,7 +93,7 @@ export const getOrderById = async (
 };
 
 export const createOrder = async (
-  req: Request,
+  req: AuthRequest,
   res: Response,
   next: NextFunction
 ): Promise<void> => {
@@ -81,16 +101,31 @@ export const createOrder = async (
   const db = getDB();
 
   try {
+    const requestedMachineId = typeof machine_id === 'string' ? machine_id.trim() : '';
+    if (!requestedMachineId || !/^CFX-MC-\d{2,4}$/.test(requestedMachineId)) {
+      return next(new BadRequestError(`Invalid or missing machine_id: "${requestedMachineId}"`));
+    }
+
+    // Enforce machine identity binding if the kiosk JWT is scoped to a specific machine
+    if (req.user?.role === 'kiosk' && req.user.machine_id && req.user.machine_id !== requestedMachineId) {
+      logger.warn(`Blocked order creation with mismatched machine_id: JWT=${req.user.machine_id}, body=${requestedMachineId}`);
+      return next(new ForbiddenError(`Authenticated kiosk (${req.user.machine_id}) cannot place orders for machine ${requestedMachineId}`));
+    }
+
+    const resolvedMachineId = (req.user?.role === 'kiosk' && req.user.machine_id)
+      ? req.user.machine_id
+      : requestedMachineId;
+
     // 1. Verify Product
     const product = await db.get('SELECT * FROM products WHERE id = ?', [product_id]);
     if (!product) {
       return next(new NotFoundError(`Product ID ${product_id} not found`));
     }
 
-    // 2. Verify Machine
-    const machine = await db.get('SELECT * FROM machines WHERE id = ?', [machine_id]);
+    // 2. Verify Machine registration & status
+    const machine = await ensureMachineRegisteredInLocalDB(resolvedMachineId);
     if (!machine) {
-      return next(new NotFoundError(`Vending machine ID ${machine_id} not registered`));
+      return next(new NotFoundError(`Vending machine ID ${resolvedMachineId} not registered`));
     }
     if (machine.status === 'maintenance') {
       return next(new BadRequestError('Machine is currently under maintenance mode'));
@@ -108,7 +143,12 @@ export const createOrder = async (
         const rpOrder = await razorpayClient.orders.create({
           amount: orderAmount * 100, // in paise
           currency: 'INR',
-          receipt: orderId
+          receipt: orderId,
+          notes: {
+            machine_id: resolvedMachineId,
+            order_id: orderId,
+            coffee: product.name
+          }
         });
         rpOrderId = rpOrder.id;
       } catch (error) {
@@ -119,26 +159,27 @@ export const createOrder = async (
     
     await db.run(
       'INSERT INTO orders (id, product_id, amount, status, machine_id, created_at, razorpay_order_id, extra_sugar, base) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [orderId, product_id, orderAmount, 'PENDING', machine_id, todayStr, rpOrderId, 1, base || 'water']
+      [orderId, product_id, orderAmount, 'PENDING', resolvedMachineId, todayStr, rpOrderId, 1, base || 'water']
     );
 
-    logger.info(`Created PENDING order ${orderId} with Razorpay Order ID ${rpOrderId}`);
+    logger.info(`Created PENDING order ${orderId} for machine ${resolvedMachineId} with Razorpay Order ID ${rpOrderId}`);
 
     const newOrder = {
       id: orderId,
       product_id,
       product_name: product.name,
+      coffee: product.name,
       amount: orderAmount,
       status: 'PENDING',
-      machine_id,
+      machine_id: resolvedMachineId,
       created_at: todayStr,
       razorpay_order_id: rpOrderId,
       extra_sugar: 1,
       base: base || 'water'
     };
 
-    // Sync to Firebase asynchronously
-    syncOrderToFirebase(newOrder);
+    // Sync to Firebase before responding so Serverless environments complete the write
+    await syncOrderToFirebase(newOrder);
 
     res.status(201).json({
       status: 'success',
@@ -152,7 +193,7 @@ export const createOrder = async (
   }
 };
 
-export async function executeOrderStatusUpdate(id: string, status: string): Promise<any> {
+async function performOrderStatusUpdateInternal(id: string, status: string): Promise<any> {
   const db = getDB();
   
   // 1. Retrieve current order state
@@ -164,10 +205,32 @@ export async function executeOrderStatusUpdate(id: string, status: string): Prom
   const currentStatus = order.status;
   const newStatus = status.toUpperCase();
 
-  // 2. Perform ingredient deduction on transition to PAID or PREPARING (if current state is PENDING)
+  // Idempotency guard: if already in the requested status, or already COMPLETED when a late PAID webhook arrives,
+  // return current order without re-deducting ingredients or re-triggering Firestore writes
+  if (
+    currentStatus === newStatus ||
+    (currentStatus === 'COMPLETED' && (newStatus === 'PAID' || newStatus === 'PREPARING')) ||
+    (currentStatus === 'PAID' && newStatus === 'PAID')
+  ) {
+    logger.info(`Idempotent status update ignored for order ${id} (current: ${currentStatus}, requested: ${newStatus})`);
+    const existingOrder = await db.get(`
+      SELECT o.*, p.name as product_name 
+      FROM orders o
+      JOIN products p ON o.product_id = p.id
+      WHERE o.id = ?
+    `, [id]);
+    if (existingOrder) {
+      existingOrder.extra_sugar = 1;
+      existingOrder.coffee = existingOrder.product_name;
+    }
+    return existingOrder;
+  }
+
+  // 2. Perform ingredient deduction on transition to PAID, PREPARING, or COMPLETED (ONLY if current state is PENDING)
   const transitionToActive = ['PAID', 'PREPARING', 'COMPLETED'].includes(newStatus);
   
   if (currentStatus === 'PENDING' && transitionToActive) {
+    await ensureMachineRegisteredInLocalDB(order.machine_id);
     // Fetch machine inventory
     const inventory = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [order.machine_id]);
     if (!inventory) {
@@ -236,7 +299,7 @@ export async function executeOrderStatusUpdate(id: string, status: string): Prom
       [waterNeeded, coffeeNeeded, milkNeeded, vanillaNeeded, hazelnutNeeded, irishNeeded, mochaNeeded, order.machine_id]
     );
     
-    logger.info(`Deducted ingredients for order ID ${id} on transition from ${currentStatus} to ${newStatus}`);
+    logger.info(`Deducted ingredients for order ID ${id} (machine ${order.machine_id}) on transition from ${currentStatus} to ${newStatus}`);
   }
 
   // 3. Update order status
@@ -250,25 +313,51 @@ export async function executeOrderStatusUpdate(id: string, status: string): Prom
     WHERE o.id = ?
   `, [id]);
 
-if (updatedOrder) {
-  // Sync status updates to Firebase asynchronously with extra_sugar = 1
-  updatedOrder.extra_sugar = 1;
-  syncOrderToFirebase(updatedOrder);
-}
+  if (updatedOrder) {
+    updatedOrder.extra_sugar = 1;
+    updatedOrder.coffee = updatedOrder.product_name;
+    await syncOrderToFirebase(updatedOrder);
+  }
 
   return updatedOrder;
 }
 
+export async function executeOrderStatusUpdate(id: string, status: string): Promise<any> {
+  const prevLock = orderUpdateLocks.get(id) || Promise.resolve();
+  const nextPromise = prevLock
+    .catch(() => {})
+    .then(() => performOrderStatusUpdateInternal(id, status));
+
+  orderUpdateLocks.set(id, nextPromise);
+  try {
+    return await nextPromise;
+  } finally {
+    if (orderUpdateLocks.get(id) === nextPromise) {
+      orderUpdateLocks.delete(id);
+    }
+  }
+}
+
 export const updateOrderStatus = async (
-  req: Request,
+  req: AuthRequest,
   res: Response,
   next: NextFunction
 ): Promise<void> => {
-  const { id } = req.params;
+  const id = String(req.params.id);
   const { status } = req.body; // PENDING, PAID, PREPARING, COMPLETED, FAILED, CANCELLED
+  const db = getDB();
 
   try {
-    const updatedOrder = await executeOrderStatusUpdate(id as string, status as string);
+    const existing = await db.get('SELECT id, machine_id FROM orders WHERE id = ?', [id]);
+    if (!existing) {
+      return next(new NotFoundError(`Order with ID ${id} not found`));
+    }
+
+    if (req.user?.role === 'kiosk' && req.user.machine_id && req.user.machine_id !== existing.machine_id) {
+      return next(new ForbiddenError(`Kiosk ${req.user.machine_id} cannot modify order ${id} belonging to machine ${existing.machine_id}`));
+    }
+
+    const updatedOrder = await executeOrderStatusUpdate(id, status as string);
     res.status(200).json({
       status: 'success',
       data: updatedOrder

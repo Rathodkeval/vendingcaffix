@@ -27,10 +27,13 @@ else:
     app.mount("/", StaticFiles(directory="legacy-frontend", html=True), name="static")
 
 if __name__ == "__main__":
+    machine_id = os.getenv("MACHINE_ID", "CFX-MC-01")
+    kiosk_secret = os.getenv("KIOSK_SECRET", "Kx8P2mL9Qv4Rz7Tn5Yh1")
+    kiosk_url = f"http://localhost:8000/?kiosk={kiosk_secret}&machine_id={machine_id}"
     print("----------------------------------------------------------------")
-    print("CAFFIX Vending Kiosk server booting up...")
-    print("URL: http://localhost:8000")
+    print(f"CAFFIX Vending Kiosk server booting up for Machine: {machine_id}")
+    print(f"Local Kiosk URL: {kiosk_url}")
     print("Touch interface optimized: Use Chromium in kiosk mode:")
-    print("chromium-browser --kiosk --app=http://localhost:8000")
+    print(f'chromium-browser --kiosk --app="{kiosk_url}"')
     print("----------------------------------------------------------------")
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

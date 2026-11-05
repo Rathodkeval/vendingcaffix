@@ -20,6 +20,7 @@ const API_BASE = import.meta.env.VITE_API_URL || (
 
 export default function App() {
   const [kioskStatus, setKioskStatus] = useState('VERIFYING'); // 'VERIFYING' | 'AUTHORIZED' | 'UNAUTHORIZED'
+  const [machineId, setMachineId] = useState(null);
   const [screen, setScreen] = useState('WELCOME');
   const [selectedCoffee, setSelectedCoffee] = useState(null);
   const [orderDetails, setOrderDetails] = useState(null);
@@ -40,8 +41,8 @@ export default function App() {
   // Orders Log history
   const [orderHistory, setOrderHistory] = useState([]);
 
-  // Kiosk Startup: Silently login as kiosk to verify credentials and pull prices
-  const refreshKioskData = async (token) => {
+  // Kiosk Startup: Pull prices and machine-specific status/levels
+  const refreshKioskData = async (token, targetMachineId = machineId) => {
     try {
       // 1. Get products list
       const prodRes = await fetch(`${API_BASE}/products`);
@@ -59,33 +60,39 @@ export default function App() {
         setPrices(priceMap);
       }
 
-      // 2. Get machine status/levels
-      const machineRes = await fetch(`${API_BASE}/machine-status`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      const machineData = await machineRes.json();
-      if (machineData.status === 'success') {
-        const m = machineData.data;
-        setMaintenanceMode(m.status === 'maintenance');
-        setInventory({
-          water: m.inventory.water,
-          coffee: m.inventory.coffee,
-          milk: m.inventory.milk,
-          vanilla: m.inventory.vanilla,
-          hazelnut: m.inventory.hazelnut,
-          irish: m.inventory.irish,
-          mocha: m.inventory.mocha
-        });
+      // 2. Get machine status/levels for the active machine
+      if (targetMachineId) {
+        const machineRes = await fetch(
+          `${API_BASE}/machine-status?machine_id=${encodeURIComponent(targetMachineId)}`,
+          {
+            headers: { 'Authorization': `Bearer ${token}` }
+          }
+        );
+        const machineData = await machineRes.json();
+        if (machineData.status === 'success') {
+          const m = machineData.data;
+          setMaintenanceMode(m.status === 'maintenance');
+          setInventory({
+            water: m.inventory.water,
+            coffee: m.inventory.coffee,
+            milk: m.inventory.milk,
+            vanilla: m.inventory.vanilla,
+            hazelnut: m.inventory.hazelnut,
+            irish: m.inventory.irish,
+            mocha: m.inventory.mocha
+          });
+        }
       }
     } catch (error) {
       console.error('Kiosk data refresh failed:', error);
     }
   };
 
-  const refreshAdminData = async (token) => {
+  const refreshAdminData = async (token, targetMachineId = machineId) => {
     try {
-      // 1. Get orders history
-      const ordersRes = await fetch(`${API_BASE}/orders`, {
+      // 1. Get orders history for the active machine
+      const queryStr = targetMachineId ? `?machine_id=${encodeURIComponent(targetMachineId)}` : '';
+      const ordersRes = await fetch(`${API_BASE}/orders${queryStr}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const ordersData = await ordersRes.json();
@@ -101,49 +108,48 @@ export default function App() {
       }
 
       // 2. Refresh machine levels
-      await refreshKioskData(token);
+      await refreshKioskData(token, targetMachineId);
     } catch (error) {
       console.error('Admin data refresh failed:', error);
     }
   };
 
   useEffect(() => {
-    async function initKiosk() {
-      try {
-        const res = await fetch(`${API_BASE}/auth/login`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: 'kiosk01@caffix.com', password: 'kiosk123' })
-        });
-        const data = await res.json();
-        if (data.status === 'success') {
-          localStorage.setItem('kioskToken', data.token);
-          await refreshKioskData(data.token);
-        }
-      } catch (e) {
-        console.error('Kiosk silent login failed:', e);
-      }
-    }
-
     async function verifyKioskDevice() {
       const urlParams = new URLSearchParams(window.location.search);
       const kioskParam = urlParams.get('kiosk');
+      const hasMachineParam = urlParams.has('machine_id');
+      const machineParam = urlParams.get('machine_id');
 
       if (!kioskParam) {
         setKioskStatus('UNAUTHORIZED');
         return;
       }
 
+      if (hasMachineParam && (!machineParam || !machineParam.trim())) {
+        setKioskStatus('UNAUTHORIZED');
+        return;
+      }
+
       try {
-        const res = await fetch(`${API_BASE}/kiosk/verify?kiosk=${encodeURIComponent(kioskParam)}`);
+        const verifyQuery = new URLSearchParams({ kiosk: kioskParam });
+        if (hasMachineParam) {
+          verifyQuery.set('machine_id', machineParam.trim());
+        }
+
+        const res = await fetch(`${API_BASE}/kiosk/verify?${verifyQuery.toString()}`);
         if (!res.ok) {
           setKioskStatus('UNAUTHORIZED');
           return;
         }
         const data = await res.json();
-        if (data && data.authorized === true) {
+        if (data && data.authorized === true && data.machine_id && data.token) {
+          const verifiedMachineId = data.machine_id;
+          setMachineId(verifiedMachineId);
+          localStorage.setItem('machineId', verifiedMachineId);
+          localStorage.setItem('kioskToken', data.token);
           setKioskStatus('AUTHORIZED');
-          await initKiosk();
+          await refreshKioskData(data.token, verifiedMachineId);
         } else {
           setKioskStatus('UNAUTHORIZED');
         }
@@ -169,7 +175,13 @@ export default function App() {
 
   const handleConfirmOrder = async (details) => {
     const token = localStorage.getItem('kioskToken') || '';
+    const activeMachineId = machineId || localStorage.getItem('machineId');
     const idMap = { classic: 1, vanilla: 2, hazelnut: 3, irish: 4, mocha: 5 };
+
+    if (!activeMachineId) {
+      alert('Machine identity is not verified. Unable to place order.');
+      return;
+    }
     
     try {
       const res = await fetch(`${API_BASE}/orders/create`, {
@@ -181,7 +193,7 @@ export default function App() {
         body: JSON.stringify({
           product_id: idMap[selectedCoffee.id],
           amount: details.price,
-          machine_id: 'CFX-MC-01',
+          machine_id: activeMachineId,
           extra_sugar: true,
           base: details.base
         })
@@ -192,6 +204,7 @@ export default function App() {
         setOrderDetails({ 
           ...details, 
           dbId: data.data.id,
+          machine_id: data.data.machine_id || activeMachineId,
           razorpay_order_id: data.data.razorpay_order_id,
           razorpay_key: data.data.razorpay_key
         });
@@ -226,7 +239,7 @@ export default function App() {
     setSelectedCoffee(null);
     setOrderDetails(null);
     const token = localStorage.getItem('kioskToken') || '';
-    await refreshKioskData(token);
+    await refreshKioskData(token, machineId);
     setScreen('WELCOME');
   };
 
@@ -254,8 +267,10 @@ export default function App() {
   // Refill ingredients helper
   const handleRefillInventory = async (key) => {
     const token = localStorage.getItem('adminToken') || '';
+    const activeMachineId = machineId || localStorage.getItem('machineId');
+    if (!activeMachineId) return;
     try {
-      await fetch(`${API_BASE}/machines/CFX-MC-01/refill`, {
+      await fetch(`${API_BASE}/machines/${encodeURIComponent(activeMachineId)}/refill`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -263,7 +278,7 @@ export default function App() {
         },
         body: JSON.stringify({ ingredient: key })
       });
-      await refreshAdminData(token);
+      await refreshAdminData(token, activeMachineId);
     } catch (error) {
       console.error('Inventory refill failed:', error);
     }
@@ -323,7 +338,7 @@ export default function App() {
         body: JSON.stringify({ price: tempPrices.mocha })
       });
 
-      await refreshAdminData(token);
+      await refreshAdminData(token, machineId);
     } catch (e) {
       console.error('Update prices failed:', e);
     }
@@ -332,9 +347,11 @@ export default function App() {
   // Toggle Maintenance helper
   const handleToggleMaintenance = async () => {
     const token = localStorage.getItem('adminToken') || '';
+    const activeMachineId = machineId || localStorage.getItem('machineId');
+    if (!activeMachineId) return;
     const newStatus = maintenanceMode ? 'online' : 'maintenance';
     try {
-      await fetch(`${API_BASE}/machines/CFX-MC-01/status`, {
+      await fetch(`${API_BASE}/machines/${encodeURIComponent(activeMachineId)}/status`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -342,7 +359,7 @@ export default function App() {
         },
         body: JSON.stringify({ status: newStatus })
       });
-      await refreshAdminData(token);
+      await refreshAdminData(token, activeMachineId);
     } catch (error) {
       console.error('Toggle maintenance failed:', error);
     }
@@ -353,17 +370,22 @@ export default function App() {
     setScreen('PASSCODE');
   };
 
-  const handleAdminSuccess = async () => {
+  const handleAdminSuccess = async (passcode = '1234') => {
+    const kioskToken = localStorage.getItem('kioskToken') || '';
+    const activeMachineId = machineId || localStorage.getItem('machineId');
     try {
-      const res = await fetch(`${API_BASE}/auth/login`, {
+      const res = await fetch(`${API_BASE}/auth/kiosk-admin`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: 'admin@caffix.com', password: 'admin123' })
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${kioskToken}`
+        },
+        body: JSON.stringify({ passcode: String(passcode), machine_id: activeMachineId })
       });
       const data = await res.json();
       if (data.status === 'success') {
         localStorage.setItem('adminToken', data.token);
-        await refreshAdminData(data.token);
+        await refreshAdminData(data.token, activeMachineId);
         setScreen('ADMIN');
       }
     } catch (error) {

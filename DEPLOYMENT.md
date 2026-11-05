@@ -313,3 +313,28 @@ RAZORPAY_WEBHOOK_SECRET=YourWebhookSecretHere
      * **Wallets**: Choose Paytm/PhonePe Wallet options.
 5. **Verify Processing**: The backend verifies the signature header, transitions status to `PAID` (deducting levels in SQLite), and routes to the coffee brewing screen.
 
+---
+
+## 8. Multi-Machine Deployment & Registration
+
+CAFFIX supports running 10, 50, or 100+ vending machines from a single Vercel deployment, single Firebase Firestore database, and single Razorpay account.
+
+### 8.1 Kiosk URLs per Machine
+Each Raspberry Pi Chromium browser launches the single Vercel deployment with its `kiosk` credential and `machine_id`:
+- **Machine 1**: `https://vendingcaffix.vercel.app/?kiosk=Kx8P2mL9Qv4Rz7Tn5Yh1&machine_id=CFX-MC-01`
+- **Machine 2**: `https://vendingcaffix.vercel.app/?kiosk=Kx8P2mL9Qv4Rz7Tn5Yh1&machine_id=CFX-MC-02`
+- **Machine 3**: `https://vendingcaffix.vercel.app/?kiosk=Kx8P2mL9Qv4Rz7Tn5Yh1&machine_id=CFX-MC-03`
+
+### 8.2 Per-Machine Kiosk Credentials (Optional Hardening)
+You can assign unique secrets per machine via environment variables on Vercel:
+```ini
+KIOSK_SECRET=Kx8P2mL9Qv4Rz7Tn5Yh1
+KIOSK_MACHINE_KEYS=CFX-MC-01:Kx8P2mL9Qv4Rz7Tn5Yh1,CFX-MC-02:Kx8P2mL9Qv4Rz7Tn5Yh2,CFX-MC-03:Kx8P2mL9Qv4Rz7Tn5Yh3
+REGISTERED_MACHINES=CFX-MC-01,CFX-MC-02,CFX-MC-03,CFX-MC-04,CFX-MC-05
+```
+Or register new machines dynamically via `POST /api/machines/register` with an Admin Bearer token.
+
+### 8.3 Raspberry Pi Order Processor Configuration
+On each Raspberry Pi, set `MACHINE_ID` in its environment (e.g. `MACHINE_ID="CFX-MC-01"` on Machine 1, `MACHINE_ID="CFX-MC-02"` on Machine 2) and use `MachineOrderProcessor` from `rpi_order_processor.py` to filter Firestore `orders` by `machine_id` and claim orders atomically via Firestore transactions.
+
+

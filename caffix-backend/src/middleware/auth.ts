@@ -5,10 +5,11 @@ import { Request } from 'express';
 
 export interface AuthRequest extends Request {
   user?: {
-    id: number;
+    id: number | string;
     email: string;
     role: 'admin' | 'kiosk';
     name: string;
+    machine_id?: string;
   };
 }
 

@@ -49,7 +49,7 @@ export const login = async (
   res: Response,
   next: NextFunction
 ): Promise<void> => {
-  const { email, password } = req.body;
+  const { email, password, machine_id } = req.body;
   const db = getDB();
 
   try {
@@ -63,14 +63,29 @@ export const login = async (
       return next(new UnauthorizedError('Invalid credentials'));
     }
 
+    let resolvedMachineId: string | undefined = undefined;
+    if (user.role === 'kiosk' && machine_id) {
+      const machine = await db.get('SELECT id FROM machines WHERE id = ?', [machine_id]);
+      if (!machine) {
+        return next(new UnauthorizedError(`Unregistered machine ID: ${machine_id}`));
+      }
+      resolvedMachineId = machine.id;
+    }
+
     // Sign JWT
     const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role, name: user.name },
+      {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        name: user.name,
+        ...(resolvedMachineId ? { machine_id: resolvedMachineId } : {})
+      },
       JWT_SECRET,
       { expiresIn: '24h' }
     );
 
-    logger.info(`User logged in: ${email}`);
+    logger.info(`User logged in: ${email}${resolvedMachineId ? ` (machine: ${resolvedMachineId})` : ''}`);
 
     res.status(200).json({
       status: 'success',
@@ -79,7 +94,51 @@ export const login = async (
         id: user.id,
         name: user.name,
         email: user.email,
-        role: user.role
+        role: user.role,
+        ...(resolvedMachineId ? { machine_id: resolvedMachineId } : {})
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const kioskAdminLogin = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  const { passcode, machine_id } = req.body;
+  const expectedPin = (process.env.ADMIN_PASSCODE || '1234').trim();
+
+  try {
+    if (!passcode || String(passcode).trim() !== expectedPin) {
+      return next(new UnauthorizedError('Invalid admin passcode'));
+    }
+
+    const token = jwt.sign(
+      {
+        id: 1,
+        email: 'admin@caffix.com',
+        role: 'admin',
+        name: 'Caffix Manager',
+        ...(machine_id ? { machine_id } : {})
+      },
+      JWT_SECRET,
+      { expiresIn: '12h' }
+    );
+
+    logger.info(`Kiosk admin unlocked${machine_id ? ` on machine ${machine_id}` : ''}`);
+
+    res.status(200).json({
+      status: 'success',
+      token,
+      data: {
+        id: 1,
+        name: 'Caffix Manager',
+        email: 'admin@caffix.com',
+        role: 'admin',
+        ...(machine_id ? { machine_id } : {})
       }
     });
   } catch (error) {

@@ -1,8 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { getDB } from '../config/db';
+import { AuthRequest } from '../middleware/auth';
 import { executeOrderStatusUpdate } from './orderController';
-import { BadRequestError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import logger from '../utils/logger';
 
 const getSecrets = () => ({
@@ -11,7 +12,7 @@ const getSecrets = () => ({
 });
 
 export const verifyPaymentSignature = async (
-  req: Request,
+  req: AuthRequest,
   res: Response,
   next: NextFunction
 ): Promise<void> => {
@@ -20,17 +21,31 @@ export const verifyPaymentSignature = async (
   const { razorpayKeySecret } = getSecrets();
 
   try {
+    if (!order_id || !razorpay_payment_id || !razorpay_order_id || !razorpay_signature) {
+      return next(new BadRequestError('Missing required payment verification parameters'));
+    }
+
     // 1. Check if the order exists locally
     const order = await db.get('SELECT * FROM orders WHERE id = ?', [order_id]);
     if (!order) {
       return next(new NotFoundError(`Local order ID ${order_id} not found`));
     }
 
-    // 2. Perform verification
-    const isMockOrder = razorpay_order_id.startsWith('order_mock_') || razorpayKeySecret.includes('mock');
+    // 2. Verify machine identity binding for kiosk sessions
+    if (req.user?.role === 'kiosk' && req.user.machine_id && req.user.machine_id !== order.machine_id) {
+      return next(new ForbiddenError(`Kiosk ${req.user.machine_id} cannot verify payment for order on machine ${order.machine_id}`));
+    }
+
+    // 3. Verify Razorpay order ID matches the order record
+    if (order.razorpay_order_id && order.razorpay_order_id !== razorpay_order_id) {
+      return next(new BadRequestError('Razorpay Order ID does not match the local order'));
+    }
+
+    // 4. Perform cryptographic signature verification
+    const isMockOrder = String(razorpay_order_id).startsWith('order_mock_') || razorpayKeySecret.includes('mock');
 
     if (isMockOrder) {
-      logger.info(`Verifying mock Razorpay signature for order ${order_id}`);
+      logger.info(`Verifying mock Razorpay signature for order ${order_id} (machine: ${order.machine_id})`);
     } else {
       // Cryptographic signature check for production
       const text = razorpay_order_id + '|' + razorpay_payment_id;
@@ -45,7 +60,23 @@ export const verifyPaymentSignature = async (
       }
     }
 
-    // 3. Update order in SQLite to store Razorpay tokens
+    // 5. Idempotency check: if already PAID, PREPARING, or COMPLETED, return current order without re-processing
+    if (['PAID', 'PREPARING', 'COMPLETED'].includes(order.status)) {
+      logger.info(`Duplicate payment verification ignored for already-${order.status} order ${order_id}`);
+      const existingOrder = await db.get(`
+        SELECT o.*, p.name as product_name 
+        FROM orders o
+        JOIN products p ON o.product_id = p.id
+        WHERE o.id = ?
+      `, [order_id]);
+      res.status(200).json({
+        status: 'success',
+        data: existingOrder || order
+      });
+      return;
+    }
+
+    // 6. Update order in SQLite to store Razorpay tokens
     await db.run(
       `UPDATE orders SET 
         razorpay_payment_id = ?, 
@@ -54,10 +85,10 @@ export const verifyPaymentSignature = async (
       [razorpay_payment_id, razorpay_signature, order_id]
     );
 
-    // 4. Update status to PAID (which triggers db-level ingredient deductions)
+    // 7. Update status to PAID (which triggers db-level ingredient deductions once)
     const updatedOrder = await executeOrderStatusUpdate(order_id, 'PAID');
     
-    logger.info(`Successfully verified payment for order ${order_id}. Marked as PAID.`);
+    logger.info(`Successfully verified payment for order ${order_id} (machine: ${order.machine_id}). Marked as PAID.`);
 
     res.status(200).json({
       status: 'success',

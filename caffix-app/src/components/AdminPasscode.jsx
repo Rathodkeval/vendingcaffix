@@ -14,7 +14,7 @@ export default function AdminPasscode({ onSuccess, onCancel }) {
       // Verify immediately when 4 digits are input
       if (newPin.length === 4) {
         if (newPin === '1234') {
-          onSuccess();
+          onSuccess(newPin);
         } else {
           setTimeout(() => {
             setError(true);

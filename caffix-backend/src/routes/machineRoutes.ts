@@ -16,7 +16,8 @@ const registerMachineSchema = z.object({
   body: z.object({
     id: z.string().min(3, 'Machine ID is required (min 3 chars)'),
     machine_name: z.string().min(2, 'Machine name must be at least 2 chars'),
-    location: z.string().min(2, 'Location is required')
+    location: z.string().min(2, 'Location is required'),
+    kiosk_token: z.string().min(8, 'Kiosk token must be at least 8 chars').optional()
   })
 });
 

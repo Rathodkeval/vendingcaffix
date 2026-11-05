@@ -14,6 +14,76 @@ if (!process.env.VERCEL) {
   }
 }
 
+export interface DefaultMachineSeed {
+  id: string;
+  machine_name: string;
+  location: string;
+  kiosk_token: string | null;
+}
+
+export function getConfiguredMachineSeeds(): DefaultMachineSeed[] {
+  const perMachineTokens = new Map<string, string>();
+  const rawKeys = process.env.KIOSK_MACHINE_KEYS || '';
+  if (rawKeys.trim()) {
+    for (const pair of rawKeys.split(',')) {
+      const [mId, token] = pair.split(':').map(s => s.trim());
+      if (mId && token) {
+        perMachineTokens.set(mId, token);
+      }
+    }
+  }
+
+  for (const [envKey, envVal] of Object.entries(process.env)) {
+    if (envKey.startsWith('KIOSK_SECRET_') && envVal) {
+      const mId = envKey.replace('KIOSK_SECRET_', '').replace(/_/g, '-');
+      perMachineTokens.set(mId, envVal.trim());
+    }
+  }
+
+  const defaults: DefaultMachineSeed[] = [
+    { id: 'CFX-MC-01', machine_name: 'Kiosk-One', location: 'Location 1', kiosk_token: perMachineTokens.get('CFX-MC-01') || null },
+    { id: 'CFX-MC-02', machine_name: 'Kiosk-Two', location: 'Location 2', kiosk_token: perMachineTokens.get('CFX-MC-02') || null },
+    { id: 'CFX-MC-03', machine_name: 'Kiosk-Three', location: 'Location 3', kiosk_token: perMachineTokens.get('CFX-MC-03') || null }
+  ];
+
+  const existingIds = new Set(defaults.map(d => d.id));
+
+  // Add any additional machines from REGISTERED_MACHINES (comma-separated IDs, e.g. "CFX-MC-04,CFX-MC-05")
+  const extraList = (process.env.REGISTERED_MACHINES || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  for (const mId of extraList) {
+    if (!existingIds.has(mId)) {
+      existingIds.add(mId);
+      defaults.push({
+        id: mId,
+        machine_name: `Kiosk-${mId}`,
+        location: 'Registered Location',
+        kiosk_token: perMachineTokens.get(mId) || null
+      });
+    }
+  }
+
+  // Also include any machine IDs defined in KIOSK_MACHINE_KEYS / KIOSK_SECRET_*
+  for (const [mId, token] of perMachineTokens.entries()) {
+    if (!existingIds.has(mId)) {
+      existingIds.add(mId);
+      defaults.push({
+        id: mId,
+        machine_name: `Kiosk-${mId}`,
+        location: 'Registered Location',
+        kiosk_token: token
+      });
+    }
+  }
+
+  return defaults;
+}
+
+const initialMachineSeeds = getConfiguredMachineSeeds();
+
 // In-memory data store for Vercel Serverless environment
 const mockStore = {
   users: [
@@ -27,12 +97,25 @@ const mockStore = {
     { id: 4, name: 'Irish Emerald', price: 100, description: 'Classic espresso combined with rich Irish cream flavor and velvety smooth milk.', image: '/assets/irish_coffee.png' },
     { id: 5, name: 'Mocha Bliss', price: 100, description: 'Decadent chocolate syrup blended with robust espresso and creamy milk.', image: '/assets/mocha_coffee.png' }
   ],
-  machines: [
-    { id: 'CFX-MC-01', machine_name: 'Kiosk-One', location: 'Delhi Airport T3', status: 'online', last_seen: new Date().toISOString() }
-  ],
-  inventory: [
-    { id: 1, machine_id: 'CFX-MC-01', milk_level: 92, coffee_level: 78, vanilla_level: 65, hazelnut_level: 55, irish_level: 60, mocha_level: 50, water_level: 85 }
-  ],
+  machines: initialMachineSeeds.map((m, idx) => ({
+    id: m.id,
+    machine_name: m.machine_name,
+    location: idx === 0 ? 'Delhi Airport T3' : m.location,
+    status: 'online',
+    last_seen: new Date().toISOString(),
+    kiosk_token: m.kiosk_token
+  })),
+  inventory: initialMachineSeeds.map((m, idx) => ({
+    id: idx + 1,
+    machine_id: m.id,
+    milk_level: idx === 0 ? 92 : 100,
+    coffee_level: idx === 0 ? 78 : 100,
+    vanilla_level: idx === 0 ? 65 : 100,
+    hazelnut_level: idx === 0 ? 55 : 100,
+    irish_level: idx === 0 ? 60 : 100,
+    mocha_level: idx === 0 ? 50 : 100,
+    water_level: idx === 0 ? 85 : 100
+  })),
   orders: [
     { id: 'CFX-4912', product_id: 1, amount: 100, status: 'COMPLETED', machine_id: 'CFX-MC-01', created_at: new Date().toISOString(), razorpay_order_id: null, razorpay_payment_id: null, razorpay_signature: null },
     { id: 'CFX-7104', product_id: 3, amount: 100, status: 'COMPLETED', machine_id: 'CFX-MC-01', created_at: new Date().toISOString(), razorpay_order_id: null, razorpay_payment_id: null, razorpay_signature: null },
@@ -67,8 +150,11 @@ class MockDatabase {
     }
     
     if (query.includes('from machines')) {
-      const id = params[0];
-      return mockStore.machines.find(m => m.id === id);
+      const param = params[0];
+      if (query.includes('where kiosk_token = ?')) {
+        return mockStore.machines.find(m => m.kiosk_token && m.kiosk_token === param);
+      }
+      return mockStore.machines.find(m => m.id === param);
     }
     
     if (query.includes('from inventory')) {
@@ -112,7 +198,12 @@ class MockDatabase {
     }
     
     if (query.includes('from orders')) {
-      return mockStore.orders.map(o => {
+      let filtered = mockStore.orders;
+      if (query.includes('where o.machine_id = ?') || query.includes('where machine_id = ?')) {
+        const machineId = params[0];
+        filtered = filtered.filter(o => o.machine_id === machineId);
+      }
+      return filtered.map(o => {
         const p = mockStore.products.find(prod => prod.id === o.product_id);
         return {
           ...o,
@@ -213,23 +304,40 @@ class MockDatabase {
     }
     
     if (query.includes('update machines set status = ?')) {
-      const [status, id] = params;
+      const status = params[0];
+      const id = params[params.length - 1];
       const mach = mockStore.machines.find(m => m.id === id);
       if (mach) {
         mach.status = status;
+        if (params.length >= 3) {
+          mach.last_seen = params[1];
+        }
       }
       return { changes: 1 };
     }
 
-    if (query.includes('insert into machines')) {
-      const [id, machine_name, location, status, last_seen] = params;
-      mockStore.machines.push({ id, machine_name, location, status, last_seen });
+    if (query.includes('update machines set kiosk_token = ?')) {
+      const [kiosk_token, id] = params;
+      const mach = mockStore.machines.find(m => m.id === id);
+      if (mach) {
+        mach.kiosk_token = kiosk_token;
+      }
+      return { changes: 1 };
+    }
+
+    if (query.includes('insert into machines') || query.includes('insert or ignore into machines')) {
+      const [id, machine_name, location, status, last_seen, kiosk_token] = params;
+      if (!mockStore.machines.some(m => m.id === id)) {
+        mockStore.machines.push({ id, machine_name, location, status, last_seen, kiosk_token: kiosk_token || null });
+      }
       return { lastID: id };
     }
 
-    if (query.includes('insert into inventory')) {
+    if (query.includes('insert into inventory') || query.includes('insert or ignore into inventory')) {
       const [machine_id] = params;
-      mockStore.inventory.push({ id: mockStore.inventory.length + 1, machine_id, milk_level: 100, coffee_level: 100, vanilla_level: 100, hazelnut_level: 100, irish_level: 100, mocha_level: 100, water_level: 100 });
+      if (!mockStore.inventory.some(i => i.machine_id === machine_id)) {
+        mockStore.inventory.push({ id: mockStore.inventory.length + 1, machine_id, milk_level: 100, coffee_level: 100, vanilla_level: 100, hazelnut_level: 100, irish_level: 100, mocha_level: 100, water_level: 100 });
+      }
       return { lastID: mockStore.inventory.length };
     }
     
@@ -284,9 +392,23 @@ export async function initDB(): Promise<any> {
       machine_name TEXT NOT NULL,
       location TEXT,
       status TEXT NOT NULL CHECK(status IN ('online', 'offline', 'maintenance')),
-      last_seen TEXT NOT NULL
+      last_seen TEXT NOT NULL,
+      kiosk_token TEXT
     )
   `);
+
+  // Run dynamic schema migration check for machines table
+  try {
+    const machTableInfo = await db.all("PRAGMA table_info(machines)");
+    const hasKioskToken = machTableInfo.some((col: any) => col.name === 'kiosk_token');
+    if (!hasKioskToken) {
+      await db.exec(`
+        ALTER TABLE machines ADD COLUMN kiosk_token TEXT;
+      `);
+    }
+  } catch (err) {
+    console.error('Database migration check for machines failed:', err);
+  }
 
   // Create Inventory table
   await db.exec(`
@@ -451,22 +573,28 @@ async function seedData() {
     );
   }
 
-  // 3. Seed Machines
-  const machineCount = await db.get('SELECT COUNT(*) as count FROM machines');
-  if (machineCount && machineCount.count === 0) {
-    await db.run(
-      'INSERT INTO machines (id, machine_name, location, status, last_seen) VALUES (?, ?, ?, ?, ?)',
-      ['CFX-MC-01', 'Kiosk-One', 'Delhi Airport T3', 'online', new Date().toISOString()]
-    );
-  }
+  // 3. Seed Machines & 4. Seed Inventory (for all default and env-configured machines)
+  const seeds = getConfiguredMachineSeeds();
+  for (let i = 0; i < seeds.length; i++) {
+    const m = seeds[i];
+    const existingMachine = await db.get('SELECT id, kiosk_token FROM machines WHERE id = ?', [m.id]);
+    if (!existingMachine) {
+      await db.run(
+        'INSERT INTO machines (id, machine_name, location, status, last_seen, kiosk_token) VALUES (?, ?, ?, ?, ?, ?)',
+        [m.id, m.machine_name, i === 0 ? 'Delhi Airport T3' : m.location, 'online', new Date().toISOString(), m.kiosk_token]
+      );
+    } else if (m.kiosk_token && existingMachine.kiosk_token !== m.kiosk_token) {
+      await db.run('UPDATE machines SET kiosk_token = ? WHERE id = ?', [m.kiosk_token, m.id]);
+    }
 
-  // 4. Seed Inventory
-  const inventoryCount = await db.get('SELECT COUNT(*) as count FROM inventory');
-  if (inventoryCount && inventoryCount.count === 0) {
-    await db.run(
-      'INSERT INTO inventory (machine_id, milk_level, coffee_level, vanilla_level, hazelnut_level, irish_level, mocha_level, water_level) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      ['CFX-MC-01', 92, 78, 65, 55, 60, 50, 85]
-    );
+    const existingInv = await db.get('SELECT id FROM inventory WHERE machine_id = ?', [m.id]);
+    if (!existingInv) {
+      const levels = i === 0 ? [92, 78, 65, 55, 60, 50, 85] : [100, 100, 100, 100, 100, 100, 100];
+      await db.run(
+        'INSERT INTO inventory (machine_id, milk_level, coffee_level, vanilla_level, hazelnut_level, irish_level, mocha_level, water_level) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [m.id, ...levels]
+      );
+    }
   }
 
   // 5. Seed Orders

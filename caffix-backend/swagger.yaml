@@ -140,6 +140,43 @@ paths:
         '404':
           description: Product not found
 
+  /api/kiosk/verify:
+    get:
+      summary: Verify kiosk device credential and resolve machine identity
+      parameters:
+        - name: kiosk
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: machine_id
+          in: query
+          required: false
+          schema:
+            type: string
+          example: CFX-MC-02
+      responses:
+        '200':
+          description: Authorized kiosk with machine-scoped JWT token
+        '401':
+          description: Unauthorized kiosk or invalid machine_id
+
+  /api/machine-status:
+    get:
+      summary: Fetch machine status and inventory for the specified or token-bound machine
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: machine_id
+          in: query
+          required: false
+          schema:
+            type: string
+          example: CFX-MC-02
+      responses:
+        '200':
+          description: Machine status and inventory returned
+
   /api/machines:
     get:
       summary: List all active vending kiosks
@@ -176,6 +213,9 @@ paths:
                 location:
                   type: string
                   example: Noida Tech Park
+                kiosk_token:
+                  type: string
+                  example: Kx8P2mL9Qv4Rz7Tn5Yh2
       responses:
         '201':
           description: Machine registered successfully
@@ -191,7 +231,7 @@ paths:
           required: true
           schema:
             type: string
-          example: CFX-MC-01
+          example: CFX-MC-02
       requestBody:
         required: true
         content:
@@ -220,7 +260,7 @@ paths:
           required: true
           schema:
             type: string
-          example: CFX-MC-01
+          example: CFX-MC-02
       responses:
         '200':
           description: Inventory object returned
@@ -236,7 +276,7 @@ paths:
           required: true
           schema:
             type: string
-          example: CFX-MC-01
+          example: CFX-MC-02
       requestBody:
         required: true
         content:
@@ -256,16 +296,23 @@ paths:
 
   /api/orders:
     get:
-      summary: Fetch entire sales transactions log
+      summary: Fetch sales transactions log (optionally filtered by machine_id)
       security:
         - BearerAuth: []
+      parameters:
+        - name: machine_id
+          in: query
+          required: false
+          schema:
+            type: string
+          example: CFX-MC-02
       responses:
         '200':
           description: Transactions list returned
 
-  /api/orders/checkout:
+  /api/orders/create:
     post:
-      summary: Process customer kiosk checkout order
+      summary: Create customer kiosk order and Razorpay payment order
       security:
         - BearerAuth: []
       requestBody:
@@ -278,23 +325,30 @@ paths:
                 - product_id
                 - machine_id
               properties:
-                id:
-                  type: string
-                  example: CFX-8602
                 product_id:
                   type: integer
                   example: 1
                 amount:
                   type: integer
-                  example: 30
+                  example: 100
                 machine_id:
                   type: string
-                  example: CFX-MC-01
+                  example: CFX-MC-02
+                extra_sugar:
+                  type: boolean
+                  example: true
+                base:
+                  type: string
+                  example: water
       responses:
         '201':
-          description: Order created, ingredient levels decremented
+          description: Order created in PENDING status and synced to Firestore
         '400':
-          description: Ingredients depleted or machine in maintenance
+          description: Invalid machine_id or machine in maintenance
+        '403':
+          description: Machine ID mismatch with authenticated kiosk session
+        '404':
+          description: Machine or product not registered
 
 components:
   securitySchemes:

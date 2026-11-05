@@ -1,6 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 import { getDB } from '../config/db';
-import { NotFoundError, BadRequestError } from '../utils/errors';
+import { AuthRequest } from '../middleware/auth';
+import { NotFoundError, BadRequestError, ForbiddenError } from '../utils/errors';
+import { syncMachineToFirebase } from '../utils/firebase';
+import { ensureMachineRegisteredInLocalDB } from './kioskController';
 import logger from '../utils/logger';
 
 export const getMachines = async (
@@ -10,7 +14,7 @@ export const getMachines = async (
 ): Promise<void> => {
   const db = getDB();
   try {
-    const machines = await db.all('SELECT * FROM machines');
+    const machines = await db.all('SELECT id, machine_name, location, status, last_seen FROM machines');
     res.status(200).json({
       status: 'success',
       data: machines
@@ -25,7 +29,7 @@ export const registerMachine = async (
   res: Response,
   next: NextFunction
 ): Promise<void> => {
-  const { id, machine_name, location } = req.body;
+  const { id, machine_name, location, kiosk_token } = req.body;
   const db = getDB();
   try {
     const existing = await db.get('SELECT id FROM machines WHERE id = ?', [id]);
@@ -34,9 +38,13 @@ export const registerMachine = async (
     }
 
     const now = new Date().toISOString();
+    const generatedToken = kiosk_token
+      ? String(kiosk_token).trim()
+      : crypto.randomBytes(15).toString('base64url');
+
     await db.run(
-      'INSERT INTO machines (id, machine_name, location, status, last_seen) VALUES (?, ?, ?, ?, ?)',
-      [id, machine_name, location, 'online', now]
+      'INSERT INTO machines (id, machine_name, location, status, last_seen, kiosk_token) VALUES (?, ?, ?, ?, ?, ?)',
+      [id, machine_name, location, 'online', now, generatedToken]
     );
 
     // Create default full inventory for this machine
@@ -45,12 +53,28 @@ export const registerMachine = async (
       [id]
     );
 
+    await syncMachineToFirebase({
+      id,
+      machine_name,
+      location,
+      status: 'online',
+      last_seen: now,
+      kiosk_token: generatedToken
+    });
+
     logger.info(`New machine registered: ${machine_name} (${id})`);
 
     res.status(201).json({
       status: 'success',
       message: 'Machine and default inventory registered successfully',
-      data: { id, machine_name, location, status: 'online', last_seen: now }
+      data: {
+        id,
+        machine_name,
+        location,
+        status: 'online',
+        last_seen: now,
+        kiosk_token: generatedToken
+      }
     });
   } catch (error) {
     next(error);
@@ -58,15 +82,19 @@ export const registerMachine = async (
 };
 
 export const updateMachineStatus = async (
-  req: Request,
+  req: AuthRequest,
   res: Response,
   next: NextFunction
 ): Promise<void> => {
-  const { id } = req.params;
+  const id = String(req.params.id);
   const { status } = req.body;
   const db = getDB();
   try {
-    const machine = await db.get('SELECT id FROM machines WHERE id = ?', [id]);
+    if (req.user?.role === 'kiosk' && req.user.machine_id && req.user.machine_id !== id) {
+      return next(new ForbiddenError(`Kiosk ${req.user.machine_id} cannot modify status of machine ${id}`));
+    }
+
+    const machine = await ensureMachineRegisteredInLocalDB(id);
     if (!machine) {
       return next(new NotFoundError(`Machine with ID ${id} not found`));
     }
@@ -76,6 +104,12 @@ export const updateMachineStatus = async (
       'UPDATE machines SET status = ?, last_seen = ? WHERE id = ?',
       [status, now, id]
     );
+
+    await syncMachineToFirebase({
+      ...machine,
+      status,
+      last_seen: now
+    });
 
     logger.info(`Machine ${id} status updated to ${status}`);
 
@@ -89,13 +123,18 @@ export const updateMachineStatus = async (
 };
 
 export const getInventoryByMachine = async (
-  req: Request,
+  req: AuthRequest,
   res: Response,
   next: NextFunction
 ): Promise<void> => {
-  const { machine_id } = req.params;
+  const machine_id = String(req.params.machine_id);
   const db = getDB();
   try {
+    if (req.user?.role === 'kiosk' && req.user.machine_id && req.user.machine_id !== machine_id) {
+      return next(new ForbiddenError(`Kiosk ${req.user.machine_id} cannot access inventory of machine ${machine_id}`));
+    }
+
+    await ensureMachineRegisteredInLocalDB(machine_id);
     const inv = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [machine_id]);
     if (!inv) {
       return next(new NotFoundError(`Inventory for machine ID ${machine_id} not found`));
@@ -110,14 +149,15 @@ export const getInventoryByMachine = async (
 };
 
 export const refillMachineInventory = async (
-  req: Request,
+  req: AuthRequest,
   res: Response,
   next: NextFunction
 ): Promise<void> => {
-  const { machine_id } = req.params;
+  const machine_id = String(req.params.machine_id);
   const { ingredient } = req.body; // e.g. "milk", "coffee", "water", "vanilla", "hazelnut", "ALL"
   const db = getDB();
   try {
+    await ensureMachineRegisteredInLocalDB(machine_id);
     const inv = await db.get('SELECT id FROM inventory WHERE machine_id = ?', [machine_id]);
     if (!inv) {
       return next(new NotFoundError(`Inventory for machine ID ${machine_id} not found`));
@@ -153,14 +193,21 @@ export const refillMachineInventory = async (
 };
 
 export const getMachineStatus = async (
-  req: Request,
+  req: AuthRequest,
   res: Response,
   next: NextFunction
 ): Promise<void> => {
   const db = getDB();
   try {
-    const machineId = 'CFX-MC-01';
-    const machine = await db.get('SELECT * FROM machines WHERE id = ?', [machineId]);
+    const queryMachineId = typeof req.query.machine_id === 'string' ? req.query.machine_id.trim() : '';
+    const tokenMachineId = req.user?.machine_id || '';
+
+    if (req.user?.role === 'kiosk' && tokenMachineId && queryMachineId && queryMachineId !== tokenMachineId) {
+      return next(new ForbiddenError(`Kiosk session bound to ${tokenMachineId} cannot query status for ${queryMachineId}`));
+    }
+
+    const machineId = queryMachineId || tokenMachineId || 'CFX-MC-01';
+    const machine = await ensureMachineRegisteredInLocalDB(machineId);
     if (!machine) {
       return next(new NotFoundError(`Machine with ID ${machineId} not found`));
     }
