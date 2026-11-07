@@ -51,3 +51,5 @@ npm test
 ```
 
 Preview deployment verification for CAFFIX Owner Dashboard.
+- Target Preview Backend: `https://vendingcaffix-git-owner-dashboa-999806-kevals-projects-9d5434ff.vercel.app/api`
+
