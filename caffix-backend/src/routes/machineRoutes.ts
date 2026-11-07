@@ -1,8 +1,11 @@
 import { Router } from 'express';
 import {
   getMachines,
+  getMachineById,
+  assignMachineOwner,
   registerMachine,
   updateMachineStatus,
+  recordMachineHeartbeat,
   getInventoryByMachine,
   refillMachineInventory
 } from '../controllers/machineController';
@@ -21,12 +24,32 @@ const registerMachineSchema = z.object({
   })
 });
 
+const assignOwnerSchema = z.object({
+  params: z.object({
+    id: z.string().min(3)
+  }),
+  body: z.object({
+    owner_id: z.union([z.string().min(1), z.null()])
+  })
+});
+
 const updateStatusSchema = z.object({
   params: z.object({
     id: z.string()
   }),
-  body: z.object({
-    status: z.enum(['online', 'offline', 'maintenance'])
+  body: z
+    .object({
+      desired_mode: z.enum(['RUNNING', 'MAINTENANCE']).optional(),
+      status: z.enum(['online', 'maintenance', 'RUNNING', 'MAINTENANCE']).optional()
+    })
+    .refine((data) => Boolean(data.desired_mode || data.status), {
+      message: "Either 'desired_mode' ('RUNNING' | 'MAINTENANCE') or 'status' ('online' | 'maintenance') is required"
+    })
+});
+
+const heartbeatSchema = z.object({
+  params: z.object({
+    id: z.string()
   })
 });
 
@@ -39,10 +62,13 @@ const refillSchema = z.object({
   })
 });
 
-router.get('/', authenticateJWT, requireRole(['admin']), getMachines);
+router.get('/', authenticateJWT, requireRole(['admin', 'owner']), getMachines);
 router.post('/register', authenticateJWT, requireRole(['admin']), validateRequest(registerMachineSchema), registerMachine);
-router.patch('/:id/status', authenticateJWT, validateRequest(updateStatusSchema), updateMachineStatus);
+router.get('/:id', authenticateJWT, requireRole(['admin', 'owner']), getMachineById);
+router.patch('/:id/owner', authenticateJWT, requireRole(['admin']), validateRequest(assignOwnerSchema), assignMachineOwner);
+router.patch('/:id/status', authenticateJWT, requireRole(['admin', 'owner']), validateRequest(updateStatusSchema), updateMachineStatus);
+router.post('/:id/heartbeat', authenticateJWT, validateRequest(heartbeatSchema), recordMachineHeartbeat);
 router.get('/:machine_id/inventory', authenticateJWT, getInventoryByMachine);
-router.post('/:machine_id/refill', authenticateJWT, requireRole(['admin']), validateRequest(refillSchema), refillMachineInventory);
+router.post('/:machine_id/refill', authenticateJWT, requireRole(['admin', 'owner']), validateRequest(refillSchema), refillMachineInventory);
 
 export default router;

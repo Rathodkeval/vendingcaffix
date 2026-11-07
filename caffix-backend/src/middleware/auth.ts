@@ -1,13 +1,16 @@
-import { Response, NextFunction } from 'express';
+import { Response, NextFunction, Request } from 'express';
 import jwt from 'jsonwebtoken';
-import { UnauthorizedError, ForbiddenError } from '../utils/errors';
-import { Request } from 'express';
+import { UnauthorizedError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { getDB } from '../config/db';
+import { getAuthoritativeMachineState } from '../utils/firebase';
+
+export type UserRole = 'admin' | 'kiosk' | 'owner';
 
 export interface AuthRequest extends Request {
   user?: {
     id: number | string;
     email: string;
-    role: 'admin' | 'kiosk';
+    role: UserRole;
     name: string;
     machine_id?: string;
   };
@@ -37,7 +40,7 @@ export const authenticateJWT = (
   }
 };
 
-export const requireRole = (roles: Array<'admin' | 'kiosk'>) => {
+export const requireRole = (roles: Array<UserRole>) => {
   return (req: AuthRequest, res: Response, next: NextFunction): void => {
     if (!req.user) {
       return next(new UnauthorizedError('User authentication details not found'));
@@ -50,3 +53,51 @@ export const requireRole = (roles: Array<'admin' | 'kiosk'>) => {
     next();
   };
 };
+
+/**
+ * Live database/Firestore machine ownership enforcement.
+ * Never trusts machine assignments embedded in JWTs; always checks current authoritative `owner_id`.
+ * - Admin: can access all machines.
+ * - Owner: can ONLY access machines where live `machine.owner_id === String(user.id)`.
+ * - Kiosk (when allowed on a route): can ONLY access its own bound `user.machine_id`.
+ */
+export async function assertMachineOwnershipOrAdmin(
+  user: AuthRequest['user'],
+  machineId: string
+): Promise<any> {
+  if (!user) {
+    throw new UnauthorizedError('Authentication required');
+  }
+
+  const db = getDB();
+  const machine = await getAuthoritativeMachineState(machineId, db);
+  if (!machine) {
+    throw new NotFoundError(`Machine with ID ${machineId} not found`);
+  }
+
+  if (user.role === 'admin') {
+    return machine;
+  }
+
+  if (user.role === 'owner') {
+    const currentOwnerId = machine.owner_id ? String(machine.owner_id).trim() : null;
+    const requestingUserId = String(user.id).trim();
+    if (!currentOwnerId || currentOwnerId !== requestingUserId) {
+      throw new ForbiddenError(
+        `Access denied: machine ${machineId} is not assigned to your owner account`
+      );
+    }
+    return machine;
+  }
+
+  if (user.role === 'kiosk') {
+    if (!user.machine_id || user.machine_id !== machineId) {
+      throw new ForbiddenError(
+        `Kiosk session bound to ${user.machine_id || 'unknown'} cannot access machine ${machineId}`
+      );
+    }
+    return machine;
+  }
+
+  throw new ForbiddenError('You do not have access permission for this machine');
+}

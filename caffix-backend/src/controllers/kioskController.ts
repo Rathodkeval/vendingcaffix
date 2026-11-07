@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { getDB } from '../config/db';
-import { getMachineFromFirebase } from '../utils/firebase';
+import { getAuthoritativeMachineState } from '../utils/firebase';
 import logger from '../utils/logger';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'caffix_vending_secret_key_2026_xyz';
@@ -29,38 +29,7 @@ function getEnvPerMachineTokens(): Map<string, string> {
 
 export async function ensureMachineRegisteredInLocalDB(machineId: string): Promise<any | null> {
   const db = getDB();
-  let machine = await db.get('SELECT * FROM machines WHERE id = ?', [machineId]);
-  if (machine) {
-    return machine;
-  }
-
-  // Check Firestore for dynamically registered machines (important for Vercel Serverless cold starts)
-  const remoteMachine = await getMachineFromFirebase(machineId);
-  if (remoteMachine && remoteMachine.id === machineId) {
-    const now = new Date().toISOString();
-    await db.run(
-      'INSERT INTO machines (id, machine_name, location, status, last_seen, kiosk_token) VALUES (?, ?, ?, ?, ?, ?)',
-      [
-        remoteMachine.id,
-        remoteMachine.machine_name || `Kiosk-${remoteMachine.id}`,
-        remoteMachine.location || 'Registered Location',
-        remoteMachine.status || 'online',
-        remoteMachine.last_seen || now,
-        remoteMachine.kiosk_token || null
-      ]
-    );
-    const inv = await db.get('SELECT id FROM inventory WHERE machine_id = ?', [machineId]);
-    if (!inv) {
-      await db.run(
-        'INSERT INTO inventory (machine_id, milk_level, coffee_level, vanilla_level, hazelnut_level, irish_level, mocha_level, water_level) VALUES (?, 100, 100, 100, 100, 100, 100, 100)',
-        [machineId]
-      );
-    }
-    machine = await db.get('SELECT * FROM machines WHERE id = ?', [machineId]);
-    return machine;
-  }
-
-  return null;
+  return await getAuthoritativeMachineState(machineId, db);
 }
 
 export const verifyKiosk = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
