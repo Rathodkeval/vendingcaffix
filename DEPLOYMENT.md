@@ -334,7 +334,21 @@ REGISTERED_MACHINES=CFX-MC-01,CFX-MC-02,CFX-MC-03,CFX-MC-04,CFX-MC-05
 ```
 Or register new machines dynamically via `POST /api/machines/register` with an Admin Bearer token.
 
-### 8.3 Raspberry Pi Order Processor Configuration
-On each Raspberry Pi, set `MACHINE_ID` in its environment (e.g. `MACHINE_ID="CFX-MC-01"` on Machine 1, `MACHINE_ID="CFX-MC-02"` on Machine 2) and use `MachineOrderProcessor` from `rpi_order_processor.py` to filter Firestore `orders` by `machine_id` and claim orders atomically via Firestore transactions.
+### 8.3 Raspberry Pi Order Processor & Heartbeat Service (`caffix-vending.service`)
+On each Raspberry Pi 4, configure its unique `MACHINE_ID` in `/etc/caffix/machine.env` (or `/home/pi/caffix/.env`) so no machine ID is hardcoded in the systemd unit file:
+```ini
+# Example on Kiosk 1 (/etc/caffix/machine.env)
+MACHINE_ID=CFX-MC-01
+HEARTBEAT_INTERVAL_SECONDS=30
+GOOGLE_APPLICATION_CREDENTIALS=/home/pi/caffix/serviceAccountKey.json
+```
+Install and enable [`caffix-vending.service`](file:///e:/antigravity%20workspace/caffix-vending.service):
+```bash
+sudo cp /home/pi/caffix/caffix-vending.service /etc/systemd/system/caffix-vending.service
+sudo systemctl daemon-reload
+sudo systemctl enable caffix-vending.service
+sudo systemctl start caffix-vending.service
+```
+`MachineOrderProcessor` in [`rpi_order_processor.py`](file:///e:/antigravity%20workspace/rpi_order_processor.py) filters Firestore `orders` strictly by `machine_id`, claims orders atomically via Firestore transactions, and updates `machines/{machine_id}.last_seen` every 30 seconds (`merge=True`) without overwriting `desired_mode`, `status`, `owner_id`, `products`, or `estimated_inventory`.
 
 

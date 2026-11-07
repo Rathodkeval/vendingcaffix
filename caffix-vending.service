@@ -1,0 +1,24 @@
+[Unit]
+Description=CAFFIX Raspberry Pi 4 Firestore Order Processor & Heartbeat Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/caffix
+# Load per-machine identity (MACHINE_ID=CFX-MC-01 / CFX-MC-02 / CFX-MC-03) and Firebase credentials
+# from machine-specific environment files so the service unit is never hardcoded to a single kiosk.
+EnvironmentFile=-/etc/caffix/machine.env
+EnvironmentFile=-/home/pi/caffix/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=HEARTBEAT_INTERVAL_SECONDS=30
+ExecStart=/home/pi/caffix/venv/bin/python -u /home/pi/caffix/rpi_order_processor.py --heartbeat-interval ${HEARTBEAT_INTERVAL_SECONDS}
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
