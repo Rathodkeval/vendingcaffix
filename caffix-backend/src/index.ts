@@ -8,7 +8,8 @@ import swaggerUi from 'swagger-ui-express';
 // Load environment variables
 dotenv.config();
 
-import { initDB } from './config/db';
+import { initDB, getDB } from './config/db';
+import { ensureFirebaseReady, ensureFirestoreSeeded } from './utils/firebase';
 import apiRoutes from './routes';
 import { errorHandler } from './middleware/errorHandler';
 import logger from './utils/logger';
@@ -83,20 +84,32 @@ try {
   logger.error('Failed to load Swagger YAML definition file:', error);
 }
 
-// Lazy Database Initialization Middleware (for Serverless / Vercel compatibility)
+// Lazy Database & Firestore Initialization Middleware (for Serverless / Vercel compatibility)
 let dbInitialized = false;
 let dbPromise: Promise<any> | null = null;
 
 const ensureDB = async () => {
+  // 1. Validate Firebase environment & credentials first (fail-closed HTTP 503 before touching MockDatabase)
+  ensureFirebaseReady();
+
+  // 2. Initialize local SQLite / MockDatabase schema
   if (!dbInitialized) {
     if (!dbPromise) {
-      dbPromise = initDB().then(() => {
-        dbInitialized = true;
-        logger.info('SQLite database schema parsed and seeded successfully');
-      });
+      dbPromise = initDB()
+        .then(() => {
+          dbInitialized = true;
+          logger.info('SQLite database schema parsed and seeded successfully');
+        })
+        .catch((err) => {
+          dbPromise = null;
+          throw err;
+        });
     }
     await dbPromise;
   }
+
+  // 3. Ensure authoritative Firestore records (default admin & machines) are seeded safely without overwriting existing state
+  await ensureFirestoreSeeded(getDB());
 };
 
 app.use(async (req, res, next) => {

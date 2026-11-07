@@ -1,40 +1,218 @@
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getFirestore, Firestore } from 'firebase-admin/firestore';
+import crypto from 'crypto';
+import bcrypt from 'bcryptjs';
+import { getConfiguredMachineSeeds } from '../config/db';
+import { ServiceUnavailableError } from './errors';
 import logger from './logger';
 
 let firestore: Firestore | null = null;
-
-const projectId = process.env.FIREBASE_PROJECT_ID;
-const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
-// Parse environment variable newlines for Vercel/Docker hosts
-const privateKey = process.env.FIREBASE_PRIVATE_KEY
-  ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
-  : undefined;
-
-if (projectId && clientEmail && privateKey) {
-  try {
-    if (getApps().length === 0) {
-      initializeApp({
-        credential: cert({
-          projectId,
-          clientEmail,
-          privateKey,
-        }),
-      });
-    }
-    firestore = getFirestore();
-    logger.info('Firebase Admin SDK initialized successfully');
-  } catch (error) {
-    logger.error('Failed to initialize Firebase Admin SDK:', error);
-  }
-} else {
-  logger.warn('Firebase credentials not set. Firestore synchronization is disabled.');
-}
+let testFirestoreOverride: any | null = null;
+let testInitErrorOverride: Error | null = null;
+let lastInitializedSignature: string | null = null;
+let moduleInitError: Error | null = null;
+let firestoreSeededForInstance: any | null = null;
+let firestoreSeedPromise: Promise<void> | null = null;
 
 // In-memory mirror of synced Firebase orders, machines, and users (for local verification and testing when Firebase Admin credentials are not configured)
 const syncedOrdersStore = new Map<string, any>();
 const syncedMachinesStore = new Map<string, any>();
 const syncedUsersStore = new Map<string, any>();
+
+export function isStrictFirebaseEnvironment(): boolean {
+  const vercelEnv = (process.env.VERCEL_ENV || '').trim().toLowerCase();
+  if (vercelEnv === 'preview' || vercelEnv === 'production') {
+    return true;
+  }
+  if (process.env.STRICT_FIREBASE_VALIDATION === 'true') {
+    return true;
+  }
+  return false;
+}
+
+function handleFirestoreFailure(context: string, error: unknown): never {
+  logger.error(`${context}:`, error);
+  if (error instanceof ServiceUnavailableError) {
+    throw error;
+  }
+  const detail = error instanceof Error ? error.message : String(error);
+  throw new ServiceUnavailableError(`Firestore service unavailable (${context}): ${detail}`);
+}
+
+export function setFirestoreForTesting(options: {
+  firestoreInstance?: any | null;
+  initError?: Error | null;
+  clearStores?: boolean;
+}): void {
+  if ('firestoreInstance' in options) {
+    testFirestoreOverride = options.firestoreInstance ?? null;
+  }
+  if ('initError' in options) {
+    testInitErrorOverride = options.initError ?? null;
+  }
+  firestore = testFirestoreOverride as Firestore | null;
+  lastInitializedSignature = null;
+  moduleInitError = null;
+  firestoreSeededForInstance = null;
+  firestoreSeedPromise = null;
+  if (options.clearStores) {
+    syncedOrdersStore.clear();
+    syncedMachinesStore.clear();
+    syncedUsersStore.clear();
+  }
+}
+
+export function resetFirestoreSeedStateForTesting(): void {
+  firestoreSeededForInstance = null;
+  firestoreSeedPromise = null;
+  syncedOrdersStore.clear();
+  syncedMachinesStore.clear();
+  syncedUsersStore.clear();
+}
+
+/**
+ * Validates the Firebase environment and initializes the Firebase Admin Firestore client.
+ * - Fails closed (HTTP 503 ServiceUnavailableError) when credentials are missing or invalid in
+ *   Vercel Preview/Production (`VERCEL_ENV=preview|production`), when `STRICT_FIREBASE_VALIDATION=true`,
+ *   or when partial/invalid Firebase credentials are provided.
+ * - Enforces a Preview environment guard (`VERCEL_ENV=preview`) that rejects any production Firebase project ID.
+ */
+export function ensureFirebaseReady(): void {
+  const vercelEnv = (process.env.VERCEL_ENV || '').trim().toLowerCase();
+  const projectId = (process.env.FIREBASE_PROJECT_ID || '').trim();
+  const clientEmail = (process.env.FIREBASE_CLIENT_EMAIL || '').trim();
+  const privateKey = process.env.FIREBASE_PRIVATE_KEY
+    ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n').trim()
+    : '';
+
+  const strictMode = isStrictFirebaseEnvironment();
+  const hasAnyCredential = Boolean(projectId || clientEmail || privateKey);
+  const hasAllCredentials = Boolean(projectId && clientEmail && privateKey);
+
+  // 1. Missing or incomplete credentials check
+  if ((strictMode || hasAnyCredential) && !hasAllCredentials) {
+    firestore = null;
+    throw new ServiceUnavailableError(
+      'Firebase credentials (FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY) are missing or incomplete. Failing closed (HTTP 503) instead of falling back to MockDatabase.'
+    );
+  }
+
+  // 2. Preview Environment Guard: never allow Vercel Preview to connect to a production Firebase project
+  if (vercelEnv === 'preview' && projectId) {
+    const forbiddenRaw = [
+      process.env.PRODUCTION_FIREBASE_PROJECT_ID,
+      process.env.FORBIDDEN_FIREBASE_PROJECT_ID
+    ]
+      .filter(Boolean)
+      .join(',');
+    const forbiddenIds = new Set(
+      forbiddenRaw
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean)
+    );
+    const expectedStagingId = (process.env.STAGING_FIREBASE_PROJECT_ID || '').trim();
+    const lowerProjectId = projectId.toLowerCase();
+
+    if (forbiddenIds.has(lowerProjectId)) {
+      firestore = null;
+      throw new ServiceUnavailableError(
+        `Preview environment guard: Refusing to connect to production Firebase project "${projectId}" in Vercel Preview (HTTP 503).`
+      );
+    }
+
+    if (/(^|[-_])prod(uction)?($|[-_])/i.test(projectId)) {
+      firestore = null;
+      throw new ServiceUnavailableError(
+        `Preview environment guard: Refusing to connect to production Firebase project "${projectId}" in Vercel Preview (HTTP 503).`
+      );
+    }
+
+    if (expectedStagingId && lowerProjectId !== expectedStagingId.toLowerCase()) {
+      firestore = null;
+      throw new ServiceUnavailableError(
+        `Preview environment guard: FIREBASE_PROJECT_ID ("${projectId}") does not match required STAGING_FIREBASE_PROJECT_ID ("${expectedStagingId}") (HTTP 503).`
+      );
+    }
+
+    if (
+      !expectedStagingId &&
+      !/(staging|stage|preview|test|dev|sandbox|qa)/i.test(projectId)
+    ) {
+      firestore = null;
+      throw new ServiceUnavailableError(
+        `Preview environment guard: Refusing to connect to unverified/production Firebase project "${projectId}" in Vercel Preview. Configure a staging project or set STAGING_FIREBASE_PROJECT_ID (HTTP 503).`
+      );
+    }
+  }
+
+  // 3. Test overrides (evaluated after credential & Preview project ID guards)
+  if (testInitErrorOverride) {
+    firestore = null;
+    throw new ServiceUnavailableError(
+      `Firebase Admin initialization failed: ${testInitErrorOverride.message}`
+    );
+  }
+
+  if (testFirestoreOverride) {
+    firestore = testFirestoreOverride as Firestore;
+    return;
+  }
+
+  // 4. Local development / unit tests without Firebase credentials
+  if (!hasAllCredentials) {
+    firestore = null;
+    return;
+  }
+
+  // 5. Real Firebase Admin SDK initialization (fail-closed on invalid certificate or init error)
+  const keyDigest = crypto.createHash('sha256').update(privateKey).digest('hex');
+  const signature = `${projectId}|${clientEmail}|${keyDigest}`;
+  if (firestore && lastInitializedSignature === signature && !moduleInitError) {
+    return;
+  }
+
+  try {
+    const credential = cert({
+      projectId,
+      clientEmail,
+      privateKey
+    });
+    const appName = `caffix-${projectId}`;
+    const existingApp = getApps().find(
+      (a) => a?.name === appName || a?.options?.projectId === projectId
+    );
+    const appInstance = existingApp || initializeApp({ credential, projectId }, appName);
+    firestore = getFirestore(appInstance);
+    lastInitializedSignature = signature;
+    moduleInitError = null;
+    logger.info(`Firebase Admin SDK initialized successfully for project ${projectId}`);
+  } catch (error: any) {
+    firestore = null;
+    moduleInitError = new Error('Invalid Firebase Admin service account credential configuration');
+    logger.error(
+      `Failed to initialize Firebase Admin SDK for project ${projectId} (code: ${error?.code || 'invalid-credential'})`
+    );
+    throw new ServiceUnavailableError(
+      'Firebase Admin initialization failed: invalid service account configuration (HTTP 503).'
+    );
+  }
+}
+
+// Attempt initial load-time setup only when all credentials are provided and valid, capturing any error for request-time fail-closed handling
+try {
+  if (
+    process.env.FIREBASE_PROJECT_ID &&
+    process.env.FIREBASE_CLIENT_EMAIL &&
+    process.env.FIREBASE_PRIVATE_KEY
+  ) {
+    ensureFirebaseReady();
+  } else {
+    logger.warn('Firebase credentials not set. Firestore synchronization is disabled for local non-strict mode.');
+  }
+} catch (error: any) {
+  moduleInitError = error instanceof Error ? error : new Error(String(error));
+}
 
 export const HEARTBEAT_TIMEOUT_MS = 90 * 1000; // 90 seconds offline timeout
 export type DesiredMode = 'RUNNING' | 'MAINTENANCE';
@@ -82,6 +260,8 @@ export function getSyncedFirebaseMachine(machineId: string): any | undefined {
 }
 
 export async function syncOrderToFirebase(order: any): Promise<void> {
+  ensureFirebaseReady();
+
   // Sanitize order properties to remove undefined values before uploading to Firestore
   const sanitizedOrder: any = {};
   for (const key of Object.keys(order)) {
@@ -165,7 +345,7 @@ export async function syncOrderToFirebase(order: any): Promise<void> {
 
     logger.info(`Successfully synced order ${order.id} (machine_id: ${sanitizedOrder.machine_id}) to Firestore`);
   } catch (error) {
-    logger.error(`Failed to sync order ${order.id} to Firestore:`, error);
+    handleFirestoreFailure(`Failed to sync order ${order.id} to Firestore`, error);
   }
 }
 
@@ -178,6 +358,7 @@ export async function updateMachineDesiredModeInFirebase(
   desiredMode: DesiredMode
 ): Promise<void> {
   if (!machineId) return;
+  ensureFirebaseReady();
   const normalizedMode = normalizeDesiredMode(desiredMode);
   const legacyStatus = desiredModeToLegacyStatus(normalizedMode);
   const nowIso = new Date().toISOString();
@@ -209,7 +390,7 @@ export async function updateMachineDesiredModeInFirebase(
     );
     logger.info(`Updated machine ${machineId} desired_mode=${normalizedMode} in Firestore`);
   } catch (error) {
-    logger.error(`Failed to update desired_mode for machine ${machineId} in Firestore:`, error);
+    handleFirestoreFailure(`Failed to update desired_mode for machine ${machineId} in Firestore`, error);
   }
 }
 
@@ -222,6 +403,7 @@ export async function updateMachineHeartbeatInFirebase(
   lastSeenIso: string = new Date().toISOString()
 ): Promise<void> {
   if (!machineId) return;
+  ensureFirebaseReady();
 
   const existingLocal = syncedMachinesStore.get(machineId) || { id: machineId };
   syncedMachinesStore.set(machineId, {
@@ -244,7 +426,7 @@ export async function updateMachineHeartbeatInFirebase(
     );
     logger.debug(`Updated heartbeat last_seen for machine ${machineId} in Firestore`);
   } catch (error) {
-    logger.error(`Failed to update heartbeat for machine ${machineId} in Firestore:`, error);
+    handleFirestoreFailure(`Failed to update heartbeat for machine ${machineId} in Firestore`, error);
   }
 }
 
@@ -264,6 +446,7 @@ export async function updateMachineInventoryInFirebase(
   }
 ): Promise<void> {
   if (!machineId || !inventory) return;
+  ensureFirebaseReady();
   const nowIso = new Date().toISOString();
   const estimatedInventory = {
     milk_level: Number(inventory.milk_level),
@@ -302,7 +485,7 @@ export async function updateMachineInventoryInFirebase(
     );
     logger.info(`Synced software-estimated inventory for machine ${machineId} to Firestore`);
   } catch (error) {
-    logger.error(`Failed to sync inventory for machine ${machineId} to Firestore:`, error);
+    handleFirestoreFailure(`Failed to sync inventory for machine ${machineId} to Firestore`, error);
   }
 }
 
@@ -315,6 +498,7 @@ export async function updateMachineOwnerInFirebase(
   ownerId: string | null
 ): Promise<void> {
   if (!machineId) return;
+  ensureFirebaseReady();
   const normalizedOwnerId = ownerId && String(ownerId).trim() !== '' ? String(ownerId).trim() : null;
   const nowIso = new Date().toISOString();
 
@@ -343,7 +527,7 @@ export async function updateMachineOwnerInFirebase(
     );
     logger.info(`Updated machine ${machineId} owner_id=${normalizedOwnerId ?? 'null'} in Firestore`);
   } catch (error) {
-    logger.error(`Failed to update owner_id for machine ${machineId} in Firestore:`, error);
+    handleFirestoreFailure(`Failed to update owner_id for machine ${machineId} in Firestore`, error);
   }
 }
 
@@ -362,6 +546,7 @@ export async function updateMachineProductInFirebase(
   }
 ): Promise<void> {
   if (!machineId || !productId) return;
+  ensureFirebaseReady();
   const pidKey = String(Number(productId));
   const nowIso = productConfig.updated_at || new Date().toISOString();
   const entry = {
@@ -404,7 +589,10 @@ export async function updateMachineProductInFirebase(
       `Updated machine ${machineId} product ${pidKey} (price=₹${entry.price}, is_available=${entry.is_available}) in Firestore`
     );
   } catch (error) {
-    logger.error(`Failed to update product ${pidKey} for machine ${machineId} in Firestore:`, error);
+    handleFirestoreFailure(
+      `Failed to update product ${pidKey} for machine ${machineId} in Firestore`,
+      error
+    );
   }
 }
 
@@ -430,6 +618,7 @@ export async function getAuthoritativeMachineProducts(
     updated_at: string | null;
   }>
 > {
+  ensureFirebaseReady();
   const catalogProducts = await db.all('SELECT * FROM products');
   const sortedCatalog = [...catalogProducts].sort((a, b) => Number(a.id) - Number(b.id));
 
@@ -533,6 +722,7 @@ export async function syncMachineToFirebase(machine: any): Promise<void> {
   if (!machine || !machine.id) {
     return;
   }
+  ensureFirebaseReady();
 
   const desiredMode = normalizeDesiredMode(machine.desired_mode || machine.status);
   const legacyStatus = desiredModeToLegacyStatus(desiredMode);
@@ -584,7 +774,7 @@ export async function syncMachineToFirebase(machine: any): Promise<void> {
     });
     logger.info(`Synced machine metadata ${machine.id} to Firestore without overwriting state`);
   } catch (error) {
-    logger.error(`Failed to sync machine ${machine.id} to Firestore:`, error);
+    handleFirestoreFailure(`Failed to sync machine ${machine.id} to Firestore`, error);
   }
 }
 
@@ -592,6 +782,7 @@ export async function getMachineFromFirebase(machineId: string): Promise<any | n
   if (!machineId) {
     return null;
   }
+  ensureFirebaseReady();
   if (!firestore) {
     return syncedMachinesStore.get(machineId) || null;
   }
@@ -604,18 +795,19 @@ export async function getMachineFromFirebase(machineId: string): Promise<any | n
       }
       return data;
     }
+    return null;
   } catch (error) {
-    logger.error(`Failed to fetch machine ${machineId} from Firestore:`, error);
+    handleFirestoreFailure(`Failed to fetch machine ${machineId} from Firestore`, error);
   }
-  return syncedMachinesStore.get(machineId) || null;
 }
 
 export async function getAllMachinesFromFirebase(): Promise<Map<string, any>> {
+  ensureFirebaseReady();
   const result = new Map<string, any>();
-  for (const [k, v] of syncedMachinesStore.entries()) {
-    result.set(k, v);
-  }
   if (!firestore) {
+    for (const [k, v] of syncedMachinesStore.entries()) {
+      result.set(k, v);
+    }
     return result;
   }
   try {
@@ -629,7 +821,7 @@ export async function getAllMachinesFromFirebase(): Promise<Map<string, any>> {
       }
     });
   } catch (error) {
-    logger.error('Failed to fetch all machines from Firestore:', error);
+    handleFirestoreFailure('Failed to fetch all machines from Firestore', error);
   }
   return result;
 }
@@ -642,9 +834,14 @@ export async function getAllMachinesFromFirebase(): Promise<Map<string, any>> {
  */
 export async function getAuthoritativeMachineState(machineId: string, db: any): Promise<any | null> {
   if (!machineId) return null;
+  ensureFirebaseReady();
 
-  let localMachine = await db.get('SELECT * FROM machines WHERE id = ?', [machineId]);
   const remoteMachine = await getMachineFromFirebase(machineId);
+  let localMachine = await db.get('SELECT * FROM machines WHERE id = ?', [machineId]);
+
+  if (firestore && !remoteMachine) {
+    return null;
+  }
 
   if (!localMachine && !remoteMachine) {
     return null;
@@ -792,8 +989,9 @@ export async function getAuthoritativeMachineState(machineId: string, db: any): 
  * Authoritative read-through & hydration for all machines.
  */
 export async function getAuthoritativeMachinesList(db: any): Promise<any[]> {
-  const localMachines = await db.all('SELECT * FROM machines');
+  ensureFirebaseReady();
   const remoteMachinesMap = await getAllMachinesFromFirebase();
+  const localMachines = firestore ? [] : await db.all('SELECT * FROM machines');
 
   const allMachineIds = new Set<string>();
   for (const m of localMachines) {
@@ -828,6 +1026,7 @@ export async function syncUserToFirebase(user: {
   updated_at?: string;
 }): Promise<void> {
   if (!user || !user.id) return;
+  ensureFirebaseReady();
   const userId = String(user.id);
   const nowIso = user.updated_at || new Date().toISOString();
 
@@ -853,7 +1052,7 @@ export async function syncUserToFirebase(user: {
     await firestore.collection('users').doc(userId).set(payload, { merge: true });
     logger.info(`Synced user ${payload.email} (id=${userId}, role=${payload.role}) to Firestore`);
   } catch (error) {
-    logger.error(`Failed to sync user ${userId} to Firestore:`, error);
+    handleFirestoreFailure(`Failed to sync user ${userId} to Firestore`, error);
   }
 }
 
@@ -900,17 +1099,12 @@ async function hydrateLocalUserFromAuthoritativeRecord(record: any, db: any): Pr
 
 export async function getAuthoritativeUserByEmail(email: string, db: any): Promise<any | null> {
   if (!email) return null;
+  ensureFirebaseReady();
   const normalizedEmail = String(email).trim().toLowerCase();
-
-  let remoteUser: any = null;
-  for (const u of syncedUsersStore.values()) {
-    if (String(u.email).toLowerCase() === normalizedEmail) {
-      remoteUser = u;
-      break;
-    }
-  }
+  const isProductionEnv = (process.env.VERCEL_ENV || '').trim().toLowerCase() === 'production';
 
   if (firestore) {
+    let remoteUser: any = null;
     try {
       const snap = await firestore
         .collection('users')
@@ -924,7 +1118,32 @@ export async function getAuthoritativeUserByEmail(email: string, db: any): Promi
         syncedUsersStore.set(String(remoteUser.id), remoteUser);
       }
     } catch (error) {
-      logger.error(`Failed to query user by email ${normalizedEmail} from Firestore:`, error);
+      handleFirestoreFailure(`Failed to query user by email ${normalizedEmail} from Firestore`, error);
+    }
+
+    if (remoteUser) {
+      // Never allow default staging/development passwords ('admin123' / 'kiosk123') to authenticate in Production
+      if (
+        isProductionEnv &&
+        typeof remoteUser.password === 'string' &&
+        (bcrypt.compareSync('admin123', remoteUser.password) ||
+          bcrypt.compareSync('kiosk123', remoteUser.password))
+      ) {
+        logger.warn(
+          `Blocked authentication attempt for ${normalizedEmail} in Production: account is still using default staging/development credentials.`
+        );
+        return null;
+      }
+      return await hydrateLocalUserFromAuthoritativeRecord(remoteUser, db);
+    }
+    return null;
+  }
+
+  let remoteUser: any = null;
+  for (const u of syncedUsersStore.values()) {
+    if (String(u.email).toLowerCase() === normalizedEmail) {
+      remoteUser = u;
+      break;
     }
   }
 
@@ -937,11 +1156,11 @@ export async function getAuthoritativeUserByEmail(email: string, db: any): Promi
 
 export async function getAuthoritativeUserById(userId: string | number, db: any): Promise<any | null> {
   if (userId === undefined || userId === null) return null;
+  ensureFirebaseReady();
   const normalizedId = String(userId).trim();
 
-  let remoteUser: any = syncedUsersStore.get(normalizedId) || null;
-
   if (firestore) {
+    let remoteUser: any = null;
     try {
       const snap = await firestore.collection('users').doc(normalizedId).get();
       if (snap.exists) {
@@ -952,10 +1171,16 @@ export async function getAuthoritativeUserById(userId: string | number, db: any)
         }
       }
     } catch (error) {
-      logger.error(`Failed to fetch user by id ${normalizedId} from Firestore:`, error);
+      handleFirestoreFailure(`Failed to fetch user by id ${normalizedId} from Firestore`, error);
     }
+
+    if (remoteUser) {
+      return await hydrateLocalUserFromAuthoritativeRecord(remoteUser, db);
+    }
+    return null;
   }
 
+  const remoteUser: any = syncedUsersStore.get(normalizedId) || null;
   if (remoteUser) {
     return await hydrateLocalUserFromAuthoritativeRecord(remoteUser, db);
   }
@@ -965,16 +1190,10 @@ export async function getAuthoritativeUserById(userId: string | number, db: any)
 
 export async function getAuthoritativeUserBySetupTokenHash(tokenHash: string, db: any): Promise<any | null> {
   if (!tokenHash) return null;
-
-  let remoteUser: any = null;
-  for (const u of syncedUsersStore.values()) {
-    if (u.setup_token_hash && u.setup_token_hash === tokenHash) {
-      remoteUser = u;
-      break;
-    }
-  }
+  ensureFirebaseReady();
 
   if (firestore) {
+    let remoteUser: any = null;
     try {
       const snap = await firestore
         .collection('users')
@@ -988,7 +1207,20 @@ export async function getAuthoritativeUserBySetupTokenHash(tokenHash: string, db
         syncedUsersStore.set(String(remoteUser.id), remoteUser);
       }
     } catch (error) {
-      logger.error('Failed to query user by setup_token_hash from Firestore:', error);
+      handleFirestoreFailure('Failed to query user by setup_token_hash from Firestore', error);
+    }
+
+    if (remoteUser) {
+      return await hydrateLocalUserFromAuthoritativeRecord(remoteUser, db);
+    }
+    return null;
+  }
+
+  let remoteUser: any = null;
+  for (const u of syncedUsersStore.values()) {
+    if (u.setup_token_hash && u.setup_token_hash === tokenHash) {
+      remoteUser = u;
+      break;
     }
   }
 
@@ -1000,19 +1232,29 @@ export async function getAuthoritativeUserBySetupTokenHash(tokenHash: string, db
 }
 
 export async function getAuthoritativeOwnersList(db: any): Promise<any[]> {
+  ensureFirebaseReady();
   if (firestore) {
+    const owners: any[] = [];
     try {
       const snap = await firestore.collection('users').where('role', '==', 'owner').get();
       snap.forEach((doc) => {
         const data = doc.data();
         if (data) {
           const id = String(data.id || doc.id);
-          syncedUsersStore.set(id, { ...data, id });
+          const record = { ...data, id };
+          syncedUsersStore.set(id, record);
+          owners.push(record);
         }
       });
     } catch (error) {
-      logger.error('Failed to query owners from Firestore:', error);
+      handleFirestoreFailure('Failed to query owners from Firestore', error);
     }
+    const hydrated: any[] = [];
+    for (const u of owners) {
+      const h = await hydrateLocalUserFromAuthoritativeRecord(u, db);
+      if (h) hydrated.push(h);
+    }
+    return hydrated;
   }
 
   for (const u of syncedUsersStore.values()) {
@@ -1044,6 +1286,7 @@ async function performAtomicSetupTokenConsumption(
   expectedEmail: string | undefined,
   db: any
 ): Promise<ConsumeSetupTokenResult> {
+  ensureFirebaseReady();
   const normalizedExpectedEmail = expectedEmail ? String(expectedEmail).trim().toLowerCase() : undefined;
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
@@ -1058,49 +1301,54 @@ async function performAtomicSetupTokenConsumption(
 
   // 2. If Firestore is connected, execute an atomic Firestore transaction on users/{userId}
   if (firestore) {
-    const docRef = firestore.collection('users').doc(userId);
-    const txOutcome = await firestore.runTransaction(async (tx): Promise<ConsumeSetupTokenResult> => {
-      const snap = await tx.get(docRef);
-      if (!snap.exists) {
-        return { success: false, reason: 'INVALID_OR_USED' };
-      }
-      const data = snap.data() || {};
-      if (!data.setup_token_hash || data.setup_token_hash !== tokenHash) {
-        return { success: false, reason: 'INVALID_OR_USED' };
-      }
-      if (
-        normalizedExpectedEmail &&
-        String(data.email || '').toLowerCase() !== normalizedExpectedEmail
-      ) {
-        return { success: false, reason: 'EMAIL_MISMATCH' };
-      }
-      const expMs = data.setup_token_expires_at ? Date.parse(data.setup_token_expires_at) : NaN;
-      if (Number.isNaN(expMs) || nowMs > expMs) {
-        return { success: false, reason: 'EXPIRED' };
-      }
-
-      tx.set(
-        docRef,
-        {
-          password: hashedPassword,
-          setup_token_hash: null,
-          setup_token_expires_at: null,
-          must_change_password: 0,
-          updated_at: nowIso
-        },
-        { merge: true }
-      );
-
-      return {
-        success: true,
-        user: {
-          id: userId,
-          name: data.name || candidateUser.name,
-          email: String(data.email || candidateUser.email).toLowerCase(),
-          role: data.role || candidateUser.role
+    let txOutcome: ConsumeSetupTokenResult;
+    try {
+      const docRef = firestore.collection('users').doc(userId);
+      txOutcome = await firestore.runTransaction(async (tx): Promise<ConsumeSetupTokenResult> => {
+        const snap = await tx.get(docRef);
+        if (!snap.exists) {
+          return { success: false, reason: 'INVALID_OR_USED' };
         }
-      };
-    });
+        const data = snap.data() || {};
+        if (!data.setup_token_hash || data.setup_token_hash !== tokenHash) {
+          return { success: false, reason: 'INVALID_OR_USED' };
+        }
+        if (
+          normalizedExpectedEmail &&
+          String(data.email || '').toLowerCase() !== normalizedExpectedEmail
+        ) {
+          return { success: false, reason: 'EMAIL_MISMATCH' };
+        }
+        const expMs = data.setup_token_expires_at ? Date.parse(data.setup_token_expires_at) : NaN;
+        if (Number.isNaN(expMs) || nowMs > expMs) {
+          return { success: false, reason: 'EXPIRED' };
+        }
+
+        tx.set(
+          docRef,
+          {
+            password: hashedPassword,
+            setup_token_hash: null,
+            setup_token_expires_at: null,
+            must_change_password: 0,
+            updated_at: nowIso
+          },
+          { merge: true }
+        );
+
+        return {
+          success: true,
+          user: {
+            id: userId,
+            name: data.name || candidateUser.name,
+            email: String(data.email || candidateUser.email).toLowerCase(),
+            role: data.role || candidateUser.role
+          }
+        };
+      });
+    } catch (error) {
+      handleFirestoreFailure(`Failed to consume setup token for user ${userId} in Firestore`, error);
+    }
 
     if (!txOutcome.success) {
       return txOutcome;
@@ -1242,11 +1490,11 @@ async function hydrateLocalOrderFromAuthoritativeRecord(remoteOrder: any, db: an
 
 export async function getAuthoritativeOrderById(orderId: string, db: any): Promise<any | null> {
   if (!orderId) return null;
+  ensureFirebaseReady();
   const normalizedId = String(orderId).trim();
 
-  let remoteOrder: any = syncedOrdersStore.get(normalizedId) || null;
-
   if (firestore) {
+    let remoteOrder: any = null;
     try {
       const snap = await firestore.collection('orders').doc(normalizedId).get();
       if (snap.exists) {
@@ -1257,10 +1505,16 @@ export async function getAuthoritativeOrderById(orderId: string, db: any): Promi
         }
       }
     } catch (error) {
-      logger.error(`Failed to fetch order ${normalizedId} from Firestore:`, error);
+      handleFirestoreFailure(`Failed to fetch order ${normalizedId} from Firestore`, error);
     }
+
+    if (remoteOrder) {
+      return await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db);
+    }
+    return null;
   }
 
+  const remoteOrder: any = syncedOrdersStore.get(normalizedId) || null;
   if (remoteOrder) {
     return await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db);
   }
@@ -1279,17 +1533,11 @@ export async function getAuthoritativeOrderByRazorpayOrderId(
   db: any
 ): Promise<any | null> {
   if (!rpOrderId) return null;
+  ensureFirebaseReady();
   const normalizedRpId = String(rpOrderId).trim();
 
-  let remoteOrder: any = null;
-  for (const o of syncedOrdersStore.values()) {
-    if (o.razorpay_order_id && o.razorpay_order_id === normalizedRpId) {
-      remoteOrder = o;
-      break;
-    }
-  }
-
   if (firestore) {
+    let remoteOrder: any = null;
     try {
       const snap = await firestore
         .collection('orders')
@@ -1305,7 +1553,23 @@ export async function getAuthoritativeOrderByRazorpayOrderId(
         }
       }
     } catch (error) {
-      logger.error(`Failed to query order by razorpay_order_id ${normalizedRpId} from Firestore:`, error);
+      handleFirestoreFailure(
+        `Failed to query order by razorpay_order_id ${normalizedRpId} from Firestore`,
+        error
+      );
+    }
+
+    if (remoteOrder) {
+      return await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db);
+    }
+    return null;
+  }
+
+  let remoteOrder: any = null;
+  for (const o of syncedOrdersStore.values()) {
+    if (o.razorpay_order_id && o.razorpay_order_id === normalizedRpId) {
+      remoteOrder = o;
+      break;
     }
   }
 
@@ -1320,6 +1584,7 @@ export async function getAuthoritativeOrders(
   db: any,
   filterMachineIds?: string[]
 ): Promise<any[]> {
+  ensureFirebaseReady();
   if (firestore) {
     try {
       const snap = await firestore.collection('orders').get();
@@ -1331,7 +1596,7 @@ export async function getAuthoritativeOrders(
         }
       });
     } catch (error) {
-      logger.error('Failed to fetch orders from Firestore:', error);
+      handleFirestoreFailure('Failed to fetch orders from Firestore', error);
     }
   }
 
@@ -1369,4 +1634,184 @@ export async function getAuthoritativeOrders(
      JOIN products p ON o.product_id = p.id
      ORDER BY o.created_at DESC`
   );
+}
+
+/**
+ * Atomic, non-destructive Firestore initialization and seeding for fresh staging/production projects.
+ * - Executes ONLY after `ensureFirebaseReady()` passes (including Preview project ID validation).
+ * - Preserves the global `products` catalog in SQLite/MockDatabase and per-machine `machines/{id}.products` override architecture.
+ * - Seeds ONLY missing records (`users/1`, `users/2`, `machines/CFX-MC-01..03`) using atomic Firestore transactions (`tx.get` -> write only if `!snap.exists`).
+ * - NEVER overwrites existing `owner_id`, `desired_mode`, `status`, `last_seen`, `estimated_inventory`, `products`, or existing user/admin passwords.
+ * - Safe against concurrent serverless cold starts.
+ */
+export async function ensureFirestoreSeeded(db: any): Promise<void> {
+  ensureFirebaseReady();
+
+  const activeFirestore = firestore;
+  if (!activeFirestore) {
+    return;
+  }
+
+  if (firestoreSeededForInstance === activeFirestore) {
+    return;
+  }
+
+  if (firestoreSeedPromise) {
+    await firestoreSeedPromise;
+    return;
+  }
+
+  firestoreSeedPromise = (async () => {
+    try {
+      // When connected to an authoritative Firestore instance on Vercel, clear MockDatabase's default demo orders
+      // so only real Firestore orders are returned.
+      if (process.env.VERCEL && db) {
+        await db.run('DELETE FROM orders');
+      }
+
+      const isProductionEnv = (process.env.VERCEL_ENV || '').trim().toLowerCase() === 'production';
+
+      // 1. Seed default Admin user (`users/1`) ONLY if missing in Firestore AND NOT in Production
+      // Default staging credentials ('admin123') are never seeded into Production Firestore.
+      const adminRef = activeFirestore.collection('users').doc('1');
+      const adminRecord = await activeFirestore.runTransaction(async (tx: any) => {
+        const snap = await tx.get(adminRef);
+        if (snap.exists) {
+          const existing = snap.data() || {};
+          return { ...existing, id: String(existing.id || '1') };
+        }
+        if (isProductionEnv) {
+          return null;
+        }
+        const nowIso = new Date().toISOString();
+        const defaultAdmin = {
+          id: '1',
+          name: 'Caffix Manager',
+          email: 'admin@caffix.com',
+          password: bcrypt.hashSync('admin123', 10),
+          role: 'admin' as const,
+          setup_token_hash: null,
+          setup_token_expires_at: null,
+          must_change_password: 0,
+          updated_at: nowIso
+        };
+        tx.set(adminRef, defaultAdmin);
+        return defaultAdmin;
+      });
+      if (adminRecord) {
+        syncedUsersStore.set('1', adminRecord);
+        if (db) {
+          await hydrateLocalUserFromAuthoritativeRecord(adminRecord, db);
+        }
+      }
+
+      // 2. Seed default Kiosk user (`users/2`) ONLY if missing in Firestore AND NOT in Production
+      // Default staging credentials ('kiosk123') are never seeded into Production Firestore.
+      const kioskRef = activeFirestore.collection('users').doc('2');
+      const kioskRecord = await activeFirestore.runTransaction(async (tx: any) => {
+        const snap = await tx.get(kioskRef);
+        if (snap.exists) {
+          const existing = snap.data() || {};
+          return { ...existing, id: String(existing.id || '2') };
+        }
+        if (isProductionEnv) {
+          return null;
+        }
+        const nowIso = new Date().toISOString();
+        const defaultKiosk = {
+          id: '2',
+          name: 'kiosk-one',
+          email: 'kiosk01@caffix.com',
+          password: bcrypt.hashSync('kiosk123', 10),
+          role: 'kiosk' as const,
+          setup_token_hash: null,
+          setup_token_expires_at: null,
+          must_change_password: 0,
+          updated_at: nowIso
+        };
+        tx.set(kioskRef, defaultKiosk);
+        return defaultKiosk;
+      });
+      if (kioskRecord) {
+        syncedUsersStore.set('2', kioskRecord);
+        if (db) {
+          await hydrateLocalUserFromAuthoritativeRecord(kioskRecord, db);
+        }
+      }
+
+      // 3. Seed default Machines (`machines/CFX-MC-01`, `machines/CFX-MC-02`, `machines/CFX-MC-03`, etc.) ONLY if missing in Firestore
+      const seeds = getConfiguredMachineSeeds();
+      for (let i = 0; i < seeds.length; i++) {
+        const m = seeds[i];
+        const defaultLocation = i === 0 ? 'Delhi Airport T3' : m.location;
+        const defaultInventory =
+          i === 0
+            ? {
+                milk_level: 92,
+                coffee_level: 78,
+                vanilla_level: 65,
+                hazelnut_level: 55,
+                irish_level: 60,
+                mocha_level: 50,
+                water_level: 85
+              }
+            : {
+                milk_level: 100,
+                coffee_level: 100,
+                vanilla_level: 100,
+                hazelnut_level: 100,
+                irish_level: 100,
+                mocha_level: 100,
+                water_level: 100
+              };
+
+        const machineRef = activeFirestore.collection('machines').doc(m.id);
+        const machineRecord = await activeFirestore.runTransaction(async (tx: any) => {
+          const snap = await tx.get(machineRef);
+          if (snap.exists) {
+            const existing = snap.data() || {};
+            // Strictly preserve existing owner_id, desired_mode, status, last_seen, estimated_inventory, and products!
+            if (m.kiosk_token && !existing.kiosk_token) {
+              tx.set(machineRef, { kiosk_token: m.kiosk_token }, { merge: true });
+              return { ...existing, id: existing.id || m.id, kiosk_token: m.kiosk_token };
+            }
+            return { ...existing, id: existing.id || m.id };
+          }
+
+          const nowIso = new Date().toISOString();
+          const initialMachineDoc: any = {
+            id: m.id,
+            machine_name: m.machine_name,
+            location: defaultLocation,
+            desired_mode: 'RUNNING',
+            status: 'online',
+            last_seen: null,
+            owner_id: null,
+            estimated_inventory: defaultInventory,
+            inventory_source: 'software_estimated',
+            inventory_updated_at: nowIso,
+            products: {},
+            updated_at: nowIso,
+            ...(m.kiosk_token ? { kiosk_token: m.kiosk_token } : {})
+          };
+          tx.set(machineRef, initialMachineDoc);
+          return initialMachineDoc;
+        });
+
+        if (machineRecord) {
+          syncedMachinesStore.set(m.id, machineRecord);
+        }
+      }
+
+      firestoreSeededForInstance = activeFirestore;
+      logger.info('Firestore initialization and non-destructive seeding verified successfully');
+    } catch (error) {
+      firestoreSeededForInstance = null;
+      handleFirestoreFailure('Failed to initialize and seed Firestore', error);
+    } finally {
+      firestoreSeedPromise = null;
+    }
+  })();
+
+  await firestoreSeedPromise;
 }

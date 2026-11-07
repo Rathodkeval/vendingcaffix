@@ -164,6 +164,9 @@ let mockStore = createInitialMockStore();
  */
 export function resetMockDatabaseForColdStartSimulation(): void {
   mockStore = createInitialMockStore();
+  if (process.env.VERCEL) {
+    db = new MockDatabase();
+  }
 }
 
 class MockDatabase {
@@ -443,7 +446,7 @@ class MockDatabase {
           inv.water_level = Number(water);
           inv.updated_at = updatedAt || new Date().toISOString();
         }
-      } else if (query.includes('milk_level = 100')) {
+      } else if (query.includes('milk_level = 100') && query.includes('coffee_level = 100')) {
         const machineId = params[params.length - 1];
         const inv = mockStore.inventory.find(i => i.machine_id === machineId);
         if (inv) {
@@ -484,6 +487,11 @@ class MockDatabase {
       return { changes: 1 };
     }
     
+    if (query.includes('delete from orders')) {
+      mockStore.orders = [];
+      return { changes: 1 };
+    }
+
     if (query.includes('delete from machine_products')) {
       if (query.includes('where machine_id = ?')) {
         const [machineId] = params;
@@ -865,6 +873,9 @@ export async function initDB(): Promise<any> {
 }
 
 export function getDB(): any {
+  if (process.env.VERCEL && !(db instanceof MockDatabase)) {
+    db = new MockDatabase();
+  }
   if (!db) {
     throw new Error('Database not initialized! Call initDB() first.');
   }
