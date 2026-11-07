@@ -312,7 +312,7 @@ export const inviteOwner = async (
         },
         assigned_machines: requestedMachines,
         invite_token: rawInviteToken,
-        setup_url: `/setup-password?token=${rawInviteToken}&email=${encodeURIComponent(normalizedEmail)}`
+        setup_url: `/#setup_token=${encodeURIComponent(rawInviteToken)}&email=${encodeURIComponent(normalizedEmail)}`
       }
     });
   } catch (error) {

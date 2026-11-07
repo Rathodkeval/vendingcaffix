@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+@theme {
+  --color-cream-light: #FAF6F0;
+  --color-cream-DEFAULT: #F5E6D3;
+  --color-cream-dark: #EED9C4;
+  --color-coffee-light: #8C6246;
+  --color-coffee-DEFAULT: #4E3629;
+  --color-coffee: #4E3629;
+  --color-coffee-dark: #2C1E17;
+  --color-gold-light: #DCC39A;
+  --color-gold-DEFAULT: #C9A66B;
+  --color-gold: #C9A66B;
+  --color-gold-dark: #B08E55;
+  --color-success: #2E7D32;
+  --font-sans: "Inter", "Outfit", sans-serif;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: #FAF6F0;
+  color: #2C1E17;
+}
+
+h1, h2, h3, .font-display {
+  font-family: 'Outfit', 'Inter', sans-serif;
+}
+
+/* Subtle custom scrollbars for SaaS tables and sidebars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(238, 217, 196, 0.35);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(140, 98, 70, 0.35);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(78, 54, 41, 0.65);
+}
+
