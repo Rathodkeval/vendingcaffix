@@ -9,7 +9,7 @@ const router = Router();
 const createOrderSchema = z.object({
   body: z.object({
     product_id: z.number().int().positive('Product ID must be a positive integer'),
-    amount: z.number().int().positive('Amount must be a positive integer').optional(),
+    amount: z.number().optional(),
     machine_id: z.string().min(3, 'Machine ID is required'),
     extra_sugar: z.union([z.boolean(), z.number()]).optional(),
     base: z.string().optional()
@@ -26,7 +26,7 @@ const updateStatusSchema = z.object({
 });
 
 router.post('/create', authenticateJWT, validateRequest(createOrderSchema), createOrder);
-router.get('/', authenticateJWT, requireRole(['admin']), getOrders);
+router.get('/', authenticateJWT, requireRole(['admin', 'owner', 'kiosk']), getOrders);
 router.get('/:id', authenticateJWT, getOrderById);
 router.put('/:id/status', authenticateJWT, validateRequest(updateStatusSchema), updateOrderStatus);
 

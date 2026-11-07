@@ -7,7 +7,9 @@ import {
   updateMachineStatus,
   recordMachineHeartbeat,
   getInventoryByMachine,
-  refillMachineInventory
+  refillMachineInventory,
+  getMachineProducts,
+  updateMachineProduct
 } from '../controllers/machineController';
 import { authenticateJWT, requireRole } from '../middleware/auth';
 import { validateRequest } from '../middleware/validate';
@@ -62,9 +64,33 @@ const refillSchema = z.object({
   })
 });
 
+const getMachineProductsSchema = z.object({
+  params: z.object({
+    id: z.string().min(3)
+  })
+});
+
+const updateMachineProductSchema = z.object({
+  params: z.object({
+    id: z.string().min(3),
+    productId: z.string().min(1)
+  }),
+  body: z
+    .object({
+      price: z.number().int().positive('Price must be a positive integer').optional(),
+      is_available: z.boolean().optional()
+    })
+    .refine((data) => data.price !== undefined || data.is_available !== undefined, {
+      message: "At least one of 'price' or 'is_available' must be provided"
+    })
+});
+
 router.get('/', authenticateJWT, requireRole(['admin', 'owner']), getMachines);
 router.post('/register', authenticateJWT, requireRole(['admin']), validateRequest(registerMachineSchema), registerMachine);
 router.get('/:id', authenticateJWT, requireRole(['admin', 'owner']), getMachineById);
+router.get('/:id/products', authenticateJWT, requireRole(['admin', 'owner']), validateRequest(getMachineProductsSchema), getMachineProducts);
+router.put('/:id/products/:productId', authenticateJWT, requireRole(['admin', 'owner']), validateRequest(updateMachineProductSchema), updateMachineProduct);
+router.patch('/:id/products/:productId', authenticateJWT, requireRole(['admin', 'owner']), validateRequest(updateMachineProductSchema), updateMachineProduct);
 router.patch('/:id/owner', authenticateJWT, requireRole(['admin']), validateRequest(assignOwnerSchema), assignMachineOwner);
 router.patch('/:id/status', authenticateJWT, requireRole(['admin', 'owner']), validateRequest(updateStatusSchema), updateMachineStatus);
 router.post('/:id/heartbeat', authenticateJWT, validateRequest(heartbeatSchema), recordMachineHeartbeat);

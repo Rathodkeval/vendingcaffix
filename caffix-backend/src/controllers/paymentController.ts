@@ -4,6 +4,10 @@ import { getDB } from '../config/db';
 import { AuthRequest } from '../middleware/auth';
 import { executeOrderStatusUpdate } from './orderController';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
+import {
+  getAuthoritativeOrderById,
+  getAuthoritativeOrderByRazorpayOrderId
+} from '../utils/firebase';
 import logger from '../utils/logger';
 
 const getSecrets = () => ({
@@ -25,8 +29,8 @@ export const verifyPaymentSignature = async (
       return next(new BadRequestError('Missing required payment verification parameters'));
     }
 
-    // 1. Check if the order exists locally
-    const order = await db.get('SELECT * FROM orders WHERE id = ?', [order_id]);
+    // 1. Check if the order exists (hydrating from Firestore if needed after a serverless cold start)
+    const order = await getAuthoritativeOrderById(String(order_id), db);
     if (!order) {
       return next(new NotFoundError(`Local order ID ${order_id} not found`));
     }
@@ -139,8 +143,8 @@ export const handleRazorpayWebhook = async (
       const rpSignature = signature || 'webhook_signature';
 
       if (rpOrderId) {
-        // Find matching local order by razorpay_order_id
-        const order = await db.get('SELECT * FROM orders WHERE razorpay_order_id = ?', [rpOrderId]);
+        // Find matching order by razorpay_order_id (hydrating from Firestore if needed after a serverless cold start)
+        const order = await getAuthoritativeOrderByRazorpayOrderId(String(rpOrderId), db);
         if (order) {
           if (order.status === 'PENDING') {
             await db.run(

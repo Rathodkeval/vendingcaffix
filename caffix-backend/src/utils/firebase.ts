@@ -348,6 +348,183 @@ export async function updateMachineOwnerInFirebase(
 }
 
 /**
+ * Targeted partial update for a single product's price and availability on a specific machine.
+ * Strictly preserves all other products in `products` as well as `desired_mode`, `status`,
+ * `last_seen`, `owner_id`, and `estimated_inventory`.
+ */
+export async function updateMachineProductInFirebase(
+  machineId: string,
+  productId: number,
+  productConfig: {
+    price: number;
+    is_available: boolean;
+    updated_at?: string;
+  }
+): Promise<void> {
+  if (!machineId || !productId) return;
+  const pidKey = String(Number(productId));
+  const nowIso = productConfig.updated_at || new Date().toISOString();
+  const entry = {
+    product_id: Number(productId),
+    price: Number(productConfig.price),
+    is_available: Boolean(productConfig.is_available),
+    updated_at: nowIso
+  };
+
+  const existingLocal = syncedMachinesStore.get(machineId) || { id: machineId };
+  const existingProducts =
+    existingLocal.products && typeof existingLocal.products === 'object'
+      ? { ...existingLocal.products }
+      : {};
+  existingProducts[pidKey] = entry;
+
+  syncedMachinesStore.set(machineId, {
+    ...existingLocal,
+    id: machineId,
+    products: existingProducts,
+    updated_at: nowIso
+  });
+
+  if (!firestore) {
+    return;
+  }
+
+  try {
+    await firestore.collection('machines').doc(machineId).set(
+      {
+        id: machineId,
+        products: {
+          [pidKey]: entry
+        },
+        updated_at: nowIso
+      },
+      { merge: true }
+    );
+    logger.info(
+      `Updated machine ${machineId} product ${pidKey} (price=₹${entry.price}, is_available=${entry.is_available}) in Firestore`
+    );
+  } catch (error) {
+    logger.error(`Failed to update product ${pidKey} for machine ${machineId} in Firestore:`, error);
+  }
+}
+
+/**
+ * Authoritative read-through & hydration for per-machine product prices and availability.
+ * Uses the global `products` catalog as default, overlaid with machine-specific overrides
+ * from Firestore (`machines/{machineId}.products`) and `machine_products` in SQLite/MockDatabase.
+ */
+export async function getAuthoritativeMachineProducts(
+  machineId: string,
+  db: any
+): Promise<
+  Array<{
+    id: number;
+    product_id: number;
+    machine_id: string;
+    name: string;
+    default_price: number;
+    price: number;
+    is_available: boolean;
+    description: string;
+    image: string;
+    updated_at: string | null;
+  }>
+> {
+  const catalogProducts = await db.all('SELECT * FROM products');
+  const sortedCatalog = [...catalogProducts].sort((a, b) => Number(a.id) - Number(b.id));
+
+  const remoteMachine = await getMachineFromFirebase(machineId);
+  const remoteProductsMap =
+    remoteMachine?.products && typeof remoteMachine.products === 'object'
+      ? remoteMachine.products
+      : null;
+
+  // Hydrate local `machine_products` table from Firestore overrides if newer or missing locally
+  if (remoteProductsMap) {
+    for (const [key, rawVal] of Object.entries(remoteProductsMap)) {
+      const val = rawVal as any;
+      const pid = Number(val?.product_id ?? key);
+      if (!Number.isInteger(pid) || pid <= 0 || val?.price === undefined) continue;
+
+      const remotePrice = Number(val.price);
+      const remoteAvailInt = val.is_available === false || val.is_available === 0 ? 0 : 1;
+      const remoteUpdated = val.updated_at || remoteMachine?.updated_at || new Date().toISOString();
+
+      const localOverride = await db.get(
+        'SELECT * FROM machine_products WHERE machine_id = ? AND product_id = ?',
+        [machineId, pid]
+      );
+
+      if (
+        !localOverride ||
+        !localOverride.updated_at ||
+        remoteUpdated >= localOverride.updated_at
+      ) {
+        await db.run(
+          'INSERT OR REPLACE INTO machine_products (machine_id, product_id, price, is_available, updated_at) VALUES (?, ?, ?, ?, ?)',
+          [machineId, pid, remotePrice, remoteAvailInt, remoteUpdated]
+        );
+      }
+    }
+  }
+
+  const localOverrides = await db.all(
+    'SELECT * FROM machine_products WHERE machine_id = ?',
+    [machineId]
+  );
+  const overrideByProductId = new Map<number, any>();
+  for (const row of localOverrides) {
+    overrideByProductId.set(Number(row.product_id), row);
+  }
+
+  return sortedCatalog.map((p: any) => {
+    const pid = Number(p.id);
+    const override = overrideByProductId.get(pid);
+    const effectivePrice =
+      override && override.price !== undefined && override.price !== null
+        ? Number(override.price)
+        : Number(p.price);
+    const effectiveAvailable =
+      override && override.is_available !== undefined && override.is_available !== null
+        ? Number(override.is_available) !== 0
+        : true;
+
+    return {
+      id: pid,
+      product_id: pid,
+      machine_id: machineId,
+      name: p.name,
+      default_price: Number(p.price),
+      price: effectivePrice,
+      is_available: effectiveAvailable,
+      description: p.description,
+      image: p.image,
+      updated_at: override?.updated_at || null
+    };
+  });
+}
+
+export async function getAuthoritativeMachineProduct(
+  machineId: string,
+  productId: number,
+  db: any
+): Promise<{
+  id: number;
+  product_id: number;
+  machine_id: string;
+  name: string;
+  default_price: number;
+  price: number;
+  is_available: boolean;
+  description: string;
+  image: string;
+  updated_at: string | null;
+} | null> {
+  const products = await getAuthoritativeMachineProducts(machineId, db);
+  return products.find((p) => Number(p.id) === Number(productId)) || null;
+}
+
+/**
  * Safe registration/metadata sync to Firestore.
  * Uses a transaction so existing Firestore fields (`desired_mode`, `last_seen`, `owner_id`, `estimated_inventory`, `products`)
  * are NEVER overwritten by local default seed values.
@@ -999,4 +1176,197 @@ export async function consumeSetupTokenAtomically(
       setupTokenLocks.delete(tokenHash);
     }
   }
+}
+
+/**
+ * Authoritative Firestore Order Read-Through & Hydration
+ * Preserves historical charged `amount` on each order across Vercel serverless cold starts.
+ */
+async function hydrateLocalOrderFromAuthoritativeRecord(remoteOrder: any, db: any): Promise<any | null> {
+  if (!remoteOrder || !remoteOrder.id) return null;
+  const orderId = String(remoteOrder.id);
+  const existing = await db.get('SELECT * FROM orders WHERE id = ?', [orderId]);
+
+  if (!existing) {
+    await db.run(
+      'INSERT INTO orders (id, product_id, amount, status, machine_id, created_at, razorpay_order_id, extra_sugar, base) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        orderId,
+        Number(remoteOrder.product_id),
+        Number(remoteOrder.amount),
+        String(remoteOrder.status || 'PENDING').toUpperCase(),
+        String(remoteOrder.machine_id),
+        remoteOrder.created_at || new Date().toISOString(),
+        remoteOrder.razorpay_order_id || null,
+        remoteOrder.extra_sugar ?? 1,
+        remoteOrder.base || 'water'
+      ]
+    );
+    if (remoteOrder.razorpay_payment_id || remoteOrder.razorpay_signature) {
+      await db.run(
+        'UPDATE orders SET razorpay_payment_id = ?, razorpay_signature = ? WHERE id = ?',
+        [
+          remoteOrder.razorpay_payment_id || null,
+          remoteOrder.razorpay_signature || null,
+          orderId
+        ]
+      );
+    }
+  } else {
+    if (remoteOrder.status && remoteOrder.status !== existing.status) {
+      await db.run('UPDATE orders SET status = ? WHERE id = ?', [
+        String(remoteOrder.status).toUpperCase(),
+        orderId
+      ]);
+    }
+    if (remoteOrder.razorpay_payment_id && !existing.razorpay_payment_id) {
+      await db.run(
+        'UPDATE orders SET razorpay_payment_id = ?, razorpay_signature = ? WHERE id = ?',
+        [
+          remoteOrder.razorpay_payment_id,
+          remoteOrder.razorpay_signature || existing.razorpay_signature || null,
+          orderId
+        ]
+      );
+    }
+  }
+
+  return await db.get(
+    `SELECT o.*, p.name as product_name, p.description as product_desc
+     FROM orders o
+     JOIN products p ON o.product_id = p.id
+     WHERE o.id = ?`,
+    [orderId]
+  );
+}
+
+export async function getAuthoritativeOrderById(orderId: string, db: any): Promise<any | null> {
+  if (!orderId) return null;
+  const normalizedId = String(orderId).trim();
+
+  let remoteOrder: any = syncedOrdersStore.get(normalizedId) || null;
+
+  if (firestore) {
+    try {
+      const snap = await firestore.collection('orders').doc(normalizedId).get();
+      if (snap.exists) {
+        const data = snap.data();
+        if (data) {
+          remoteOrder = { ...data, id: data.id || snap.id };
+          syncedOrdersStore.set(normalizedId, remoteOrder);
+        }
+      }
+    } catch (error) {
+      logger.error(`Failed to fetch order ${normalizedId} from Firestore:`, error);
+    }
+  }
+
+  if (remoteOrder) {
+    return await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db);
+  }
+
+  return await db.get(
+    `SELECT o.*, p.name as product_name, p.description as product_desc
+     FROM orders o
+     JOIN products p ON o.product_id = p.id
+     WHERE o.id = ?`,
+    [normalizedId]
+  );
+}
+
+export async function getAuthoritativeOrderByRazorpayOrderId(
+  rpOrderId: string,
+  db: any
+): Promise<any | null> {
+  if (!rpOrderId) return null;
+  const normalizedRpId = String(rpOrderId).trim();
+
+  let remoteOrder: any = null;
+  for (const o of syncedOrdersStore.values()) {
+    if (o.razorpay_order_id && o.razorpay_order_id === normalizedRpId) {
+      remoteOrder = o;
+      break;
+    }
+  }
+
+  if (firestore) {
+    try {
+      const snap = await firestore
+        .collection('orders')
+        .where('razorpay_order_id', '==', normalizedRpId)
+        .limit(1)
+        .get();
+      if (!snap.empty) {
+        const doc = snap.docs[0];
+        const data = doc.data();
+        if (data) {
+          remoteOrder = { ...data, id: data.id || doc.id };
+          syncedOrdersStore.set(String(remoteOrder.id), remoteOrder);
+        }
+      }
+    } catch (error) {
+      logger.error(`Failed to query order by razorpay_order_id ${normalizedRpId} from Firestore:`, error);
+    }
+  }
+
+  if (remoteOrder) {
+    return await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db);
+  }
+
+  return await db.get('SELECT * FROM orders WHERE razorpay_order_id = ?', [normalizedRpId]);
+}
+
+export async function getAuthoritativeOrders(
+  db: any,
+  filterMachineIds?: string[]
+): Promise<any[]> {
+  if (firestore) {
+    try {
+      const snap = await firestore.collection('orders').get();
+      snap.forEach((doc) => {
+        const data = doc.data();
+        if (data) {
+          const id = String(data.id || doc.id);
+          syncedOrdersStore.set(id, { ...data, id });
+        }
+      });
+    } catch (error) {
+      logger.error('Failed to fetch orders from Firestore:', error);
+    }
+  }
+
+  for (const o of syncedOrdersStore.values()) {
+    await hydrateLocalOrderFromAuthoritativeRecord(o, db);
+  }
+
+  if (filterMachineIds !== undefined) {
+    if (filterMachineIds.length === 0) {
+      return [];
+    }
+    const allowedSet = new Set(filterMachineIds.map((m) => String(m).trim()));
+    if (filterMachineIds.length === 1) {
+      return await db.all(
+        `SELECT o.*, p.name as product_name 
+         FROM orders o
+         JOIN products p ON o.product_id = p.id
+         WHERE o.machine_id = ?
+         ORDER BY o.created_at DESC`,
+        [filterMachineIds[0]]
+      );
+    }
+    const allOrders = await db.all(
+      `SELECT o.*, p.name as product_name 
+       FROM orders o
+       JOIN products p ON o.product_id = p.id
+       ORDER BY o.created_at DESC`
+    );
+    return allOrders.filter((o: any) => allowedSet.has(String(o.machine_id).trim()));
+  }
+
+  return await db.all(
+    `SELECT o.*, p.name as product_name 
+     FROM orders o
+     JOIN products p ON o.product_id = p.id
+     ORDER BY o.created_at DESC`
+  );
 }

@@ -484,6 +484,18 @@ class MockDatabase {
       return { changes: 1 };
     }
     
+    if (query.includes('delete from machine_products')) {
+      if (query.includes('where machine_id = ?')) {
+        const [machineId] = params;
+        mockStore.machine_products = mockStore.machine_products.filter(
+          mp => mp.machine_id !== machineId
+        );
+      } else {
+        mockStore.machine_products = [];
+      }
+      return { changes: 1 };
+    }
+
     if (query.includes('insert into machine_products') || query.includes('replace into machine_products')) {
       const [machine_id, product_id, price, is_available, updated_at] = params;
       const existing = mockStore.machine_products.find(

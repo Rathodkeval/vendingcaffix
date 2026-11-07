@@ -9,7 +9,10 @@ import {
   updateMachineHeartbeatInFirebase,
   updateMachineInventoryInFirebase,
   updateMachineOwnerInFirebase,
+  updateMachineProductInFirebase,
   getAuthoritativeMachinesList,
+  getAuthoritativeMachineProducts,
+  getAuthoritativeMachineProduct,
   getAuthoritativeUserById,
   normalizeDesiredMode,
   desiredModeToLegacyStatus,
@@ -410,4 +413,103 @@ export const getMachineStatus = async (
     next(error);
   }
 };
+
+export const getMachineProducts = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  const id = String(req.params.id).trim();
+  const db = getDB();
+  try {
+    const machine = await assertMachineOwnershipOrAdmin(req.user, id);
+    const products = await getAuthoritativeMachineProducts(machine.id, db);
+    res.status(200).json({
+      status: 'success',
+      data: products
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const updateMachineProduct = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  const id = String(req.params.id).trim();
+  const productIdNum = Number(req.params.productId);
+  const { price, is_available } = req.body;
+  const db = getDB();
+
+  try {
+    const machine = await assertMachineOwnershipOrAdmin(req.user, id);
+
+    if (!Number.isInteger(productIdNum) || productIdNum <= 0) {
+      return next(new BadRequestError(`Invalid product ID: ${req.params.productId}`));
+    }
+
+    const baseProduct = await db.get('SELECT * FROM products WHERE id = ?', [productIdNum]);
+    if (!baseProduct) {
+      return next(new NotFoundError(`Product with ID ${productIdNum} not found`));
+    }
+
+    const currentMachineProduct = await getAuthoritativeMachineProduct(
+      machine.id,
+      productIdNum,
+      db
+    );
+
+    const nextPrice =
+      price !== undefined
+        ? Number(price)
+        : Number(currentMachineProduct?.price ?? baseProduct.price);
+    const nextAvailable =
+      is_available !== undefined
+        ? Boolean(is_available)
+        : Boolean(currentMachineProduct?.is_available ?? true);
+
+    if (!Number.isInteger(nextPrice) || nextPrice <= 0) {
+      return next(new BadRequestError('Price must be a positive integer'));
+    }
+
+    const nowIso = new Date().toISOString();
+
+    await db.run(
+      'INSERT OR REPLACE INTO machine_products (machine_id, product_id, price, is_available, updated_at) VALUES (?, ?, ?, ?, ?)',
+      [machine.id, productIdNum, nextPrice, nextAvailable ? 1 : 0, nowIso]
+    );
+
+    await updateMachineProductInFirebase(machine.id, productIdNum, {
+      price: nextPrice,
+      is_available: nextAvailable,
+      updated_at: nowIso
+    });
+
+    logger.info(
+      `Machine ${machine.id} product ${productIdNum} (${baseProduct.name}) updated: price=₹${nextPrice}, is_available=${nextAvailable}`
+    );
+
+    res.status(200).json({
+      status: 'success',
+      message: 'Machine product updated successfully',
+      data: {
+        id: productIdNum,
+        product_id: productIdNum,
+        machine_id: machine.id,
+        name: baseProduct.name,
+        default_price: Number(baseProduct.price),
+        price: nextPrice,
+        is_available: nextAvailable,
+        description: baseProduct.description,
+        image: baseProduct.image,
+        updated_at: nowIso
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 

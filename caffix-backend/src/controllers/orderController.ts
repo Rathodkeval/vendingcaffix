@@ -1,9 +1,17 @@
 import { Request, Response, NextFunction } from 'express';
 import { getDB } from '../config/db';
-import { AuthRequest } from '../middleware/auth';
+import { AuthRequest, assertMachineOwnershipOrAdmin } from '../middleware/auth';
 import { NotFoundError, BadRequestError, ForbiddenError } from '../utils/errors';
 import logger from '../utils/logger';
-import { syncOrderToFirebase } from '../utils/firebase';
+import {
+  syncOrderToFirebase,
+  getAuthoritativeMachineState,
+  getAuthoritativeMachinesList,
+  getAuthoritativeMachineProduct,
+  getAuthoritativeOrderById,
+  getAuthoritativeOrders,
+  updateMachineInventoryInFirebase
+} from '../utils/firebase';
 import { ensureMachineRegisteredInLocalDB } from './kioskController';
 const Razorpay = require('razorpay');
 
@@ -35,25 +43,54 @@ export const getOrders = async (
   const db = getDB();
   try {
     const queryMachineId = typeof req.query.machine_id === 'string' ? req.query.machine_id.trim() : '';
-    const filterMachineId = queryMachineId || req.user?.machine_id || '';
 
-    let orders: any[];
-    if (filterMachineId) {
-      orders = await db.all(`
-        SELECT o.*, p.name as product_name 
-        FROM orders o
-        JOIN products p ON o.product_id = p.id
-        WHERE o.machine_id = ?
-        ORDER BY o.created_at DESC
-      `, [filterMachineId]);
-    } else {
-      orders = await db.all(`
-        SELECT o.*, p.name as product_name 
-        FROM orders o
-        JOIN products p ON o.product_id = p.id
-        ORDER BY o.created_at DESC
-      `);
+    if (req.user?.role === 'owner') {
+      if (queryMachineId) {
+        const machine = await assertMachineOwnershipOrAdmin(req.user, queryMachineId);
+        const orders = await getAuthoritativeOrders(db, [machine.id]);
+        res.status(200).json({
+          status: 'success',
+          data: orders
+        });
+        return;
+      }
+
+      const machines = await getAuthoritativeMachinesList(db);
+      const ownedMachineIds = machines
+        .filter((m) => m.owner_id && String(m.owner_id).trim() === String(req.user!.id).trim())
+        .map((m) => String(m.id));
+      const orders = await getAuthoritativeOrders(db, ownedMachineIds);
+      res.status(200).json({
+        status: 'success',
+        data: orders
+      });
+      return;
     }
+
+    if (req.user?.role === 'kiosk') {
+      if (req.user.machine_id && queryMachineId && queryMachineId !== req.user.machine_id) {
+        return next(
+          new ForbiddenError(
+            `Kiosk session bound to ${req.user.machine_id} cannot query orders for ${queryMachineId}`
+          )
+        );
+      }
+      const targetMachineId = queryMachineId || req.user.machine_id || '';
+      const orders = await getAuthoritativeOrders(
+        db,
+        targetMachineId ? [targetMachineId] : []
+      );
+      res.status(200).json({
+        status: 'success',
+        data: orders
+      });
+      return;
+    }
+
+    // Admin role
+    const orders = queryMachineId
+      ? await getAuthoritativeOrders(db, [queryMachineId])
+      : await getAuthoritativeOrders(db);
 
     res.status(200).json({
       status: 'success',
@@ -65,22 +102,31 @@ export const getOrders = async (
 };
 
 export const getOrderById = async (
-  req: Request,
+  req: AuthRequest,
   res: Response,
   next: NextFunction
 ): Promise<void> => {
-  const { id } = req.params;
+  const id = String(req.params.id);
   const db = getDB();
   try {
-    const order = await db.get(`
-      SELECT o.*, p.name as product_name, p.description as product_desc
-      FROM orders o
-      JOIN products p ON o.product_id = p.id
-      WHERE o.id = ?
-    `, [id]);
+    const order = await getAuthoritativeOrderById(id, db);
     
     if (!order) {
       return next(new NotFoundError(`Order with ID ${id} not found`));
+    }
+
+    if (req.user?.role === 'owner') {
+      await assertMachineOwnershipOrAdmin(req.user, order.machine_id);
+    } else if (
+      req.user?.role === 'kiosk' &&
+      req.user.machine_id &&
+      req.user.machine_id !== order.machine_id
+    ) {
+      return next(
+        new ForbiddenError(
+          `Kiosk ${req.user.machine_id} cannot access order ${id} belonging to machine ${order.machine_id}`
+        )
+      );
     }
 
     res.status(200).json({
@@ -116,25 +162,60 @@ export const createOrder = async (
       ? req.user.machine_id
       : requestedMachineId;
 
-    // 1. Verify Product
+    if (req.user?.role === 'owner') {
+      await assertMachineOwnershipOrAdmin(req.user, resolvedMachineId);
+    }
+
+    // 1. Verify Product exists in global catalog
     const product = await db.get('SELECT * FROM products WHERE id = ?', [product_id]);
     if (!product) {
       return next(new NotFoundError(`Product ID ${product_id} not found`));
     }
 
-    // 2. Verify Machine registration & status
-    const machine = await ensureMachineRegisteredInLocalDB(resolvedMachineId);
-    if (!machine) {
+    // 2. Verify Machine registration & authoritative desired_mode / status
+    const registered = await ensureMachineRegisteredInLocalDB(resolvedMachineId);
+    if (!registered) {
       return next(new NotFoundError(`Vending machine ID ${resolvedMachineId} not registered`));
     }
-    if (machine.status === 'maintenance') {
+    const machine = (await getAuthoritativeMachineState(resolvedMachineId, db)) || registered;
+    if (machine.desired_mode === 'MAINTENANCE' || machine.status === 'maintenance') {
       return next(new BadRequestError('Machine is currently under maintenance mode'));
     }
 
-    // 3. Create order in PENDING status
+    // 3. Resolve authoritative machine-specific product pricing and availability
+    const machineProduct = await getAuthoritativeMachineProduct(
+      resolvedMachineId,
+      Number(product_id),
+      db
+    );
+    if (!machineProduct) {
+      return next(new NotFoundError(`Product ID ${product_id} not found for machine ${resolvedMachineId}`));
+    }
+
+    if (!machineProduct.is_available) {
+      return next(
+        new BadRequestError(
+          `Product "${machineProduct.name}" is currently unavailable on machine ${resolvedMachineId}`
+        )
+      );
+    }
+
+    const authoritativePrice = Number(machineProduct.price);
+    if (amount !== undefined && amount !== null && Number(amount) !== authoritativePrice) {
+      logger.warn(
+        `Rejected manipulated or mismatched frontend order amount on machine ${resolvedMachineId}: product_id=${product_id}, frontend_amount=${amount}, authoritative_price=${authoritativePrice}`
+      );
+      return next(
+        new BadRequestError(
+          `Invalid order amount: expected ₹${authoritativePrice} for ${machineProduct.name} on machine ${resolvedMachineId}, received ₹${amount}`
+        )
+      );
+    }
+
+    // 4. Create order in PENDING status with authoritative machine-specific price
     const orderId = 'CFX-' + Math.floor(10000 + Math.random() * 90000);
     const todayStr = new Date().toISOString();
-    const orderAmount = amount || product.price;
+    const orderAmount = authoritativePrice;
 
     let rpOrderId = `order_mock_${Math.floor(100000 + Math.random() * 900000)}`;
 
@@ -162,7 +243,7 @@ export const createOrder = async (
       [orderId, product_id, orderAmount, 'PENDING', resolvedMachineId, todayStr, rpOrderId, 1, base || 'water']
     );
 
-    logger.info(`Created PENDING order ${orderId} for machine ${resolvedMachineId} with Razorpay Order ID ${rpOrderId}`);
+    logger.info(`Created PENDING order ${orderId} for machine ${resolvedMachineId} (price=₹${orderAmount}) with Razorpay Order ID ${rpOrderId}`);
 
     const newOrder = {
       id: orderId,
@@ -196,8 +277,8 @@ export const createOrder = async (
 async function performOrderStatusUpdateInternal(id: string, status: string): Promise<any> {
   const db = getDB();
   
-  // 1. Retrieve current order state
-  const order = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
+  // 1. Retrieve current order state (hydrating from Firestore if needed after a serverless cold start)
+  const order = await getAuthoritativeOrderById(id, db);
   if (!order) {
     throw new NotFoundError(`Order with ID ${id} not found`);
   }
@@ -227,10 +308,13 @@ async function performOrderStatusUpdateInternal(id: string, status: string): Pro
   }
 
   // 2. Perform ingredient deduction on transition to PAID, PREPARING, or COMPLETED (ONLY if current state is PENDING)
+  // Note: Safe Maintenance Transition — already-created orders are permitted to complete payment and dispensing
+  // even if the machine was switched to MAINTENANCE mode after order creation.
   const transitionToActive = ['PAID', 'PREPARING', 'COMPLETED'].includes(newStatus);
   
   if (currentStatus === 'PENDING' && transitionToActive) {
     await ensureMachineRegisteredInLocalDB(order.machine_id);
+    await getAuthoritativeMachineState(order.machine_id, db);
     // Fetch machine inventory
     const inventory = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [order.machine_id]);
     if (!inventory) {
@@ -298,6 +382,11 @@ async function performOrderStatusUpdateInternal(id: string, status: string): Pro
        WHERE machine_id = ?`,
       [waterNeeded, coffeeNeeded, milkNeeded, vanillaNeeded, hazelnutNeeded, irishNeeded, mochaNeeded, order.machine_id]
     );
+
+    const updatedInventory = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [order.machine_id]);
+    if (updatedInventory) {
+      await updateMachineInventoryInFirebase(order.machine_id, updatedInventory);
+    }
     
     logger.info(`Deducted ingredients for order ID ${id} (machine ${order.machine_id}) on transition from ${currentStatus} to ${newStatus}`);
   }
@@ -348,13 +437,17 @@ export const updateOrderStatus = async (
   const db = getDB();
 
   try {
-    const existing = await db.get('SELECT id, machine_id FROM orders WHERE id = ?', [id]);
+    const existing = await getAuthoritativeOrderById(id, db);
     if (!existing) {
       return next(new NotFoundError(`Order with ID ${id} not found`));
     }
 
     if (req.user?.role === 'kiosk' && req.user.machine_id && req.user.machine_id !== existing.machine_id) {
       return next(new ForbiddenError(`Kiosk ${req.user.machine_id} cannot modify order ${id} belonging to machine ${existing.machine_id}`));
+    }
+
+    if (req.user?.role === 'owner') {
+      await assertMachineOwnershipOrAdmin(req.user, existing.machine_id);
     }
 
     const updatedOrder = await executeOrderStatusUpdate(id, status as string);

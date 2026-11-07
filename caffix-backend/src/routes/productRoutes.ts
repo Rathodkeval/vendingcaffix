@@ -20,12 +20,14 @@ const updatePriceSchema = z.object({
     id: z.string()
   }),
   body: z.object({
-    price: z.number().int().positive('Price must be a positive integer')
+    price: z.number().int().positive('Price must be a positive integer'),
+    machine_id: z.string().min(3).optional(),
+    is_available: z.boolean().optional()
   })
 });
 
 router.get('/', getProducts);
 router.post('/', authenticateJWT, requireRole(['admin']), validateRequest(createProductSchema), createProduct);
-router.put('/:id/price', authenticateJWT, requireRole(['admin']), validateRequest(updatePriceSchema), updateProductPrice);
+router.put('/:id/price', authenticateJWT, requireRole(['admin', 'owner']), validateRequest(updatePriceSchema), updateProductPrice);
 
 export default router;
