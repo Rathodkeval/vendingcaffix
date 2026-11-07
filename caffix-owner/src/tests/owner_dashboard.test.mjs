@@ -123,14 +123,17 @@ async function runStage5Tests() {
 
     const adminMe = await ownerApi.getMe(adminToken, TEST_BASE_URL);
     assert.strictEqual(adminMe.data.role, 'admin');
-    assert.ok(adminMe.data.assigned_machines.length >= 3, 'Admin must see all machines');
+    assert.ok(adminMe.data.assigned_machines.length >= 4, 'Admin must see all 4 machines');
+    assert.ok(adminMe.data.assigned_machines.includes('CFX-MC-04'), 'Admin must see CFX-MC-04');
 
     // Ensure machines are RUNNING and refilled via PATCH /machines/:id/status and POST /machines/:id/refill
     await ownerApi.updateMachineMode('CFX-MC-01', 'RUNNING', adminToken, TEST_BASE_URL);
     await ownerApi.updateMachineMode('CFX-MC-02', 'RUNNING', adminToken, TEST_BASE_URL);
     await ownerApi.updateMachineMode('CFX-MC-03', 'RUNNING', adminToken, TEST_BASE_URL);
+    await ownerApi.updateMachineMode('CFX-MC-04', 'RUNNING', adminToken, TEST_BASE_URL);
     await ownerApi.refillMachineInventory('CFX-MC-01', 'ALL', adminToken, TEST_BASE_URL);
     await ownerApi.refillMachineInventory('CFX-MC-02', 'ALL', adminToken, TEST_BASE_URL);
+    await ownerApi.refillMachineInventory('CFX-MC-04', 'ALL', adminToken, TEST_BASE_URL);
     console.log('   PASS: CORS allowlist, Admin login and full machine access verified.');
 
     // 4. Invite Owner A (assigned multiple machines: CFX-MC-01 & CFX-MC-02) and Owner B (assigned CFX-MC-03)
@@ -455,6 +458,7 @@ async function runStage5Tests() {
     await ownerApi.assignMachineOwner('CFX-MC-01', null, adminToken, TEST_BASE_URL);
     await ownerApi.assignMachineOwner('CFX-MC-02', null, adminToken, TEST_BASE_URL);
     await ownerApi.assignMachineOwner('CFX-MC-03', null, adminToken, TEST_BASE_URL);
+    await ownerApi.assignMachineOwner('CFX-MC-04', null, adminToken, TEST_BASE_URL);
     await db.run('DELETE FROM machine_products');
 
     console.log('\nALL STAGE 5 OWNER DASHBOARD TESTS PASSED SUCCESSFULLY!\n');

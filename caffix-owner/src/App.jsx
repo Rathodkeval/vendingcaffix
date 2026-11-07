@@ -42,13 +42,21 @@ export default function App() {
     setGlobalError('');
 
     try {
-      const [meRes, machinesRes, ordersRes] = await Promise.all([
+      const results = await Promise.allSettled([
         ownerApi.getMe(token),
         ownerApi.getMachines(token),
         ownerApi.getOrders(undefined, token)
       ]);
 
-      const profile = meRes.data;
+      const meResult = results[0];
+      const machinesResult = results[1];
+      const ordersResult = results[2];
+
+      if (meResult.status === 'rejected') {
+        throw meResult.reason;
+      }
+
+      const profile = meResult.value?.data;
       if (!profile || (profile.role !== 'owner' && profile.role !== 'admin')) {
         clearStoredToken();
         setUser(null);
@@ -57,16 +65,28 @@ export default function App() {
       }
 
       setUser(profile);
-      const machineList = machinesRes.data || [];
-      setMachines(machineList);
-      setOrders(ordersRes.data || []);
 
-      setSelectedMachineId((prev) => {
-        if (prev && machineList.some((m) => m.id === prev)) {
-          return prev;
+      if (machinesResult.status === 'fulfilled') {
+        const machineList = machinesResult.value?.data || [];
+        setMachines(machineList);
+        setSelectedMachineId((prev) => {
+          if (prev && machineList.some((m) => m.id === prev)) {
+            return prev;
+          }
+          return machineList[0]?.id || '';
+        });
+      } else {
+        setGlobalError(machinesResult.reason?.message || 'Failed to load machines fleet.');
+      }
+
+      if (ordersResult.status === 'fulfilled') {
+        setOrders(ordersResult.value?.data || []);
+      } else {
+        setOrders([]);
+        if (machinesResult.status === 'fulfilled') {
+          setGlobalError(ordersResult.reason?.message || 'Unable to synchronize order history.');
         }
-        return machineList[0]?.id || '';
-      });
+      }
     } catch (err) {
       if (err.status !== 401) {
         setGlobalError(err.message || 'Unable to synchronize dashboard data.');

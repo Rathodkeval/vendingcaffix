@@ -43,7 +43,8 @@ export function getConfiguredMachineSeeds(): DefaultMachineSeed[] {
   const defaults: DefaultMachineSeed[] = [
     { id: 'CFX-MC-01', machine_name: 'Kiosk-One', location: 'Location 1', kiosk_token: perMachineTokens.get('CFX-MC-01') || null },
     { id: 'CFX-MC-02', machine_name: 'Kiosk-Two', location: 'Location 2', kiosk_token: perMachineTokens.get('CFX-MC-02') || null },
-    { id: 'CFX-MC-03', machine_name: 'Kiosk-Three', location: 'Location 3', kiosk_token: perMachineTokens.get('CFX-MC-03') || null }
+    { id: 'CFX-MC-03', machine_name: 'Kiosk-Three', location: 'Location 3', kiosk_token: perMachineTokens.get('CFX-MC-03') || null },
+    { id: 'CFX-MC-04', machine_name: 'Kiosk-Four', location: 'Location 4', kiosk_token: perMachineTokens.get('CFX-MC-04') || null }
   ];
 
   const existingIds = new Set(defaults.map(d => d.id));
