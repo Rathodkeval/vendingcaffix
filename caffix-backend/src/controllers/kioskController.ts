@@ -130,10 +130,11 @@ export const verifyKiosk = async (req: Request, res: Response, next: NextFunctio
     } else if (validSharedSecret && constantTimeEqual(kiosk, validSharedSecret)) {
       resolvedMachineId = hasMachineQueryParam ? rawMachineId : 'CFX-MC-01';
 
-      // If this machine has a dedicated token (env or DB), never allow the shared secret to authenticate it
+      // If this machine has a dedicated token (env or strictly enforced DB token), never allow the shared secret to authenticate it
       const dedicatedEnvToken = envMachineTokens.get(resolvedMachineId);
       const dbDedicated = dbMachineTokenRows.find((r) => r.id === resolvedMachineId)?.kiosk_token;
-      if (dedicatedEnvToken || (process.env.ENFORCE_PER_MACHINE_SECRETS === 'true' && dbDedicated) || dbDedicated) {
+      const enforcePerMachine = process.env.ENFORCE_PER_MACHINE_SECRETS === 'true';
+      if (dedicatedEnvToken || (enforcePerMachine && dbDedicated)) {
         res.status(401).json({
           authorized: false,
           message: 'Unauthorized kiosk: machine requires its dedicated credential'

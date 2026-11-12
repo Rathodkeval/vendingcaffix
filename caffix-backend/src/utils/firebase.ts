@@ -31,6 +31,10 @@ export function isStrictFirebaseEnvironment(): boolean {
   return false;
 }
 
+export function isFirestoreActive(): boolean {
+  return Boolean(firestore);
+}
+
 function handleFirestoreFailure(context: string, error: unknown): never {
   if (error instanceof ServiceUnavailableError) {
     logger.error(`${context}: ${error.message}`);
@@ -2123,13 +2127,18 @@ export async function ensureFirestoreSeeded(db: any): Promise<void> {
 
   firestoreSeedPromise = (async () => {
     try {
+      const isProductionEnv = (process.env.VERCEL_ENV || '').trim().toLowerCase() === 'production';
+
       // When connected to an authoritative Firestore instance on Vercel, clear MockDatabase's default demo orders
-      // so only real Firestore orders are returned.
+      // so only real Firestore orders are returned. In Production, also clear default mock machine/inventory seeds
+      // so un-registered phantom machines never linger in local memory.
       if (process.env.VERCEL && db) {
         await db.run('DELETE FROM orders');
+        if (isProductionEnv) {
+          await db.run('DELETE FROM inventory');
+          await db.run('DELETE FROM machines');
+        }
       }
-
-      const isProductionEnv = (process.env.VERCEL_ENV || '').trim().toLowerCase() === 'production';
 
       // 1. Seed default Admin user (`users/1`) ONLY if missing in Firestore AND NOT in Production
       // Default staging credentials ('admin123') are never seeded into Production Firestore.

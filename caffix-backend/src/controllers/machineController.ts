@@ -17,7 +17,8 @@ import {
   getAuthoritativeUserById,
   normalizeDesiredMode,
   desiredModeToLegacyStatus,
-  computeConnectionStatus
+  computeConnectionStatus,
+  isFirestoreActive
 } from '../utils/firebase';
 import { ensureMachineRegisteredInLocalDB } from './kioskController';
 import { setNoStoreHeaders } from '../utils/cache';
@@ -150,7 +151,7 @@ export const registerMachine = async (
   next: NextFunction
 ): Promise<void> => {
   const { id, machine_name, location, kiosk_token } = req.body;
-  const machineId = String(id || '').trim();
+  const machineId = String(id || '').trim().toUpperCase();
   const db = getDB();
 
   if (activeMachineRegistrations.has(machineId)) {
@@ -165,9 +166,12 @@ export const registerMachine = async (
       return next(new ConflictError(`Machine with ID ${machineId} already registered`));
     }
 
-    const existing = await db.get('SELECT id FROM machines WHERE id = ?', [machineId]);
-    if (existing) {
-      return next(new ConflictError(`Machine with ID ${machineId} already registered`));
+    // When Firestore is not active (pure local offline mode without Firebase), check local DB
+    if (!isFirestoreActive()) {
+      const existing = await db.get('SELECT id FROM machines WHERE id = ?', [machineId]);
+      if (existing) {
+        return next(new ConflictError(`Machine with ID ${machineId} already registered`));
+      }
     }
 
     const now = new Date().toISOString();
@@ -183,6 +187,10 @@ export const registerMachine = async (
       mocha_level: 100,
       water_level: 100
     };
+
+    // Clean up any stale un-synced local seed row so cold-start seeds never block authoritative registration
+    await db.run('DELETE FROM inventory WHERE machine_id = ?', [machineId]).catch(() => {});
+    await db.run('DELETE FROM machines WHERE id = ?', [machineId]).catch(() => {});
 
     try {
       await db.run(

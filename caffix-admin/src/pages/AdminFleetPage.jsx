@@ -30,6 +30,8 @@ export default function AdminFleetPage({ machines, owners: initialOwners, onRefr
   const [newMachName, setNewMachName] = useState('');
   const [newMachLocation, setNewMachLocation] = useState('');
   const [registeringMach, setRegisteringMach] = useState(false);
+  const [registeredMachineResult, setRegisteredMachineResult] = useState(null);
+  const [copiedKioskLink, setCopiedKioskLink] = useState(false);
 
   const [assigningMachineId, setAssigningMachineId] = useState('');
   const [error, setError] = useState('');
@@ -117,14 +119,18 @@ export default function AdminFleetPage({ machines, owners: initialOwners, onRefr
     e.preventDefault();
     setError('');
     setSuccessMsg('');
+    setRegisteredMachineResult(null);
     setRegisteringMach(true);
     try {
-      await adminApi.registerMachine({
-        id: newMachId.trim().toUpperCase(),
+      const registeredId = newMachId.trim().toUpperCase();
+      const res = await adminApi.registerMachine({
+        id: registeredId,
         machine_name: newMachName.trim(),
         location: newMachLocation.trim()
       });
-      setSuccessMsg(`Registered new vending machine ${newMachId.trim().toUpperCase()}.`);
+      const kioskToken = res?.data?.kiosk_token;
+      setRegisteredMachineResult(res?.data || null);
+      setSuccessMsg(`Registered new vending machine ${registeredId}.${kioskToken ? ' Dedicated kiosk token generated.' : ''}`);
       setNewMachId('');
       setNewMachName('');
       setNewMachLocation('');
@@ -134,6 +140,21 @@ export default function AdminFleetPage({ machines, owners: initialOwners, onRefr
     } finally {
       setRegisteringMach(false);
     }
+  };
+
+  const handleCopyKioskLaunchLink = () => {
+    if (!registeredMachineResult?.kiosk_token) return;
+    const kioskBase =
+      typeof window !== 'undefined' &&
+      (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+        ? 'http://localhost:5173'
+        : 'https://vendingcaffix.vercel.app';
+    const launchUrl = `${kioskBase}/?kiosk=${encodeURIComponent(
+      registeredMachineResult.kiosk_token
+    )}&machine_id=${encodeURIComponent(registeredMachineResult.id)}`;
+    navigator.clipboard?.writeText(launchUrl);
+    setCopiedKioskLink(true);
+    setTimeout(() => setCopiedKioskLink(false), 2500);
   };
 
   const handleCopyInviteLink = () => {
@@ -346,6 +367,33 @@ export default function AdminFleetPage({ machines, owners: initialOwners, onRefr
               {registeringMach ? 'Registering Machine...' : 'Register Vending Machine'}
             </button>
           </form>
+
+          {registeredMachineResult && (
+            <div className="mt-4 p-4 rounded-xl bg-emerald-50 border border-emerald-200 space-y-2 text-xs">
+              <div className="font-bold text-emerald-900 flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Machine {registeredMachineResult.id} Registered Successfully</span>
+              </div>
+              {registeredMachineResult.kiosk_token && (
+                <>
+                  <div className="text-[11px] text-emerald-800">
+                    Dedicated Kiosk Token (Stored in Firestore):
+                  </div>
+                  <div className="font-mono text-[11px] break-all bg-white p-2 rounded-lg border border-emerald-200 text-[#2C1E17]">
+                    {registeredMachineResult.kiosk_token}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleCopyKioskLaunchLink}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#2C1E17] text-[#FAF6F0] font-semibold text-xs cursor-pointer hover:bg-[#4E3629]"
+                  >
+                    {copiedKioskLink ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    {copiedKioskLink ? 'Copied Launch Link!' : 'Copy Kiosk Launch Link'}
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
