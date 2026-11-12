@@ -349,6 +349,64 @@ async function runStage2Tests() {
       'Customer B machine assignments must survive cold start via Firestore hydration'
     );
 
+    // 11. Portal-Role Isolation Enforcement (Admin Portal vs Owner Portal)
+    const adminOnAdminPortal = await api('POST', '/auth/login', {
+      email: 'admin@caffix.com',
+      password: 'admin123',
+      portal: 'admin'
+    });
+    assert.strictEqual(adminOnAdminPortal.status, 200, 'Admin login to admin portal must succeed');
+
+    const adminOnOwnerPortal = await api('POST', '/auth/login', {
+      email: 'admin@caffix.com',
+      password: 'admin123',
+      portal: 'owner'
+    });
+    assert.strictEqual(adminOnOwnerPortal.status, 403, 'Admin login to owner portal must return 403');
+    assert(!adminOnOwnerPortal.data.token, 'Rejected admin login on owner portal must not issue token');
+
+    const ownerOnOwnerPortal = await api('POST', '/auth/login', {
+      email: emailA,
+      password: 'OwnerAPassword123!',
+      portal: 'owner'
+    });
+    assert.strictEqual(ownerOnOwnerPortal.status, 200, 'Owner login to owner portal must succeed');
+
+    const ownerOnAdminPortal = await api('POST', '/auth/login', {
+      email: emailA,
+      password: 'OwnerAPassword123!',
+      portal: 'admin'
+    });
+    assert.strictEqual(ownerOnAdminPortal.status, 403, 'Owner login to admin portal must return 403');
+    assert(!ownerOnAdminPortal.data.token, 'Rejected owner login on admin portal must not issue token');
+
+    const adminMeOnOwnerPortal = await api('GET', '/auth/me?portal=owner', undefined, adminToken);
+    assert.strictEqual(adminMeOnOwnerPortal.status, 403, 'Admin token must fail GET /auth/me?portal=owner');
+
+    const ownerMeOnAdminPortal = await api('GET', '/auth/me?portal=admin', undefined, tokenA);
+    assert.strictEqual(ownerMeOnAdminPortal.status, 403, 'Owner token must fail GET /auth/me?portal=admin');
+
+    const unauthRegister = await api('POST', '/auth/register', {
+      name: 'Rogue Admin',
+      email: 'rogue@caffix.com',
+      password: 'password123',
+      role: 'admin'
+    });
+    assert.strictEqual(unauthRegister.status, 401, 'Unauthenticated POST /auth/register must return 401');
+
+    const ownerRegister = await api(
+      'POST',
+      '/auth/register',
+      {
+        name: 'Rogue Admin 2',
+        email: 'rogue2@caffix.com',
+        password: 'password123',
+        role: 'admin'
+      },
+      tokenA
+    );
+    assert.strictEqual(ownerRegister.status, 403, 'Owner POST /auth/register must return 403');
+
     // Clean up test machine assignments
     for (const mId of ['CFX-MC-01', 'CFX-MC-02', 'CFX-MC-03']) {
       await api('PATCH', `/machines/${mId}/owner`, { owner_id: null }, adminToken);

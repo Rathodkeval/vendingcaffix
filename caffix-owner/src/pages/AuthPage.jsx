@@ -52,9 +52,22 @@ export default function AuthPage({ onAuthenticated, sessionNotice }) {
         throw new Error('Invalid authentication response from server.');
       }
 
-      if (userData.role !== 'owner' && userData.role !== 'admin') {
+      if (userData.role === 'admin') {
         clearStoredToken();
-        throw new Error('Access denied: Kiosk accounts cannot sign into the CAFFIX Owner Portal.');
+        const adminPortalUrl =
+          typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_PORTAL_URL
+            ? String(import.meta.env.VITE_ADMIN_PORTAL_URL).trim()
+            : '';
+        throw new Error(
+          adminPortalUrl
+            ? `Administrator accounts cannot sign into the Machine Owner Dashboard. Please use the CAFFIX Admin Dashboard (${adminPortalUrl}).`
+            : 'Administrator accounts cannot sign into the Machine Owner Dashboard. Please sign in through the dedicated CAFFIX Admin Dashboard.'
+        );
+      }
+
+      if (userData.role !== 'owner') {
+        clearStoredToken();
+        throw new Error('Access denied: Only CAFFIX Machine Owner accounts can sign into the Owner Portal.');
       }
 
       await onAuthenticated(jwtToken, userData, remember);
@@ -224,7 +237,7 @@ export default function AuthPage({ onAuthenticated, sessionNotice }) {
                   Welcome Back
                 </h2>
                 <p className="text-xs text-slate-500 mt-1">
-                  Sign in with your CAFFIX Owner or Administrator account.
+                  Sign in with your CAFFIX Machine Owner account.
                 </p>
               </div>
 

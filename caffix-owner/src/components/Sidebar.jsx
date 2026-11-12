@@ -6,7 +6,6 @@ import {
   Tag,
   ShoppingBag,
   BarChart3,
-  ShieldCheck,
   LogOut,
   Menu,
   X,
@@ -35,14 +34,6 @@ export default function Sidebar({
     { id: 'reports', label: 'Sales Reports', icon: BarChart3 }
   ];
 
-  if (user?.role === 'admin') {
-    navItems.push({
-      id: 'admin',
-      label: 'Fleet & Owners (Admin)',
-      icon: ShieldCheck
-    });
-  }
-
   const handleSelect = (id) => {
     setActiveTab(id);
     setMobileOpen(false);
@@ -63,7 +54,7 @@ export default function Sidebar({
               CAFFIX
             </span>
             <span className="ml-1.5 text-[11px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-[#C9A66B]/20 text-[#DCC39A] font-semibold">
-              {user?.role === 'admin' ? 'Admin' : 'Owner'}
+              Owner
             </span>
           </div>
         </div>

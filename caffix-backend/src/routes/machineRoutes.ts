@@ -93,8 +93,8 @@ router.put('/:id/products/:productId', authenticateJWT, requireRole(['admin', 'o
 router.patch('/:id/products/:productId', authenticateJWT, requireRole(['admin', 'owner']), validateRequest(updateMachineProductSchema), updateMachineProduct);
 router.patch('/:id/owner', authenticateJWT, requireRole(['admin']), validateRequest(assignOwnerSchema), assignMachineOwner);
 router.patch('/:id/status', authenticateJWT, requireRole(['admin', 'owner']), validateRequest(updateStatusSchema), updateMachineStatus);
-router.post('/:id/heartbeat', authenticateJWT, validateRequest(heartbeatSchema), recordMachineHeartbeat);
-router.get('/:machine_id/inventory', authenticateJWT, getInventoryByMachine);
+router.post('/:id/heartbeat', authenticateJWT, requireRole(['admin', 'owner', 'kiosk']), validateRequest(heartbeatSchema), recordMachineHeartbeat);
+router.get('/:machine_id/inventory', authenticateJWT, requireRole(['admin', 'owner', 'kiosk']), getInventoryByMachine);
 router.post('/:machine_id/refill', authenticateJWT, requireRole(['admin', 'owner']), validateRequest(refillSchema), refillMachineInventory);
 
 export default router;

@@ -28,7 +28,8 @@ const loginSchema = z.object({
   body: z.object({
     email: z.string().email('Invalid email address'),
     password: z.string().min(6, 'Password must be at least 6 characters'),
-    machine_id: z.string().min(3).optional()
+    machine_id: z.string().min(3).optional(),
+    portal: z.enum(['admin', 'owner']).optional()
   })
 });
 
@@ -63,7 +64,7 @@ const changePasswordSchema = z.object({
   })
 });
 
-router.post('/register', validateRequest(registerSchema), register);
+router.post('/register', authenticateJWT, requireRole(['admin']), validateRequest(registerSchema), register);
 router.post('/login', validateRequest(loginSchema), login);
 router.post('/kiosk-admin', authenticateJWT, validateRequest(kioskAdminSchema), kioskAdminLogin);
 router.get('/me', authenticateJWT, requireRole(['admin', 'owner']), getMe);

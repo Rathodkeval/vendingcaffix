@@ -9,10 +9,14 @@ import {
   CheckCircle2,
   PlusCircle
 } from 'lucide-react';
-import { ownerApi, buildInviteSetupUrl } from '../services/api';
+import {
+  adminApi,
+  buildInviteSetupUrl,
+  resolveOwnerPortalUrl
+} from '../services/api';
 
-export default function AdminFleetPage({ machines, onRefreshAll }) {
-  const [owners, setOwners] = useState([]);
+export default function AdminFleetPage({ machines, owners: initialOwners, onRefreshAll }) {
+  const [owners, setOwners] = useState(initialOwners || []);
   const [loadingOwners, setLoadingOwners] = useState(false);
   const [inviteName, setInviteName] = useState('');
   const [inviteEmail, setInviteEmail] = useState('');
@@ -31,10 +35,18 @@ export default function AdminFleetPage({ machines, onRefreshAll }) {
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
 
+  const ownerPortalBase = resolveOwnerPortalUrl();
+
+  useEffect(() => {
+    if (Array.isArray(initialOwners)) {
+      setOwners(initialOwners);
+    }
+  }, [initialOwners]);
+
   const fetchOwners = async () => {
     setLoadingOwners(true);
     try {
-      const res = await ownerApi.getOwners();
+      const res = await adminApi.getOwners();
       setOwners(res.data || []);
     } catch (err) {
       setError(err.message || 'Failed to load owners list.');
@@ -61,7 +73,7 @@ export default function AdminFleetPage({ machines, onRefreshAll }) {
     setInviting(true);
 
     try {
-      const res = await ownerApi.inviteOwner({
+      const res = await adminApi.inviteOwner({
         name: inviteName.trim(),
         email: inviteEmail.trim(),
         machine_ids: selectedMachines
@@ -86,7 +98,7 @@ export default function AdminFleetPage({ machines, onRefreshAll }) {
     setError('');
     setSuccessMsg('');
     try {
-      await ownerApi.assignMachineOwner(machineId, ownerId || null);
+      await adminApi.assignMachineOwner(machineId, ownerId || null);
       setSuccessMsg(
         ownerId
           ? `Assigned machine ${machineId} to owner ${ownerId}.`
@@ -107,7 +119,7 @@ export default function AdminFleetPage({ machines, onRefreshAll }) {
     setSuccessMsg('');
     setRegisteringMach(true);
     try {
-      await ownerApi.registerMachine({
+      await adminApi.registerMachine({
         id: newMachId.trim().toUpperCase(),
         machine_name: newMachName.trim(),
         location: newMachLocation.trim()
@@ -127,7 +139,7 @@ export default function AdminFleetPage({ machines, onRefreshAll }) {
   const handleCopyInviteLink = () => {
     if (!inviteResult?.invite_token) return;
     const url = buildInviteSetupUrl(
-      window.location.origin,
+      ownerPortalBase,
       inviteResult.invite_token,
       inviteResult.user?.email || ''
     );
@@ -136,6 +148,8 @@ export default function AdminFleetPage({ machines, onRefreshAll }) {
     setTimeout(() => setCopied(false), 2500);
   };
 
+  const ownerMap = new Map(owners.map((o) => [String(o.id), o]));
+
   return (
     <div className="space-y-8">
       <div>
@@ -143,7 +157,7 @@ export default function AdminFleetPage({ machines, onRefreshAll }) {
           Fleet & Owner Administration
         </h2>
         <p className="text-xs text-slate-500 mt-0.5">
-          Admin-only controls: invite customer owners with single-use SHA-256 tokens, assign or
+          Super Admin controls: invite customer owners with single-use SHA-256 tokens, assign or
           unassign machines in real time, and register new vending kiosks.
         </p>
       </div>
@@ -174,7 +188,7 @@ export default function AdminFleetPage({ machines, onRefreshAll }) {
                 Invite Customer Owner
               </h3>
               <p className="text-xs text-slate-500">
-                Generates a single-use 24-hour invitation token (stored as SHA-256 hash in Firestore)
+                Generates a single-use 24-hour invitation token targeting the Owner Portal
               </p>
             </div>
           </div>
@@ -189,7 +203,7 @@ export default function AdminFleetPage({ machines, onRefreshAll }) {
                 required
                 value={inviteName}
                 onChange={(e) => setInviteName(e.target.value)}
-                placeholder="e.g. Apex Corporate Cafés"
+                placeholder="e.g. Apex Corporate Cafes"
                 className="w-full px-3.5 py-2 rounded-xl border border-[#EED9C4] bg-[#FAF6F0]/50 text-sm"
               />
             </div>
@@ -250,6 +264,9 @@ export default function AdminFleetPage({ machines, onRefreshAll }) {
               <div className="font-mono text-[11px] break-all bg-white p-2.5 rounded-lg border border-amber-200 text-[#2C1E17]">
                 {inviteResult.invite_token}
               </div>
+              <div className="text-[11px] text-amber-800">
+                Setup link target: <span className="font-mono font-semibold">{ownerPortalBase}</span>
+              </div>
               <button
                 type="button"
                 onClick={handleCopyInviteLink}
@@ -288,7 +305,7 @@ export default function AdminFleetPage({ machines, onRefreshAll }) {
                 required
                 value={newMachId}
                 onChange={(e) => setNewMachId(e.target.value)}
-                placeholder="e.g. CFX-MC-04"
+                placeholder="e.g. CFX-MC-05"
                 className="w-full px-3.5 py-2 rounded-xl border border-[#EED9C4] bg-[#FAF6F0]/50 text-sm font-mono"
               />
             </div>
@@ -302,7 +319,7 @@ export default function AdminFleetPage({ machines, onRefreshAll }) {
                 required
                 value={newMachName}
                 onChange={(e) => setNewMachName(e.target.value)}
-                placeholder="e.g. Kiosk-Four"
+                placeholder="e.g. Kiosk-Five"
                 className="w-full px-3.5 py-2 rounded-xl border border-[#EED9C4] bg-[#FAF6F0]/50 text-sm"
               />
             </div>
@@ -352,38 +369,50 @@ export default function AdminFleetPage({ machines, onRefreshAll }) {
               <tr className="bg-[#FAF6F0] text-[11px] font-semibold uppercase tracking-wider text-[#8C6246] border-b border-[#EED9C4]">
                 <th className="py-3.5 px-5">Machine</th>
                 <th className="py-3.5 px-5">Location</th>
-                <th className="py-3.5 px-5">Current Owner ID</th>
+                <th className="py-3.5 px-5">Current Owner</th>
                 <th className="py-3.5 px-5">Assign / Unassign Owner</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#EED9C4]/60 text-sm">
-              {machines.map((m) => (
-                <tr key={m.id} className="hover:bg-[#FAF6F0]/50">
-                  <td className="py-3.5 px-5">
-                    <div className="font-bold text-[#2C1E17]">{m.machine_name}</div>
-                    <div className="text-xs font-mono text-[#8C6246]">{m.id}</div>
-                  </td>
-                  <td className="py-3.5 px-5 text-xs text-slate-600">{m.location}</td>
-                  <td className="py-3.5 px-5 font-mono text-xs text-slate-700">
-                    {m.owner_id || <span className="text-slate-400 italic">Unassigned</span>}
-                  </td>
-                  <td className="py-3.5 px-5">
-                    <select
-                      disabled={assigningMachineId === m.id}
-                      value={m.owner_id || ''}
-                      onChange={(e) => handleAssignOwner(m.id, e.target.value || null)}
-                      className="px-3 py-1.5 rounded-xl border border-[#EED9C4] bg-[#FAF6F0] text-xs font-semibold text-[#2C1E17]"
-                    >
-                      <option value="">— Unassigned —</option>
-                      {owners.map((o) => (
-                        <option key={o.id} value={o.id}>
-                          {o.name} ({o.email})
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                </tr>
-              ))}
+              {machines.map((m) => {
+                const matchedOwner = m.owner_id ? ownerMap.get(String(m.owner_id)) : null;
+                return (
+                  <tr key={m.id} className="hover:bg-[#FAF6F0]/50">
+                    <td className="py-3.5 px-5">
+                      <div className="font-bold text-[#2C1E17]">{m.machine_name}</div>
+                      <div className="text-xs font-mono text-[#8C6246]">{m.id}</div>
+                    </td>
+                    <td className="py-3.5 px-5 text-xs text-slate-600">{m.location}</td>
+                    <td className="py-3.5 px-5 text-xs">
+                      {m.owner_id ? (
+                        <div>
+                          <div className="font-semibold text-[#2C1E17]">
+                            {matchedOwner ? matchedOwner.name : 'Assigned Owner'}
+                          </div>
+                          <div className="font-mono text-[11px] text-slate-500">{m.owner_id}</div>
+                        </div>
+                      ) : (
+                        <span className="text-slate-400 italic">Unassigned</span>
+                      )}
+                    </td>
+                    <td className="py-3.5 px-5">
+                      <select
+                        disabled={assigningMachineId === m.id}
+                        value={m.owner_id || ''}
+                        onChange={(e) => handleAssignOwner(m.id, e.target.value || null)}
+                        className="px-3 py-1.5 rounded-xl border border-[#EED9C4] bg-[#FAF6F0] text-xs font-semibold text-[#2C1E17]"
+                      >
+                        <option value="">— Unassigned —</option>
+                        {owners.map((o) => (
+                          <option key={o.id} value={o.id}>
+                            {o.name} ({o.email})
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -398,7 +427,7 @@ export default function AdminFleetPage({ machines, onRefreshAll }) {
           </h3>
         </div>
 
-        {loadingOwners ? (
+        {loadingOwners && owners.length === 0 ? (
           <div className="p-8 text-center text-xs text-slate-500">Loading owners...</div>
         ) : owners.length === 0 ? (
           <div className="p-8 text-center text-xs text-slate-500">

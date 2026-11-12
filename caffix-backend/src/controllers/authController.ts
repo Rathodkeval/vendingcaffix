@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { getDB } from '../config/db';
 import { AuthRequest } from '../middleware/auth';
-import { BadRequestError, UnauthorizedError, NotFoundError } from '../utils/errors';
+import { BadRequestError, UnauthorizedError, ForbiddenError, NotFoundError } from '../utils/errors';
 import {
   syncUserToFirebase,
   getAuthoritativeUserByEmail,
@@ -94,7 +94,7 @@ export const login = async (
   res: Response,
   next: NextFunction
 ): Promise<void> => {
-  const { email, password, machine_id } = req.body;
+  const { email, password, machine_id, portal } = req.body;
   const db = getDB();
 
   try {
@@ -117,6 +117,31 @@ export const login = async (
       return next(new UnauthorizedError('Invalid credentials'));
     }
 
+    const normalizedPortal = typeof portal === 'string' ? portal.trim().toLowerCase() : undefined;
+    if (normalizedPortal === 'owner') {
+      if (user.role === 'admin') {
+        logger.warn(`Blocked admin login attempt on Owner portal: ${normalizedEmail}`);
+        return next(
+          new ForbiddenError(
+            'Administrator accounts cannot sign into the Machine Owner Dashboard. Please use the CAFFIX Admin Dashboard.'
+          )
+        );
+      }
+      if (user.role !== 'owner') {
+        logger.warn(`Blocked ${user.role} login attempt on Owner portal: ${normalizedEmail}`);
+        return next(
+          new ForbiddenError('Access denied: This account does not have Machine Owner permissions.')
+        );
+      }
+    } else if (normalizedPortal === 'admin') {
+      if (user.role !== 'admin') {
+        logger.warn(`Blocked ${user.role} login attempt on Admin portal: ${normalizedEmail}`);
+        return next(
+          new ForbiddenError('Access denied: This portal is restricted to CAFFIX Super Admin accounts.')
+        );
+      }
+    }
+
     let resolvedMachineId: string | undefined = undefined;
     if (user.role === 'kiosk' && machine_id) {
       const machine = await ensureMachineRegisteredInLocalDB(machine_id);
@@ -135,6 +160,7 @@ export const login = async (
         email: user.email,
         role: user.role,
         name: user.name,
+        ...(normalizedPortal ? { portal: normalizedPortal } : {}),
         ...(resolvedMachineId ? { machine_id: resolvedMachineId } : {})
       },
       JWT_SECRET,
@@ -146,7 +172,7 @@ export const login = async (
         ? await getLiveAssignedMachineIds(userId, user.role, db)
         : undefined;
 
-    logger.info(`User logged in: ${normalizedEmail} (role: ${user.role})${resolvedMachineId ? ` (machine: ${resolvedMachineId})` : ''}`);
+    logger.info(`User logged in: ${normalizedEmail} (role: ${user.role})${normalizedPortal ? ` (portal: ${normalizedPortal})` : ''}${resolvedMachineId ? ` (machine: ${resolvedMachineId})` : ''}`);
 
     res.status(200).json({
       status: 'success',
@@ -156,6 +182,7 @@ export const login = async (
         name: user.name,
         email: user.email,
         role: user.role,
+        ...(normalizedPortal ? { portal: normalizedPortal } : {}),
         ...(resolvedMachineId ? { machine_id: resolvedMachineId } : {}),
         ...(assignedMachines !== undefined ? { assigned_machines: assignedMachines } : {})
       }
@@ -350,6 +377,10 @@ export const setupPassword = async (
     }
 
     const user = outcome.user;
+    if (user.role !== 'owner') {
+      return next(new ForbiddenError('Invitation setup is restricted to customer owner accounts.'));
+    }
+
     const userId = String(user.id);
     const assignedMachines = await getLiveAssignedMachineIds(userId, user.role, db);
 
@@ -358,7 +389,8 @@ export const setupPassword = async (
         id: userId,
         email: user.email,
         role: user.role,
-        name: user.name
+        name: user.name,
+        portal: 'owner'
       },
       JWT_SECRET,
       { expiresIn: '24h' }
@@ -448,9 +480,35 @@ export const getMe = async (
       return next(new UnauthorizedError('Authentication required'));
     }
 
+    const requestedPortal =
+      typeof req.query.portal === 'string' ? req.query.portal.trim().toLowerCase() : '';
+    if (requestedPortal && requestedPortal !== 'admin' && requestedPortal !== 'owner') {
+      return next(new BadRequestError(`Invalid portal parameter: "${requestedPortal}"`));
+    }
+
     const user = await getAuthoritativeUserById(req.user.id, db);
     const userId = user ? String(user.id) : String(req.user.id);
     const role = user ? user.role : req.user.role;
+
+    if (requestedPortal === 'owner') {
+      if (role === 'admin' || req.user.portal === 'admin') {
+        return next(
+          new ForbiddenError(
+            'Administrator accounts cannot access the Machine Owner Dashboard. Please use the CAFFIX Admin Dashboard.'
+          )
+        );
+      }
+      if (role !== 'owner') {
+        return next(new ForbiddenError('Access denied: Machine Owner role is required.'));
+      }
+    } else if (requestedPortal === 'admin') {
+      if (role !== 'admin' || req.user.portal === 'owner') {
+        return next(
+          new ForbiddenError('Access denied: This portal is restricted to CAFFIX Super Admin accounts.')
+        );
+      }
+    }
+
     const assignedMachines = await getLiveAssignedMachineIds(userId, role, db);
 
     res.status(200).json({

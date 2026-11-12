@@ -85,19 +85,6 @@ export function extractInviteFromHash(hashString = '') {
   return { token, email };
 }
 
-/**
- * Builds an owner invitation setup URL using a URL fragment (`#setup_token=...&email=...`).
- */
-export function buildInviteSetupUrl(origin, inviteToken, email = '') {
-  const base = String(origin || '').replace(/\/+$/, '');
-  const fragmentParams = new URLSearchParams();
-  fragmentParams.set('setup_token', String(inviteToken || '').trim());
-  if (email && String(email).trim()) {
-    fragmentParams.set('email', String(email).trim());
-  }
-  return `${base}/#${fragmentParams.toString()}`;
-}
-
 export class ApiError extends Error {
   constructor(message, status, data = null) {
     super(message);
@@ -146,7 +133,7 @@ export const ownerApi = {
   login: (email, password, baseUrl) =>
     apiFetch('/auth/login', {
       method: 'POST',
-      body: { email, password },
+      body: { email, password, portal: 'owner' },
       skipAuthExpirationHandler: true,
       baseUrl
     }),
@@ -175,7 +162,7 @@ export const ownerApi = {
     }),
 
   getMe: (token, baseUrl) =>
-    apiFetch('/auth/me', {
+    apiFetch('/auth/me?portal=owner', {
       method: 'GET',
       token,
       baseUrl
@@ -239,43 +226,6 @@ export const ownerApi = {
       token,
       baseUrl
     });
-  },
-
-  // Admin-Only Fleet & Owner Management
-  getOwners: (token, baseUrl) =>
-    apiFetch('/auth/owners', {
-      method: 'GET',
-      token,
-      baseUrl
-    }),
-
-  inviteOwner: ({ name, email, machine_ids }, token, baseUrl) =>
-    apiFetch('/auth/owners/invite', {
-      method: 'POST',
-      body: { name, email, machine_ids },
-      token,
-      baseUrl
-    }),
-
-  assignMachineOwner: (machineId, ownerId, token, baseUrl) =>
-    apiFetch(`/machines/${encodeURIComponent(machineId)}/owner`, {
-      method: 'PATCH',
-      body: { owner_id: ownerId || null },
-      token,
-      baseUrl
-    }),
-
-  registerMachine: ({ id, machine_name, location, kiosk_token }, token, baseUrl) =>
-    apiFetch('/machines/register', {
-      method: 'POST',
-      body: {
-        id,
-        machine_name,
-        location,
-        ...(kiosk_token ? { kiosk_token } : {})
-      },
-      token,
-      baseUrl
-    })
+  }
 };
 

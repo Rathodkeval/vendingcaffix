@@ -10,7 +10,6 @@ import {
   ownerApi,
   resolveApiBaseUrl,
   extractInviteFromHash,
-  buildInviteSetupUrl,
   ApiError
 } from '../services/api.js';
 import {
@@ -26,6 +25,23 @@ const require = createRequire(import.meta.url);
 
 const PORT = 5097;
 const TEST_BASE_URL = `http://127.0.0.1:${PORT}/api`;
+
+async function backendRequest(endpoint, { method = 'GET', body, token } = {}) {
+  const headers = {};
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+  }
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  const response = await fetch(`${TEST_BASE_URL}${endpoint}`, {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined
+  });
+  const payload = await response.json().catch(() => ({}));
+  return { status: response.status, ok: response.ok, payload };
+}
 
 function computeRazorpaySignature(razorpayOrderId, razorpayPaymentId) {
   const secret = (process.env.RAZORPAY_KEY_SECRET || 'mockSecret987654321').trim();
@@ -117,24 +133,60 @@ async function runStage5Tests() {
       'CORS must block untrusted third-party origins and never return *'
     );
 
-    const adminLogin = await ownerApi.login('admin@caffix.com', 'admin123', TEST_BASE_URL);
-    const adminToken = adminLogin.token;
-    assert.strictEqual(adminLogin.data.role, 'admin');
+    // Verify ownerApi no longer exposes admin fleet management helpers
+    assert.strictEqual(ownerApi.getOwners, undefined, 'ownerApi must not expose getOwners');
+    assert.strictEqual(ownerApi.inviteOwner, undefined, 'ownerApi must not expose inviteOwner');
+    assert.strictEqual(ownerApi.assignMachineOwner, undefined, 'ownerApi must not expose assignMachineOwner');
+    assert.strictEqual(ownerApi.registerMachine, undefined, 'ownerApi must not expose registerMachine');
 
-    const adminMe = await ownerApi.getMe(adminToken, TEST_BASE_URL);
-    assert.strictEqual(adminMe.data.role, 'admin');
-    assert.ok(adminMe.data.assigned_machines.length >= 4, 'Admin must see all 4 machines');
-    assert.ok(adminMe.data.assigned_machines.includes('CFX-MC-04'), 'Admin must see CFX-MC-04');
+    // Verify Admin account cannot sign into Owner Dashboard (403 Forbidden)
+    let adminRejectedFromOwnerLogin = false;
+    try {
+      await ownerApi.login('admin@caffix.com', 'admin123', TEST_BASE_URL);
+    } catch (err) {
+      adminRejectedFromOwnerLogin = err instanceof ApiError && err.status === 403;
+    }
+    assert.ok(adminRejectedFromOwnerLogin, 'Owner portal login must reject admin account with 403 Forbidden');
 
-    // Ensure machines are RUNNING and refilled via PATCH /machines/:id/status and POST /machines/:id/refill
-    await ownerApi.updateMachineMode('CFX-MC-01', 'RUNNING', adminToken, TEST_BASE_URL);
-    await ownerApi.updateMachineMode('CFX-MC-02', 'RUNNING', adminToken, TEST_BASE_URL);
-    await ownerApi.updateMachineMode('CFX-MC-03', 'RUNNING', adminToken, TEST_BASE_URL);
-    await ownerApi.updateMachineMode('CFX-MC-04', 'RUNNING', adminToken, TEST_BASE_URL);
-    await ownerApi.refillMachineInventory('CFX-MC-01', 'ALL', adminToken, TEST_BASE_URL);
-    await ownerApi.refillMachineInventory('CFX-MC-02', 'ALL', adminToken, TEST_BASE_URL);
-    await ownerApi.refillMachineInventory('CFX-MC-04', 'ALL', adminToken, TEST_BASE_URL);
-    console.log('   PASS: CORS allowlist, Admin login and full machine access verified.');
+    // Direct admin login (simulating caffix-admin setup only)
+    const directAdminLogin = await backendRequest('/auth/login', {
+      method: 'POST',
+      body: { email: 'admin@caffix.com', password: 'admin123', portal: 'admin' }
+    });
+    assert.strictEqual(directAdminLogin.status, 200);
+    const adminToken = directAdminLogin.payload.token;
+    assert.strictEqual(directAdminLogin.payload.data.role, 'admin');
+
+    // Verify admin token is rejected by owner portal session endpoint (?portal=owner)
+    const adminRejectedOnOwnerMe = await backendRequest('/auth/me?portal=owner', {
+      token: adminToken
+    });
+    assert.strictEqual(adminRejectedOnOwnerMe.status, 403, 'GET /api/auth/me?portal=owner must reject admin token with 403');
+
+    const adminMe = await backendRequest('/auth/me?portal=admin', { token: adminToken });
+    assert.strictEqual(adminMe.status, 200);
+    assert.strictEqual(adminMe.payload.data.role, 'admin');
+    assert.ok(adminMe.payload.data.assigned_machines.length >= 4, 'Admin must see all 4 machines');
+    assert.ok(adminMe.payload.data.assigned_machines.includes('CFX-MC-04'), 'Admin must see CFX-MC-04');
+
+    // Ensure machines are RUNNING and refilled via admin API before testing owner workflows
+    for (const machineId of ['CFX-MC-01', 'CFX-MC-02', 'CFX-MC-03', 'CFX-MC-04']) {
+      const modeRes = await backendRequest(`/machines/${machineId}/status`, {
+        method: 'PATCH',
+        body: { desired_mode: 'RUNNING' },
+        token: adminToken
+      });
+      assert.strictEqual(modeRes.status, 200);
+    }
+    for (const machineId of ['CFX-MC-01', 'CFX-MC-02', 'CFX-MC-04']) {
+      const refillRes = await backendRequest(`/machines/${machineId}/refill`, {
+        method: 'POST',
+        body: { ingredient: 'ALL' },
+        token: adminToken
+      });
+      assert.strictEqual(refillRes.status, 200);
+    }
+    console.log('   PASS: CORS allowlist, portal isolation (admin rejected on owner portal), and test fixture setup verified.');
 
     // 4. Invite Owner A (assigned multiple machines: CFX-MC-01 & CFX-MC-02) and Owner B (assigned CFX-MC-03)
     console.log('3. Testing Owner invitation (#setup_token URL fragment), password setup, and password change...');
@@ -142,17 +194,19 @@ async function runStage5Tests() {
     const emailA = `owner.stage5.a.${ts}@caffix.com`;
     const emailB = `owner.stage5.b.${ts}@caffix.com`;
 
-    const inviteA = await ownerApi.inviteOwner(
-      {
+    const inviteARes = await backendRequest('/auth/owners/invite', {
+      method: 'POST',
+      body: {
         name: 'Stage 5 Multi-Machine Owner A',
         email: emailA,
         machine_ids: ['CFX-MC-01', 'CFX-MC-02']
       },
-      adminToken,
-      TEST_BASE_URL
-    );
+      token: adminToken
+    });
+    assert.strictEqual(inviteARes.status, 201);
+    const inviteA = inviteARes.payload;
 
-    // Verify backend setup_url and frontend buildInviteSetupUrl use URL fragment (#setup_token=...)
+    // Verify backend setup_url uses URL fragment (#setup_token=...)
     assert.ok(
       inviteA.data.setup_url.startsWith('/#setup_token='),
       `Backend setup_url must use URL fragment #setup_token=... (got ${inviteA.data.setup_url})`
@@ -162,15 +216,7 @@ async function runStage5Tests() {
       'Backend setup_url must not put token in query string'
     );
 
-    const constructedInviteUrl = buildInviteSetupUrl(
-      'https://caffix-owner.vercel.app',
-      inviteA.data.invite_token,
-      emailA
-    );
-    assert.ok(
-      constructedInviteUrl.startsWith('https://caffix-owner.vercel.app/#setup_token='),
-      'Frontend invite link builder must use #setup_token=... fragment'
-    );
+    const constructedInviteUrl = `https://caffix-owner.vercel.app${inviteA.data.setup_url}`;
     const urlObj = new URL(constructedInviteUrl);
     assert.strictEqual(urlObj.search, '', 'Invite URL must have empty query string');
     const parsedFromHash = extractInviteFromHash(urlObj.hash);
@@ -178,8 +224,9 @@ async function runStage5Tests() {
     assert.strictEqual(parsedFromHash.email, emailA);
 
     // Verify Admin GET /api/auth/owners shows must_change_password = true before setup
-    const ownersBeforeSetup = await ownerApi.getOwners(adminToken, TEST_BASE_URL);
-    const pendingOwnerA = ownersBeforeSetup.data.find((o) => o.email === emailA);
+    const ownersBeforeSetup = await backendRequest('/auth/owners', { token: adminToken });
+    assert.strictEqual(ownersBeforeSetup.status, 200);
+    const pendingOwnerA = ownersBeforeSetup.payload.data.find((o) => o.email === emailA);
     assert.ok(pendingOwnerA, 'Invited Owner A must appear in GET /api/auth/owners');
     assert.strictEqual(pendingOwnerA.must_change_password, true);
 
@@ -208,15 +255,17 @@ async function runStage5Tests() {
     );
     assert.strictEqual(changePwdRes.status, 'success');
 
-    const inviteB = await ownerApi.inviteOwner(
-      {
+    const inviteBRes = await backendRequest('/auth/owners/invite', {
+      method: 'POST',
+      body: {
         name: 'Stage 5 Single-Machine Owner B',
         email: emailB,
         machine_ids: ['CFX-MC-03']
       },
-      adminToken,
-      TEST_BASE_URL
-    );
+      token: adminToken
+    });
+    assert.strictEqual(inviteBRes.status, 201);
+    const inviteB = inviteBRes.payload;
     const setupB = await ownerApi.setupPassword(
       {
         token: inviteB.data.invite_token,
@@ -262,9 +311,7 @@ async function runStage5Tests() {
       () => ownerApi.getMachineProducts('CFX-MC-03', tokenA, TEST_BASE_URL),
       () => ownerApi.updateMachineProduct('CFX-MC-03', 1, { price: 999, is_available: false }, tokenA, TEST_BASE_URL),
       () => ownerApi.refillMachineInventory('CFX-MC-03', 'ALL', tokenA, TEST_BASE_URL),
-      () => ownerApi.getOrders('CFX-MC-03', tokenA, TEST_BASE_URL),
-      () => ownerApi.getOwners(tokenA, TEST_BASE_URL),
-      () => ownerApi.assignMachineOwner('CFX-MC-03', loginA.data.id, tokenA, TEST_BASE_URL)
+      () => ownerApi.getOrders('CFX-MC-03', tokenA, TEST_BASE_URL)
     ];
 
     for (const checkFn of crossTenantChecks) {
@@ -274,7 +321,20 @@ async function runStage5Tests() {
       } catch (err) {
         rejected403 = err instanceof ApiError && err.status === 403;
       }
-      assert.ok(rejected403, 'Cross-tenant or non-admin request by Owner A must be rejected with 403 Forbidden');
+      assert.ok(rejected403, 'Cross-tenant request by Owner A must be rejected with 403 Forbidden');
+    }
+
+    const ownerAdminRouteChecks = [
+      await backendRequest('/auth/owners', { token: tokenA }),
+      await backendRequest('/machines/CFX-MC-03/owner', {
+        method: 'PATCH',
+        body: { owner_id: loginA.data.id },
+        token: tokenA
+      }),
+      await backendRequest('/auth/me?portal=admin', { token: tokenA })
+    ];
+    for (const checkRes of ownerAdminRouteChecks) {
+      assert.strictEqual(checkRes.status, 403, 'Owner must receive 403 on admin endpoints');
     }
 
     console.log('   PASS: Owner sees only assigned machines; all cross-owner & admin actions blocked with 403.');
@@ -437,28 +497,24 @@ async function runStage5Tests() {
       'AuthPage must not read invite tokens from window.location.search query string'
     );
 
-    const adminFleetSource = fs.readFileSync(
-      path.resolve(__dirname, '../pages/AdminFleetPage.jsx'),
-      'utf-8'
-    );
-    assert.ok(
-      adminFleetSource.includes('buildInviteSetupUrl'),
-      'AdminFleetPage must use buildInviteSetupUrl (#setup_token fragment)'
-    );
-    assert.ok(
-      !adminFleetSource.includes('?setup_token='),
-      'AdminFleetPage must never construct ?setup_token= query string links'
-    );
+    const adminFleetPath = path.resolve(__dirname, '../pages/AdminFleetPage.jsx');
+    assert.ok(!fs.existsSync(adminFleetPath), 'AdminFleetPage.jsx must be removed from caffix-owner');
+    assert.ok(!sidebarSource.includes('Fleet & Owners'), 'caffix-owner Sidebar must not contain Fleet & Owners');
+    const appSource = fs.readFileSync(path.resolve(__dirname, '../App.jsx'), 'utf-8');
+    assert.ok(!appSource.includes('AdminFleetPage'), 'caffix-owner App must not import AdminFleetPage');
 
     const distIndexHtml = path.resolve(__dirname, '../../dist/index.html');
     assert.ok(fs.existsSync(distIndexHtml), 'Production build dist/index.html must exist');
     console.log('   PASS: Responsive navigation, #setup_token security & production build bundle verified.');
 
     // Cleanup test state
-    await ownerApi.assignMachineOwner('CFX-MC-01', null, adminToken, TEST_BASE_URL);
-    await ownerApi.assignMachineOwner('CFX-MC-02', null, adminToken, TEST_BASE_URL);
-    await ownerApi.assignMachineOwner('CFX-MC-03', null, adminToken, TEST_BASE_URL);
-    await ownerApi.assignMachineOwner('CFX-MC-04', null, adminToken, TEST_BASE_URL);
+    for (const machineId of ['CFX-MC-01', 'CFX-MC-02', 'CFX-MC-03', 'CFX-MC-04']) {
+      await backendRequest(`/machines/${machineId}/owner`, {
+        method: 'PATCH',
+        body: { owner_id: null },
+        token: adminToken
+      });
+    }
     await db.run('DELETE FROM machine_products');
 
     console.log('\nALL STAGE 5 OWNER DASHBOARD TESTS PASSED SUCCESSFULLY!\n');

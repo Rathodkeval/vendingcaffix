@@ -5,6 +5,7 @@ import { getDB } from '../config/db';
 import { getAuthoritativeMachineState } from '../utils/firebase';
 
 export type UserRole = 'admin' | 'kiosk' | 'owner';
+export type PortalType = 'admin' | 'owner';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -13,6 +14,7 @@ export interface AuthRequest extends Request {
     role: UserRole;
     name: string;
     machine_id?: string;
+    portal?: PortalType;
   };
 }
 

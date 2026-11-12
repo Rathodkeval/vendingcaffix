@@ -15,7 +15,6 @@ import MachineDetailsPage from './pages/MachineDetailsPage';
 import ProductsPricingPage from './pages/ProductsPricingPage';
 import OrdersPage from './pages/OrdersPage';
 import SalesReportsPage from './pages/SalesReportsPage';
-import AdminFleetPage from './pages/AdminFleetPage';
 
 export default function App() {
   const [authChecking, setAuthChecking] = useState(true);
@@ -57,10 +56,14 @@ export default function App() {
       }
 
       const profile = meResult.value?.data;
-      if (!profile || (profile.role !== 'owner' && profile.role !== 'admin')) {
+      if (!profile || profile.role !== 'owner') {
         clearStoredToken();
         setUser(null);
-        setSessionNotice('Your account does not have permission to access the Owner Portal.');
+        setSessionNotice(
+          profile?.role === 'admin'
+            ? 'Administrator accounts cannot access the Machine Owner Dashboard. Please sign in through the CAFFIX Admin Dashboard.'
+            : 'Your account does not have permission to access the Owner Portal.'
+        );
         return;
       }
 
@@ -224,8 +227,7 @@ export default function App() {
     'machine-details': 'Machine Details & Telemetry',
     pricing: 'Products & Machine-Specific Pricing',
     orders: 'Order History',
-    reports: 'Sales & Revenue Analytics',
-    admin: 'Fleet & Owner Administration'
+    reports: 'Sales & Revenue Analytics'
   };
 
   return (
@@ -333,13 +335,6 @@ export default function App() {
 
           {activeTab === 'reports' && (
             <SalesReportsPage orders={orders} machines={machines} />
-          )}
-
-          {activeTab === 'admin' && user.role === 'admin' && (
-            <AdminFleetPage
-              machines={machines}
-              onRefreshAll={() => loadDashboardData(false)}
-            />
           )}
         </main>
       </div>
