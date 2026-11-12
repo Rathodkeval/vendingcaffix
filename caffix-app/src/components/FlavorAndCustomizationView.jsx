@@ -1,6 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { ArrowLeft, ChevronLeft, ChevronRight, Check, Droplet, Milk } from 'lucide-react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { ArrowLeft, ChevronLeft, ChevronRight, Check, Droplet, Milk, AlertCircle } from 'lucide-react';
 import { motion, LayoutGroup } from 'framer-motion';
+import {
+  DEFAULT_PRICES,
+  DEFAULT_AVAILABILITY,
+  getDrinkStockStatus
+} from '../utils/kioskSync';
 
 const COFFEES = [
   {
@@ -42,7 +47,9 @@ const COFFEES = [
 
 export default function FlavorAndCustomizationView({
   initialStep = 'SELECTION',
-  prices = { classic: 100, vanilla: 100, hazelnut: 100, irish: 100, mocha: 100 },
+  prices = DEFAULT_PRICES,
+  availability = DEFAULT_AVAILABILITY,
+  inventory = null,
   selectedCoffee: propSelectedCoffee,
   onSelectCoffee,
   onConfirmOrder,
@@ -66,10 +73,18 @@ export default function FlavorAndCustomizationView({
   const rightPanelRef = useRef(null);
   const isAnimatingRef = useRef(false);
 
-  const coffeesWithPrices = COFFEES.map((c) => ({
-    ...c,
-    price: prices[c.id] ?? c.price
-  }));
+  const coffeesWithPrices = useMemo(
+    () =>
+      COFFEES.map((c) => {
+        const stockStatus = getDrinkStockStatus(c.id, availability, inventory);
+        return {
+          ...c,
+          price: prices?.[c.id] ?? c.price,
+          ...stockStatus
+        };
+      }),
+    [prices, availability, inventory]
+  );
 
   const activeCoffee = coffeesWithPrices[activeIndex];
 
@@ -90,20 +105,30 @@ export default function FlavorAndCustomizationView({
     }
   }, [initialStep]);
 
-  // Sync propSelectedCoffee with selectedCoffeeState and activeIndex
+  // Sync active selection & customization state when propSelectedCoffee changes
   useEffect(() => {
     if (!propSelectedCoffee) {
       setSelectedCoffeeState(coffeesWithPrices[2]);
       setBase('water');
       setActiveIndex(2);
     } else {
-      setSelectedCoffeeState(propSelectedCoffee);
       const idx = coffeesWithPrices.findIndex((c) => c.id === propSelectedCoffee.id);
       if (idx !== -1) {
+        setSelectedCoffeeState(coffeesWithPrices[idx]);
         setActiveIndex(idx);
+      } else {
+        setSelectedCoffeeState(propSelectedCoffee);
       }
     }
   }, [propSelectedCoffee]);
+
+  // Keep currently displayed coffee price and availability synchronized during live polls
+  useEffect(() => {
+    setSelectedCoffeeState((prev) => {
+      const targetId = propSelectedCoffee?.id || prev?.id || coffeesWithPrices[2].id;
+      return coffeesWithPrices.find((c) => c.id === targetId) || prev;
+    });
+  }, [coffeesWithPrices, propSelectedCoffee]);
 
   // Update selected coffee when activeIndex changes in selection mode
   const handleNext = () => {
@@ -138,7 +163,7 @@ export default function FlavorAndCustomizationView({
 
   // Main Shared Element GPU Animation Handler
   const triggerSelectAnimation = (coffeeToSelect) => {
-    if (isAnimatingRef.current) return;
+    if (isAnimatingRef.current || !coffeeToSelect?.canOrder) return;
     isAnimatingRef.current = true;
 
     // 0. Disable touch interactions immediately (0ms) to prevent double clicks
@@ -348,6 +373,12 @@ export default function FlavorAndCustomizationView({
             </div>
 
             {/* Total Amount & Confirm Order Button */}
+            {!selectedCoffee.canOrder && (
+              <div className="mb-2 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-bold">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{selectedCoffee.statusLabel} on this machine</span>
+              </div>
+            )}
             <div className="flex items-center justify-between border-t border-cream pt-2">
               <div className="flex flex-col">
                 <span className="text-[10px] uppercase font-bold text-coffee-light tracking-wide">TOTAL AMOUNT</span>
@@ -356,19 +387,25 @@ export default function FlavorAndCustomizationView({
                 </div>
               </div>
               <button
-                onClick={() =>
+                disabled={!selectedCoffee.canOrder}
+                onClick={() => {
+                  if (!selectedCoffee.canOrder) return;
                   onConfirmOrder({
                     name: selectedCoffee.name,
                     size: 'Medium',
                     price: currentPrice,
                     extraSugar: 1,
                     base
-                  })
-                }
-                className="py-2.5 px-6 bg-coffee-dark hover:bg-coffee-dark/90 text-cream-light font-bold text-sm rounded-xl shadow-md transition-all flex items-center gap-2 cursor-pointer active:scale-95"
+                  });
+                }}
+                className={`py-2.5 px-6 font-bold text-sm rounded-xl shadow-md transition-all flex items-center gap-2 ${
+                  selectedCoffee.canOrder
+                    ? 'bg-coffee-dark hover:bg-coffee-dark/90 text-cream-light cursor-pointer active:scale-95'
+                    : 'bg-gray-300 text-gray-600 cursor-not-allowed shadow-none'
+                }`}
               >
                 <Check className="w-4 h-4" />
-                <span>Confirm Order</span>
+                <span>{selectedCoffee.statusLabel || 'Confirm Order'}</span>
               </button>
             </div>
           </motion.div>
@@ -451,13 +488,26 @@ export default function FlavorAndCustomizationView({
                         src={coffee.image}
                         alt={coffee.name}
                         style={{ willChange: 'transform, opacity' }}
-                        className="w-full h-full object-contain pointer-events-none drop-shadow-md"
+                        className={`w-full h-full object-contain pointer-events-none drop-shadow-md transition-all ${
+                          !coffee.canOrder ? 'opacity-55 grayscale-[40%]' : ''
+                        }`}
                         transition={{
                           type: 'tween',
                           ease: [0.22, 1, 0.36, 1],
                           duration: 0.65
                         }}
                       />
+                    )}
+                    {!coffee.canOrder && (
+                      <span
+                        className={`absolute bottom-2 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wide shadow-sm border ${
+                          coffee.disabledReason === 'out_of_stock'
+                            ? 'bg-amber-100/95 text-amber-900 border-amber-300'
+                            : 'bg-red-100/95 text-red-800 border-red-300'
+                        }`}
+                      >
+                        {coffee.statusLabel}
+                      </span>
                     )}
                   </div>
 
@@ -484,13 +534,18 @@ export default function FlavorAndCustomizationView({
           <div className="carousel-non-selected flex flex-col items-center select-none pb-1 z-10">
             {/* Static Choose Your Sip Button */}
             <button
+              disabled={!activeCoffee.canOrder}
               onClick={(e) => {
                 e.stopPropagation();
                 triggerSelectAnimation(activeCoffee);
               }}
-              className="px-4 py-1.5 bg-coffee hover:bg-coffee-dark text-cream-light font-bold text-xs rounded-full shadow-lg border border-coffee-light/10 transition-all active:scale-95 cursor-pointer mb-3"
+              className={`px-4 py-1.5 font-bold text-xs rounded-full shadow-lg border transition-all mb-3 ${
+                activeCoffee.canOrder
+                  ? 'bg-coffee hover:bg-coffee-dark text-cream-light border-coffee-light/10 active:scale-95 cursor-pointer'
+                  : 'bg-gray-300 text-gray-600 border-gray-300 shadow-none cursor-not-allowed'
+              }`}
             >
-              Choose Your Sip
+              {activeCoffee.statusLabel || 'Choose Your Sip'}
             </button>
 
             <div className="flex justify-center gap-2">

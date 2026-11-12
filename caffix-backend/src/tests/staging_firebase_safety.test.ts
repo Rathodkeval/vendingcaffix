@@ -707,6 +707,83 @@ async function runTests() {
       }
     );
 
+    // -------------------------------------------------------------------------
+    // TEST 10: Firestore authoritative hydration without updated_at & override pruning
+    // -------------------------------------------------------------------------
+    await step(
+      '10. Firestore overrides and estimated_inventory hydrate cold/warm MockDatabase even when timestamps are omitted or overrides are removed',
+      async () => {
+        const syncFirestore = new FakeFirestore();
+        process.env.VERCEL = '1';
+        process.env.VERCEL_ENV = 'preview';
+        process.env.PRODUCTION_FIREBASE_PROJECT_ID = 'vendingcaffix';
+        process.env.STAGING_FIREBASE_PROJECT_ID = 'caffix-staging';
+        process.env.FIREBASE_PROJECT_ID = 'caffix-staging';
+        process.env.FIREBASE_CLIENT_EMAIL = 'firebase-adminsdk@caffix-staging.iam.gserviceaccount.com';
+        process.env.FIREBASE_PRIVATE_KEY = '-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----';
+
+        resetMockDatabaseForColdStartSimulation();
+        setFirestoreForTesting({
+          firestoreInstance: syncFirestore,
+          initError: null,
+          clearStores: true
+        });
+
+        const loginRes = await request('POST', '/api/auth/login', {
+          body: { email: 'admin@caffix.com', password: 'admin123' }
+        });
+        assert.strictEqual(loginRes.status, 200);
+        const adminTok = loginRes.data.token;
+
+        // Warm the MockDatabase cache with CFX-MC-01 product 2 override = 125
+        const putProd = await request('PUT', '/api/machines/CFX-MC-01/products/2', {
+          headers: { Authorization: `Bearer ${adminTok}` },
+          body: { price: 125, is_available: false }
+        });
+        assert.strictEqual(putProd.status, 200);
+
+        // Simulate out-of-band Firestore edit (missing inventory_updated_at & older/missing product updated_at)
+        const mc01Doc = syncFirestore.collections.get('machines')?.get('CFX-MC-01');
+        assert.ok(mc01Doc, 'CFX-MC-01 must exist in FakeFirestore');
+        await syncFirestore.collection('machines').doc('CFX-MC-01').set({
+          ...mc01Doc,
+          updated_at: '2026-01-01T00:00:00.000Z',
+          inventory_updated_at: '',
+          estimated_inventory: {
+            milk_level: 3,
+            coffee_level: 88,
+            vanilla_level: 4,
+            hazelnut_level: 90,
+            irish_level: 90,
+            mocha_level: 90,
+            water_level: 85
+          },
+          products: {
+            '1': { product_id: 1, price: 165, is_available: true, updated_at: '2026-01-01T00:00:00.000Z' }
+            // Notice product '2' override was removed from Firestore!
+          }
+        });
+
+        // Verify warm MockDatabase sees Firestore's product 1 = 165 and product 2 reverted to default 100 / available=true
+        const kioskRes = await request('GET', '/api/products?machine_id=CFX-MC-01');
+        assert.strictEqual(kioskRes.status, 200);
+        const classic = kioskRes.data.data.find((p: any) => Number(p.id) === 1);
+        const vanilla = kioskRes.data.data.find((p: any) => Number(p.id) === 2);
+        assert.strictEqual(classic.price, 165);
+        assert.strictEqual(vanilla.price, 100);
+        assert.strictEqual(vanilla.is_available, true);
+
+        // Verify cold start against same Firestore picks up depleted milk_level=3 despite missing inventory_updated_at
+        resetMockDatabaseForColdStartSimulation();
+        const statusRes = await request('GET', '/api/machine-status?machine_id=CFX-MC-01', {
+          headers: { Authorization: `Bearer ${adminTok}` }
+        });
+        assert.strictEqual(statusRes.status, 200);
+        assert.strictEqual(statusRes.data.data.inventory.milk, 3);
+        assert.strictEqual(statusRes.data.data.inventory.vanilla, 4);
+      }
+    );
+
     console.log(`\nALL ${passed} STAGING FIREBASE SAFETY & SEEDING TESTS PASSED!\n`);
   } finally {
     setFirestoreForTesting({ firestoreInstance: null, initError: null, clearStores: true });

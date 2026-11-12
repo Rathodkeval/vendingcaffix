@@ -461,7 +461,9 @@ class MockDatabase {
           inv.updated_at = new Date().toISOString();
         }
       } else if (query.includes('water_level = water_level - ?')) {
-        const [water, coffee, milk, vanilla, hazelnut, irish, mocha, machineId] = params;
+        const [water, coffee, milk, vanilla, hazelnut, irish, mocha] = params;
+        const machineId = params[params.length - 1];
+        const passedUpdatedAt = params.length >= 9 ? params[7] : null;
         const inv = mockStore.inventory.find(i => i.machine_id === machineId);
         if (inv) {
           inv.water_level -= water;
@@ -471,17 +473,18 @@ class MockDatabase {
           inv.hazelnut_level -= hazelnut;
           inv.irish_level -= irish;
           inv.mocha_level -= mocha;
-          inv.updated_at = new Date().toISOString();
+          inv.updated_at = passedUpdatedAt || new Date().toISOString();
         }
       } else {
         const machineId = params[params.length - 1];
+        const passedUpdatedAt = params.length >= 2 ? params[0] : null;
         const inv = mockStore.inventory.find(i => i.machine_id === machineId);
         if (inv) {
           const match = query.match(/update inventory set (\w+_level) = 100/);
           if (match) {
             const field = match[1];
             (inv as any)[field] = 100;
-            inv.updated_at = new Date().toISOString();
+            inv.updated_at = passedUpdatedAt || new Date().toISOString();
           }
         }
       }
@@ -494,7 +497,12 @@ class MockDatabase {
     }
 
     if (query.includes('delete from machine_products')) {
-      if (query.includes('where machine_id = ?')) {
+      if (query.includes('where machine_id = ? and product_id = ?')) {
+        const [machineId, productId] = params;
+        mockStore.machine_products = mockStore.machine_products.filter(
+          mp => !(mp.machine_id === machineId && mp.product_id === Number(productId))
+        );
+      } else if (query.includes('where machine_id = ?')) {
         const [machineId] = params;
         mockStore.machine_products = mockStore.machine_products.filter(
           mp => mp.machine_id !== machineId
@@ -597,7 +605,7 @@ class MockDatabase {
     }
 
     if (query.includes('insert into inventory') || query.includes('insert or ignore into inventory')) {
-      const [machine_id] = params;
+      const [machine_id, updated_at] = params;
       if (!mockStore.inventory.some(i => i.machine_id === machine_id)) {
         mockStore.inventory.push({
           id: mockStore.inventory.length + 1,
@@ -609,7 +617,7 @@ class MockDatabase {
           irish_level: 100,
           mocha_level: 100,
           water_level: 100,
-          updated_at: new Date().toISOString()
+          updated_at: updated_at || '2026-01-01T00:00:00.000Z'
         });
       }
       return { lastID: mockStore.inventory.length };

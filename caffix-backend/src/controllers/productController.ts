@@ -9,6 +9,7 @@ import {
   updateMachineProductInFirebase
 } from '../utils/firebase';
 import { ensureMachineRegisteredInLocalDB } from './kioskController';
+import { setNoStoreHeaders } from '../utils/cache';
 import logger from '../utils/logger';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'caffix_vending_secret_key_2026_xyz';
@@ -16,27 +17,54 @@ const JWT_SECRET = process.env.JWT_SECRET || 'caffix_vending_secret_key_2026_xyz
 function resolveOptionalMachineIdFromRequest(req: Request): {
   machineId: string | null;
   explicitlyProvided: boolean;
+  tokenMachineId: string | null;
+  tokenRole: string | null;
 } {
-  if (typeof req.query.machine_id === 'string' && req.query.machine_id.trim() !== '') {
-    return { machineId: req.query.machine_id.trim(), explicitlyProvided: true };
-  }
-
-  const headerMachineId = req.headers['x-machine-id'];
-  if (typeof headerMachineId === 'string' && headerMachineId.trim() !== '') {
-    return { machineId: headerMachineId.trim(), explicitlyProvided: true };
-  }
+  let tokenMachineId: string | null = null;
+  let tokenRole: string | null = null;
 
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.split(' ')[1];
     try {
       const decoded = jwt.verify(token, JWT_SECRET) as any;
+      if (typeof decoded?.role === 'string') {
+        tokenRole = decoded.role;
+      }
       if (decoded?.machine_id && typeof decoded.machine_id === 'string') {
-        return { machineId: decoded.machine_id.trim(), explicitlyProvided: false };
+        tokenMachineId = decoded.machine_id.trim();
       }
     } catch {
       // Ignore invalid optional token on public product listing
     }
+  }
+
+  if (typeof req.query.machine_id === 'string' && req.query.machine_id.trim() !== '') {
+    return {
+      machineId: req.query.machine_id.trim(),
+      explicitlyProvided: true,
+      tokenMachineId,
+      tokenRole
+    };
+  }
+
+  const headerMachineId = req.headers['x-machine-id'];
+  if (typeof headerMachineId === 'string' && headerMachineId.trim() !== '') {
+    return {
+      machineId: headerMachineId.trim(),
+      explicitlyProvided: true,
+      tokenMachineId,
+      tokenRole
+    };
+  }
+
+  if (tokenMachineId) {
+    return {
+      machineId: tokenMachineId,
+      explicitlyProvided: false,
+      tokenMachineId,
+      tokenRole
+    };
   }
 
   const referer = req.headers.referer;
@@ -45,14 +73,19 @@ function resolveOptionalMachineIdFromRequest(req: Request): {
       const url = new URL(referer);
       const refMachineId = url.searchParams.get('machine_id');
       if (refMachineId && /^CFX-MC-\d{2,4}$/.test(refMachineId.trim())) {
-        return { machineId: refMachineId.trim(), explicitlyProvided: false };
+        return {
+          machineId: refMachineId.trim(),
+          explicitlyProvided: false,
+          tokenMachineId,
+          tokenRole
+        };
       }
     } catch {
       // Ignore malformed referer
     }
   }
 
-  return { machineId: null, explicitlyProvided: false };
+  return { machineId: null, explicitlyProvided: false, tokenMachineId, tokenRole };
 }
 
 export const getProducts = async (
@@ -62,7 +95,23 @@ export const getProducts = async (
 ): Promise<void> => {
   const db = getDB();
   try {
-    const { machineId, explicitlyProvided } = resolveOptionalMachineIdFromRequest(req);
+    setNoStoreHeaders(res);
+    const { machineId, explicitlyProvided, tokenMachineId, tokenRole } =
+      resolveOptionalMachineIdFromRequest(req);
+
+    if (
+      tokenRole === 'kiosk' &&
+      tokenMachineId &&
+      explicitlyProvided &&
+      machineId &&
+      machineId !== tokenMachineId
+    ) {
+      return next(
+        new ForbiddenError(
+          `Kiosk session bound to ${tokenMachineId} cannot query products for ${machineId}`
+        )
+      );
+    }
 
     if (machineId) {
       if (!/^CFX-MC-\d{2,4}$/.test(machineId)) {

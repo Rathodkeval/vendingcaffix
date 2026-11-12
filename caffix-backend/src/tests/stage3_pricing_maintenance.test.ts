@@ -538,8 +538,108 @@ async function runTests() {
     assert.strictEqual(syncedInFlight?.amount, 115);
     console.log('  PASS: New orders rejected during MAINTENANCE while already-initiated/paid orders complete safely.');
 
-    // Restore CFX-MC-01 to RUNNING mode and clean up test overrides/assignments after test completion
+    // Restore CFX-MC-01 to RUNNING mode before running live kiosk synchronization & inventory validation checks
     await apiRequest('PATCH', '/machines/CFX-MC-01/status', { desired_mode: 'RUNNING' }, ownerAToken);
+
+    // -------------------------------------------------------------------------
+    // Test 13: Cache-Control no-store headers + Kiosk machine_id isolation on /products
+    // -------------------------------------------------------------------------
+    console.log('Test 13: Dynamic endpoints emit no-store cache headers & enforce kiosk machine isolation...');
+    const headerEndpoints = [
+      { path: '/products?machine_id=CFX-MC-01', token: kiosk1Token },
+      { path: '/machine-status?machine_id=CFX-MC-01', token: kiosk1Token },
+      { path: '/machines/CFX-MC-01/products', token: ownerAToken },
+      { path: '/machines/CFX-MC-01/inventory', token: ownerAToken }
+    ];
+    for (const endpoint of headerEndpoints) {
+      const rawRes = await fetch(`${BASE_URL}${endpoint.path}`, {
+        headers: { Authorization: `Bearer ${endpoint.token}` }
+      });
+      assert.strictEqual(rawRes.status, 200, `Expected 200 for ${endpoint.path}`);
+      const cacheControl = (rawRes.headers.get('cache-control') || '').toLowerCase();
+      assert(cacheControl.includes('no-store'), `${endpoint.path} must return Cache-Control: no-store`);
+      assert.strictEqual((rawRes.headers.get('pragma') || '').toLowerCase(), 'no-cache');
+      const varyHeader = (rawRes.headers.get('vary') || '').toLowerCase();
+      assert(varyHeader.includes('authorization') && varyHeader.includes('x-machine-id'));
+    }
+
+    const crossMachineProdRes = await apiRequest(
+      'GET',
+      '/products?machine_id=CFX-MC-02',
+      undefined,
+      kiosk1Token
+    );
+    assert.strictEqual(
+      crossMachineProdRes.status,
+      403,
+      'Kiosk bound to CFX-MC-01 must receive 403 when querying /products for CFX-MC-02'
+    );
+    console.log('  PASS: no-store cache headers present on all dynamic endpoints and cross-machine kiosk /products blocked.');
+
+    // -------------------------------------------------------------------------
+    // Test 14: Pre-payment inventory validation in POST /api/orders/create
+    // -------------------------------------------------------------------------
+    console.log('Test 14: POST /api/orders/create rejects depleted ingredients BEFORE Razorpay order creation...');
+    await apiRequest(
+      'PUT',
+      '/machines/CFX-MC-01/products/2',
+      { price: 115, is_available: true },
+      ownerAToken
+    );
+    await getDB().run(
+      'UPDATE inventory SET milk_level = ?, coffee_level = ?, vanilla_level = ?, hazelnut_level = ?, irish_level = ?, mocha_level = ?, water_level = ?, updated_at = ? WHERE machine_id = ?',
+      [2, 100, 100, 100, 100, 100, 100, new Date().toISOString(), 'CFX-MC-01']
+    );
+    const lowMilkOrder = await apiRequest(
+      'POST',
+      '/orders/create',
+      { product_id: 2, amount: 115, machine_id: 'CFX-MC-01', extra_sugar: true, base: 'milk' },
+      kiosk1Token
+    );
+    assert.strictEqual(lowMilkOrder.status, 400);
+    assert.strictEqual(lowMilkOrder.data.message, 'Ingredients depleted: Milk refill required');
+
+    // Verify Vanilla syrup threshold (< 8) blocks Vanilla Velvet even when base ingredients are full
+    await getDB().run(
+      'UPDATE inventory SET milk_level = ?, coffee_level = ?, vanilla_level = ?, hazelnut_level = ?, irish_level = ?, mocha_level = ?, water_level = ?, updated_at = ? WHERE machine_id = ?',
+      [100, 100, 7, 100, 100, 100, 100, new Date().toISOString(), 'CFX-MC-01']
+    );
+    const lowVanillaOrder = await apiRequest(
+      'POST',
+      '/orders/create',
+      { product_id: 2, amount: 115, machine_id: 'CFX-MC-01', extra_sugar: true, base: 'water' },
+      kiosk1Token
+    );
+    assert.strictEqual(lowVanillaOrder.status, 400);
+    assert.strictEqual(lowVanillaOrder.data.message, 'Ingredients depleted: Vanilla syrup refill required');
+
+    // Classic Crest (product_id 1) does not use vanilla syrup and must still be allowed when only vanilla is low
+    const classicWhileVanillaLow = await apiRequest(
+      'POST',
+      '/orders/create',
+      { product_id: 1, amount: 100, machine_id: 'CFX-MC-01', extra_sugar: true, base: 'water' },
+      kiosk1Token
+    );
+    assert.strictEqual(classicWhileVanillaLow.status, 201);
+
+    // Refill Vanilla via owner endpoint and verify Vanilla Velvet order creation succeeds again
+    const refillVanilla = await apiRequest(
+      'POST',
+      '/machines/CFX-MC-01/refill',
+      { ingredient: 'vanilla' },
+      ownerAToken
+    );
+    assert.strictEqual(refillVanilla.status, 200);
+    const vanillaAfterRefill = await apiRequest(
+      'POST',
+      '/orders/create',
+      { product_id: 2, amount: 115, machine_id: 'CFX-MC-01', extra_sugar: true, base: 'water' },
+      kiosk1Token
+    );
+    assert.strictEqual(vanillaAfterRefill.status, 201);
+    console.log('  PASS: Depleted ingredients block checkout pre-payment and recover immediately on refill.');
+
+    // Clean up test overrides/assignments after test completion
     await apiRequest('PATCH', '/machines/CFX-MC-01/owner', { owner_id: null }, adminToken);
     await apiRequest('PATCH', '/machines/CFX-MC-02/owner', { owner_id: null }, adminToken);
     await getDB().run('DELETE FROM machine_products');

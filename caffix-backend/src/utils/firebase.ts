@@ -628,8 +628,42 @@ export async function getAuthoritativeMachineProducts(
       ? remoteMachine.products
       : null;
 
-  // Hydrate local `machine_products` table from Firestore overrides if newer or missing locally
-  if (remoteProductsMap) {
+  // Hydrate local `machine_products` table from Firestore overrides when Firestore is authoritative or newer
+  if (firestore && remoteMachine) {
+    const remoteProductIds = new Set<number>();
+    if (remoteProductsMap) {
+      for (const [key, rawVal] of Object.entries(remoteProductsMap)) {
+        const val = rawVal as any;
+        const pid = Number(val?.product_id ?? key);
+        if (!Number.isInteger(pid) || pid <= 0 || val?.price === undefined) continue;
+
+        remoteProductIds.add(pid);
+        const remotePrice = Number(val.price);
+        const remoteAvailInt = val.is_available === false || val.is_available === 0 ? 0 : 1;
+        const remoteUpdated = val.updated_at || remoteMachine?.updated_at || new Date().toISOString();
+
+        await db.run(
+          'INSERT OR REPLACE INTO machine_products (machine_id, product_id, price, is_available, updated_at) VALUES (?, ?, ?, ?, ?)',
+          [machineId, pid, remotePrice, remoteAvailInt, remoteUpdated]
+        );
+      }
+    }
+
+    // Prune stale local overrides that were removed from Firestore for this machine
+    const existingLocal = await db.all(
+      'SELECT product_id FROM machine_products WHERE machine_id = ?',
+      [machineId]
+    );
+    for (const row of existingLocal) {
+      const localPid = Number(row.product_id);
+      if (!remoteProductIds.has(localPid)) {
+        await db.run(
+          'DELETE FROM machine_products WHERE machine_id = ? AND product_id = ?',
+          [machineId, localPid]
+        );
+      }
+    }
+  } else if (remoteProductsMap) {
     for (const [key, rawVal] of Object.entries(remoteProductsMap)) {
       const val = rawVal as any;
       const pid = Number(val?.product_id ?? key);
@@ -939,7 +973,12 @@ export async function getAuthoritativeMachineState(machineId: string, db: any): 
   if (remoteInv && typeof remoteInv === 'object') {
     const remoteInvUpdated = remoteMachine?.inventory_updated_at || remoteMachine?.updated_at || '';
     const localInvUpdated = localInv?.updated_at || '2026-01-01T00:00:00.000Z';
-    if (!localInvUpdated || remoteInvUpdated >= localInvUpdated) {
+    const shouldHydrateInv =
+      Boolean(firestore) ||
+      !localInvUpdated ||
+      !remoteInvUpdated ||
+      remoteInvUpdated >= localInvUpdated;
+    if (shouldHydrateInv) {
       await db.run(
         'UPDATE inventory SET milk_level = ?, coffee_level = ?, vanilla_level = ?, hazelnut_level = ?, irish_level = ?, mocha_level = ?, water_level = ?, updated_at = ? WHERE machine_id = ?',
         [

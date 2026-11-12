@@ -19,6 +19,7 @@ import {
   computeConnectionStatus
 } from '../utils/firebase';
 import { ensureMachineRegisteredInLocalDB } from './kioskController';
+import { setNoStoreHeaders } from '../utils/cache';
 import logger from '../utils/logger';
 
 export const getMachines = async (
@@ -304,6 +305,7 @@ export const getInventoryByMachine = async (
     if (!inv) {
       return next(new NotFoundError(`Inventory for machine ID ${machine_id} not found`));
     }
+    setNoStoreHeaders(res);
     res.status(200).json({
       status: 'success',
       data: {
@@ -347,7 +349,7 @@ export const refillMachineInventory = async (
         return next(new BadRequestError(`Invalid ingredient name: ${ingredient}`));
       }
 
-      await db.run(`UPDATE inventory SET ${field} = 100 WHERE machine_id = ?`, [machine_id]);
+      await db.run(`UPDATE inventory SET ${field} = 100, updated_at = ? WHERE machine_id = ?`, [nowIso, machine_id]);
     }
 
     logger.info(`Refilled ${ingredient} for machine ID ${machine_id}`);
@@ -386,6 +388,7 @@ export const getMachineStatus = async (
     const machineId = queryMachineId || tokenMachineId || 'CFX-MC-01';
     const machine = await assertMachineOwnershipOrAdmin(req.user, machineId);
 
+    setNoStoreHeaders(res);
     res.status(200).json({
       status: 'success',
       data: {
@@ -424,6 +427,7 @@ export const getMachineProducts = async (
   try {
     const machine = await assertMachineOwnershipOrAdmin(req.user, id);
     const products = await getAuthoritativeMachineProducts(machine.id, db);
+    setNoStoreHeaders(res);
     res.status(200).json({
       status: 'success',
       data: products

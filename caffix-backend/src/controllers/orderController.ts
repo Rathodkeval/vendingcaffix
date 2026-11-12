@@ -13,6 +13,7 @@ import {
   updateMachineInventoryInFirebase
 } from '../utils/firebase';
 import { ensureMachineRegisteredInLocalDB } from './kioskController';
+import { assertSufficientInventory } from '../utils/inventory';
 const Razorpay = require('razorpay');
 
 const razorpayKeyId = (process.env.RAZORPAY_KEY_ID || '').trim();
@@ -212,6 +213,14 @@ export const createOrder = async (
       );
     }
 
+    // 3b. Validate authoritative machine inventory BEFORE creating Razorpay order
+    const machineInventory = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [resolvedMachineId]);
+    assertSufficientInventory(
+      machineInventory,
+      machineProduct.name || product.name,
+      resolvedMachineId
+    );
+
     // 4. Create order in PENDING status with authoritative machine-specific price
     const orderId = 'CFX-' + Math.floor(10000 + Math.random() * 90000);
     const todayStr = new Date().toISOString();
@@ -327,47 +336,7 @@ async function performOrderStatusUpdateInternal(id: string, status: string): Pro
       throw new NotFoundError(`Product ID ${order.product_id} not found`);
     }
 
-    const lowerName = product.name.toLowerCase();
-    const waterNeeded = 5;
-    const coffeeNeeded = 6;
-    const milkNeeded = 5;
-    let vanillaNeeded = 0;
-    let hazelnutNeeded = 0;
-    let irishNeeded = 0;
-    let mochaNeeded = 0;
-
-    if (lowerName.includes('vanilla')) {
-      vanillaNeeded = 8;
-    } else if (lowerName.includes('hazel')) {
-      hazelnutNeeded = 8;
-    } else if (lowerName.includes('irish')) {
-      irishNeeded = 8;
-    } else if (lowerName.includes('mocha')) {
-      mochaNeeded = 8;
-    }
-
-    // Verify availability
-    if (inventory.water_level < waterNeeded) {
-      throw new BadRequestError('Ingredients depleted: Water refill required');
-    }
-    if (inventory.coffee_level < coffeeNeeded) {
-      throw new BadRequestError('Ingredients depleted: Coffee beans refill required');
-    }
-    if (inventory.milk_level < milkNeeded) {
-      throw new BadRequestError('Ingredients depleted: Milk refill required');
-    }
-    if (vanillaNeeded > 0 && inventory.vanilla_level < vanillaNeeded) {
-      throw new BadRequestError('Ingredients depleted: Vanilla syrup refill required');
-    }
-    if (hazelnutNeeded > 0 && inventory.hazelnut_level < hazelnutNeeded) {
-      throw new BadRequestError('Ingredients depleted: Hazelnut syrup refill required');
-    }
-    if (irishNeeded > 0 && inventory.irish_level < irishNeeded) {
-      throw new BadRequestError('Ingredients depleted: Irish syrup refill required');
-    }
-    if (mochaNeeded > 0 && inventory.mocha_level < mochaNeeded) {
-      throw new BadRequestError('Ingredients depleted: Mocha syrup refill required');
-    }
+    const requirements = assertSufficientInventory(inventory, product.name, order.machine_id);
 
     // Deduct inventory levels
     await db.run(
@@ -378,9 +347,20 @@ async function performOrderStatusUpdateInternal(id: string, status: string): Pro
         vanilla_level = vanilla_level - ?,
         hazelnut_level = hazelnut_level - ?,
         irish_level = irish_level - ?,
-        mocha_level = mocha_level - ?
+        mocha_level = mocha_level - ?,
+        updated_at = ?
        WHERE machine_id = ?`,
-      [waterNeeded, coffeeNeeded, milkNeeded, vanillaNeeded, hazelnutNeeded, irishNeeded, mochaNeeded, order.machine_id]
+      [
+        requirements.water,
+        requirements.coffee,
+        requirements.milk,
+        requirements.vanilla,
+        requirements.hazelnut,
+        requirements.irish,
+        requirements.mocha,
+        new Date().toISOString(),
+        order.machine_id
+      ]
     );
 
     const updatedInventory = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [order.machine_id]);

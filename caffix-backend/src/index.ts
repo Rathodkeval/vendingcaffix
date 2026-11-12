@@ -66,7 +66,7 @@ app.use(
       }
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-razorpay-signature'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-razorpay-signature', 'x-machine-id'],
     credentials: true
   })
 );
