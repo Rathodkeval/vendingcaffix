@@ -337,4 +337,84 @@ Or register new machines dynamically via `POST /api/machines/register` with an A
 ### 8.3 Raspberry Pi Order Processor Configuration
 On each Raspberry Pi, set `MACHINE_ID` in its environment (e.g. `MACHINE_ID="CFX-MC-01"` on Machine 1, `MACHINE_ID="CFX-MC-02"` on Machine 2) and use `MachineOrderProcessor` from `rpi_order_processor.py` to filter Firestore `orders` by `machine_id` and claim orders atomically via Firestore transactions.
 
+---
+
+## 9. Scheduled Pending Order Reconciliation (Vercel Hobby + External Scheduler)
+
+To ensure abandoned checkouts or payments interrupted by kiosk power/network loss do not remain `PENDING` indefinitely, the backend exposes a dedicated reconciliation endpoint secured by `CRON_SECRET`.
+
+Because the project runs on the **Vercel Hobby (Free)** plan—which does not support five-minute native Vercel Crons—`vercel.json` intentionally omits any `"crons"` configuration. Trigger reconciliation every **5 minutes** using an external HTTP scheduler (for example, cron-job.org, GitHub Actions `schedule`, Google Cloud Scheduler, or an external systemd/cron job).
+
+### 9.1 External Scheduler Configuration
+- **Production URL**: `https://vendingcaffix.vercel.app/api/cron/reconcile-orders`
+- **HTTP Method**: `GET` (`POST` is also accepted for manual authenticated runs)
+- **Schedule / Interval**: Every 5 minutes (`*/5 * * * *`)
+- **Required Header**:
+  ```http
+  Authorization: Bearer <CRON_SECRET>
+  ```
+- **Overlap & Concurrency Protection**: Concurrent invocations share an atomic Firestore lease (`system_locks/order_reconciliation`) and per-order Firestore transactions, returning HTTP `200` (`skipped_due_to_active_run: true`) if another run already holds the lease and preventing duplicate inventory deductions.
+
+### 9.2 Server-Side Environment Variables (`vendingcaffix` Production ONLY)
+- **`CRON_SECRET` (Required, Production-only)**:
+  - Generate a cryptographically random secret of at least 16 characters (recommended 64 hex chars: `openssl rand -hex 32`).
+  - Configure `CRON_SECRET` **only** in the **`vendingcaffix`** Vercel project (`Production` environment) and inside your external scheduler's encrypted/masked secret store.
+  - Do **not** add `CRON_SECRET` to `caffix-app`, `caffix-admin`, `caffix-owner`, any `VITE_*` build variable, Preview/Staging variables, browser code, or application logs.
+- **Optional Tuning Environment Variables**:
+  - `ORDER_RECONCILIATION_MAX_AGE_MINUTES` (default: `10`, minimum: `1`): Only `PENDING` orders older than this threshold are evaluated.
+  - `ORDER_RECONCILIATION_BATCH_LIMIT` (default: `50`, range: `1..200`): Maximum eligible orders processed per invocation, oldest first.
+
+### 9.3 Safe Endpoint Verification
+Verify without exposing `CRON_SECRET` in logs or shared terminal history:
+1. **Unauthenticated check** (expects HTTP `401 Unauthorized`, or `503` if `CRON_SECRET` is unset):
+   ```bash
+   curl -i https://vendingcaffix.vercel.app/api/cron/reconcile-orders
+   ```
+2. **Authenticated check** (pass the secret via a temporary environment variable and avoid printing the command/secret in CI logs; expects HTTP `200` JSON summary):
+   ```bash
+   curl -sS -f -X GET "https://vendingcaffix.vercel.app/api/cron/reconcile-orders" \
+     -H "Authorization: Bearer ${CRON_SECRET}"
+   ```
+   A healthy response returns counters (`scanned`, `eligible`, `reconciled_paid`, `marked_failed`, `marked_cancelled`, `kept_pending`, `skipped`, `too_recent`, `errors`, `cutoff_iso`) without modifying recent (`< 10m`) or non-`PENDING` orders.
+
+### 9.4 Reconciliation Rules & Environment Isolation
+- **Captured payment** (payment `captured` or Razorpay order `paid` with full `amount_paid`): atomically transitions order to `PAID` and deducts inventory once.
+- **Definitively failed payment** (only `failed` payment attempts and no active/captured payment): transitions order to `FAILED` without inventory deduction.
+- **Abandoned checkout** (Razorpay order `created` with `attempts === 0` and zero payment records): transitions order to `CANCELLED` without inventory deduction.
+- **Authorized / in-flight (`created`) payment or Razorpay API error**: preserves `PENDING` for retry on a future run.
+- **Strict Isolation**: `VERCEL_ENV=production` requires `FIREBASE_PROJECT_ID=caffix-vending` and real Live/configured Razorpay credentials + `CRON_SECRET` (otherwise returns HTTP `503`). `VERCEL_ENV=preview` requires `FIREBASE_PROJECT_ID=caffix-staging` and rejects `rzp_live_*` Razorpay Live keys with HTTP `503`.
+
+---
+
+## 10. Production Super Admin Bootstrap (One-Time Local Script)
+
+In `VERCEL_ENV=production`, automatic creation of default staging users (`users/1` / `admin123`) is disabled. Before signing into `caffix-admin` for the first time on Production, run the one-time local bootstrap script from a trusted interactive terminal.
+
+### 10.1 Safety Precautions
+- Run **only** after rotating and provisioning the Production `caffix-vending` Firebase service account credentials.
+- Never commit `.env` files, service-account JSONs, private keys, or passwords.
+- Never pipe a plaintext password via stdin or pass it on the command line (password entry requires interactive hidden TTY input).
+- The script enforces `FIREBASE_PROJECT_ID=caffix-vending`, refuses `caffix-staging` or Preview environments, and executes an atomic create-only Firestore transaction (aborting if the email or any existing Super Admin already exists).
+
+### 10.2 Execution Steps
+1. Export only the required Production Firebase Admin SDK variables in your **ephemeral** shell session (PowerShell example; close terminal afterward):
+   ```powershell
+   $env:VERCEL_ENV = "production"
+   $env:FIREBASE_PROJECT_ID = "caffix-vending"
+   $env:FIREBASE_CLIENT_EMAIL = "<your-production-service-account-email>"
+   $env:FIREBASE_PRIVATE_KEY = "<your-production-private-key>"
+   ```
+2. Run the bootstrap script interactively from `caffix-backend/`:
+   ```powershell
+   Push-Location caffix-backend
+   npx.cmd ts-node --transpile-only src\scripts\bootstrapProdSuperAdmin.ts
+   Pop-Location
+   ```
+   (Or run the compiled JavaScript build: `node caffix-backend\dist\scripts\bootstrapProdSuperAdmin.js`.)
+3. When prompted:
+   - Type `caffix-vending` to confirm the target project.
+   - Enter Super Admin full name and email.
+   - Enter and confirm a strong password (`>= 12` chars with uppercase, lowercase, digit, and special character; input is hidden).
+4. Close the terminal session to clear ephemeral credentials from memory, then verify login via the **`caffix-admin`** Super Admin portal.
+
 

@@ -1,28 +1,148 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { getDB } from '../config/db';
-import { AuthRequest } from '../middleware/auth';
-import { NotFoundError, BadRequestError, ForbiddenError } from '../utils/errors';
-import { syncMachineToFirebase } from '../utils/firebase';
+import { AuthRequest, assertMachineOwnershipOrAdmin } from '../middleware/auth';
+import { NotFoundError, BadRequestError, ForbiddenError, ConflictError } from '../utils/errors';
+import {
+  syncMachineToFirebase,
+  updateMachineDesiredModeInFirebase,
+  updateMachineHeartbeatInFirebase,
+  updateMachineInventoryInFirebase,
+  updateMachineOwnerInFirebase,
+  updateMachineProductInFirebase,
+  getAuthoritativeMachineState,
+  getAuthoritativeMachinesList,
+  getAuthoritativeMachineProducts,
+  getAuthoritativeMachineProduct,
+  getAuthoritativeUserById,
+  normalizeDesiredMode,
+  desiredModeToLegacyStatus,
+  computeConnectionStatus
+} from '../utils/firebase';
 import { ensureMachineRegisteredInLocalDB } from './kioskController';
+import { setNoStoreHeaders } from '../utils/cache';
 import logger from '../utils/logger';
 
 export const getMachines = async (
-  req: Request,
+  req: AuthRequest,
   res: Response,
   next: NextFunction
 ): Promise<void> => {
   const db = getDB();
   try {
-    const machines = await db.all('SELECT id, machine_name, location, status, last_seen FROM machines');
+    const machines = await getAuthoritativeMachinesList(db);
+
+    const visibleMachines =
+      req.user?.role === 'admin'
+        ? machines
+        : req.user?.role === 'owner'
+        ? machines.filter(
+            (m) => m.owner_id && String(m.owner_id).trim() === String(req.user!.id).trim()
+          )
+        : [];
+
+    const formatted = visibleMachines.map((m) => ({
+      id: m.id,
+      machine_name: m.machine_name,
+      location: m.location,
+      desired_mode: m.desired_mode,
+      connection_status: m.connection_status,
+      status: m.status,
+      last_seen: m.last_seen,
+      owner_id: m.owner_id ?? null,
+      inventory_source: 'software_estimated',
+      estimated_inventory: m.inventory
+    }));
     res.status(200).json({
       status: 'success',
-      data: machines
+      data: formatted
     });
   } catch (error) {
     next(error);
   }
 };
+
+export const getMachineById = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  const id = String(req.params.id);
+  try {
+    const machine = await assertMachineOwnershipOrAdmin(req.user, id);
+    res.status(200).json({
+      status: 'success',
+      data: {
+        id: machine.id,
+        machine_name: machine.machine_name,
+        location: machine.location,
+        desired_mode: machine.desired_mode,
+        connection_status: machine.connection_status,
+        status: machine.status,
+        maintenance: machine.desired_mode === 'MAINTENANCE',
+        last_seen: machine.last_seen,
+        owner_id: machine.owner_id ?? null,
+        inventory_source: 'software_estimated',
+        estimated_inventory: machine.inventory
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const assignMachineOwner = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  const id = String(req.params.id);
+  const { owner_id } = req.body;
+  const db = getDB();
+  try {
+    const machine = await ensureMachineRegisteredInLocalDB(id);
+    if (!machine) {
+      return next(new NotFoundError(`Machine with ID ${id} not found`));
+    }
+
+    let resolvedOwnerId: string | null = null;
+    if (owner_id !== null && owner_id !== undefined && String(owner_id).trim() !== '') {
+      const targetUserId = String(owner_id).trim();
+      const targetUser = await getAuthoritativeUserById(targetUserId, db);
+      if (!targetUser || targetUser.role !== 'owner') {
+        return next(new BadRequestError(`Owner account with ID ${targetUserId} not found`));
+      }
+      resolvedOwnerId = String(targetUser.id);
+    }
+
+    const nowIso = new Date().toISOString();
+    await db.run('UPDATE machines SET owner_id = ?, updated_at = ? WHERE id = ?', [
+      resolvedOwnerId,
+      nowIso,
+      id
+    ]);
+
+    await updateMachineOwnerInFirebase(id, resolvedOwnerId);
+
+    logger.info(`Admin assigned machine ${id} to owner_id=${resolvedOwnerId ?? 'null'}`);
+
+    res.status(200).json({
+      status: 'success',
+      message: resolvedOwnerId
+        ? `Machine ${id} assigned to owner ${resolvedOwnerId}`
+        : `Machine ${id} unassigned from owner`,
+      data: {
+        id,
+        owner_id: resolvedOwnerId,
+        updated_at: nowIso
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const activeMachineRegistrations = new Set<string>();
 
 export const registerMachine = async (
   req: Request,
@@ -30,54 +150,107 @@ export const registerMachine = async (
   next: NextFunction
 ): Promise<void> => {
   const { id, machine_name, location, kiosk_token } = req.body;
+  const machineId = String(id || '').trim();
   const db = getDB();
+
+  if (activeMachineRegistrations.has(machineId)) {
+    return next(new ConflictError(`Registration for machine ID ${machineId} is already in progress`));
+  }
+
+  activeMachineRegistrations.add(machineId);
   try {
-    const existing = await db.get('SELECT id FROM machines WHERE id = ?', [id]);
+    // 1. Check authoritative Firestore/DB state before inserting locally
+    const authoritativeExisting = await getAuthoritativeMachineState(machineId, db);
+    if (authoritativeExisting) {
+      return next(new ConflictError(`Machine with ID ${machineId} already registered`));
+    }
+
+    const existing = await db.get('SELECT id FROM machines WHERE id = ?', [machineId]);
     if (existing) {
-      return next(new BadRequestError(`Machine with ID ${id} already registered`));
+      return next(new ConflictError(`Machine with ID ${machineId} already registered`));
     }
 
     const now = new Date().toISOString();
     const generatedToken = kiosk_token
       ? String(kiosk_token).trim()
       : crypto.randomBytes(15).toString('base64url');
+    const defaultInventory = {
+      milk_level: 100,
+      coffee_level: 100,
+      vanilla_level: 100,
+      hazelnut_level: 100,
+      irish_level: 100,
+      mocha_level: 100,
+      water_level: 100
+    };
 
-    await db.run(
-      'INSERT INTO machines (id, machine_name, location, status, last_seen, kiosk_token) VALUES (?, ?, ?, ?, ?, ?)',
-      [id, machine_name, location, 'online', now, generatedToken]
-    );
+    try {
+      await db.run(
+        'INSERT INTO machines (id, machine_name, location, status, last_seen, kiosk_token, desired_mode, owner_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [machineId, machine_name, location, 'online', '', generatedToken, 'RUNNING', null, now]
+      );
+      await db.run(
+        'INSERT INTO inventory (machine_id, milk_level, coffee_level, vanilla_level, hazelnut_level, irish_level, mocha_level, water_level, updated_at) VALUES (?, 100, 100, 100, 100, 100, 100, 100, ?)',
+        [machineId, now]
+      );
+    } catch (insertErr: any) {
+      const msg = String(insertErr?.message || insertErr || '');
+      if (msg.includes('UNIQUE constraint failed') || msg.includes('SQLITE_CONSTRAINT')) {
+        return next(new ConflictError(`Machine with ID ${machineId} already registered`));
+      }
+      throw insertErr;
+    }
 
-    // Create default full inventory for this machine
-    await db.run(
-      'INSERT INTO inventory (machine_id, milk_level, coffee_level, vanilla_level, hazelnut_level, irish_level, mocha_level, water_level) VALUES (?, 100, 100, 100, 100, 100, 100, 100)',
-      [id]
-    );
+    try {
+      await syncMachineToFirebase(
+        {
+          id: machineId,
+          machine_name,
+          location,
+          desired_mode: 'RUNNING',
+          status: 'online',
+          last_seen: null,
+          kiosk_token: generatedToken,
+          estimated_inventory: defaultInventory,
+          inventory_source: 'software_estimated',
+          inventory_updated_at: now,
+          products: {},
+          updated_at: now
+        },
+        { createOnly: true }
+      );
+    } catch (firebaseErr: any) {
+      // Roll back local DB rows so failed or conflicting registration never leaves partial state
+      await db.run('DELETE FROM inventory WHERE machine_id = ?', [machineId]).catch(() => {});
+      await db.run('DELETE FROM machines WHERE id = ?', [machineId]).catch(() => {});
+      const msg = String(firebaseErr?.message || firebaseErr || '');
+      if (msg.includes('MACHINE_ID_CONFLICT')) {
+        return next(new ConflictError(`Machine with ID ${machineId} already registered`));
+      }
+      throw firebaseErr;
+    }
 
-    await syncMachineToFirebase({
-      id,
-      machine_name,
-      location,
-      status: 'online',
-      last_seen: now,
-      kiosk_token: generatedToken
-    });
-
-    logger.info(`New machine registered: ${machine_name} (${id})`);
+    logger.info(`New machine registered: ${machine_name} (${machineId})`);
 
     res.status(201).json({
       status: 'success',
-      message: 'Machine and default inventory registered successfully',
+      message: 'Machine and default estimated inventory registered successfully',
       data: {
-        id,
+        id: machineId,
         machine_name,
         location,
+        desired_mode: 'RUNNING',
+        connection_status: 'OFFLINE',
         status: 'online',
-        last_seen: now,
-        kiosk_token: generatedToken
+        last_seen: null,
+        kiosk_token: generatedToken,
+        inventory_source: 'software_estimated'
       }
     });
   } catch (error) {
     next(error);
+  } finally {
+    activeMachineRegistrations.delete(machineId);
   }
 };
 
@@ -87,35 +260,72 @@ export const updateMachineStatus = async (
   next: NextFunction
 ): Promise<void> => {
   const id = String(req.params.id);
-  const { status } = req.body;
+  const { desired_mode, status } = req.body;
   const db = getDB();
   try {
-    if (req.user?.role === 'kiosk' && req.user.machine_id && req.user.machine_id !== id) {
-      return next(new ForbiddenError(`Kiosk ${req.user.machine_id} cannot modify status of machine ${id}`));
-    }
+    const machine = await assertMachineOwnershipOrAdmin(req.user, id);
 
-    const machine = await ensureMachineRegisteredInLocalDB(id);
-    if (!machine) {
-      return next(new NotFoundError(`Machine with ID ${id} not found`));
-    }
-
+    const resolvedDesiredMode = normalizeDesiredMode(desired_mode || status);
+    const resolvedLegacyStatus = desiredModeToLegacyStatus(resolvedDesiredMode);
     const now = new Date().toISOString();
+
+    // Update ONLY desired_mode and legacy status in local DB; NEVER overwrite last_seen
     await db.run(
-      'UPDATE machines SET status = ?, last_seen = ? WHERE id = ?',
-      [status, now, id]
+      'UPDATE machines SET desired_mode = ?, status = ?, updated_at = ? WHERE id = ?',
+      [resolvedDesiredMode, resolvedLegacyStatus, now, id]
     );
 
-    await syncMachineToFirebase({
-      ...machine,
-      status,
-      last_seen: now
-    });
+    // Targeted partial write to Firestore: updates desired_mode & status ONLY, preserving last_seen
+    await updateMachineDesiredModeInFirebase(id, resolvedDesiredMode);
 
-    logger.info(`Machine ${id} status updated to ${status}`);
+    const connectionStatus = computeConnectionStatus(machine.last_seen);
+
+    logger.info(
+      `Machine ${id} desired_mode updated to ${resolvedDesiredMode} (connection_status=${connectionStatus}, last_seen=${machine.last_seen})`
+    );
 
     res.status(200).json({
       status: 'success',
-      data: { id, status, last_seen: now }
+      data: {
+        id,
+        desired_mode: resolvedDesiredMode,
+        connection_status: connectionStatus,
+        status: resolvedLegacyStatus,
+        last_seen: machine.last_seen || null
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const recordMachineHeartbeat = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  const id = String(req.params.id);
+  const db = getDB();
+  try {
+    const machine = await assertMachineOwnershipOrAdmin(req.user, id);
+
+    const nowIso = new Date().toISOString();
+
+    // Update ONLY last_seen in local DB; NEVER overwrite desired_mode or status
+    await db.run('UPDATE machines SET last_seen = ? WHERE id = ?', [nowIso, id]);
+
+    // Targeted partial write to Firestore: updates last_seen ONLY, preserving desired_mode
+    await updateMachineHeartbeatInFirebase(id, nowIso);
+
+    res.status(200).json({
+      status: 'success',
+      data: {
+        id,
+        desired_mode: machine.desired_mode,
+        connection_status: 'ONLINE',
+        status: machine.status,
+        last_seen: nowIso
+      }
     });
   } catch (error) {
     next(error);
@@ -130,18 +340,19 @@ export const getInventoryByMachine = async (
   const machine_id = String(req.params.machine_id);
   const db = getDB();
   try {
-    if (req.user?.role === 'kiosk' && req.user.machine_id && req.user.machine_id !== machine_id) {
-      return next(new ForbiddenError(`Kiosk ${req.user.machine_id} cannot access inventory of machine ${machine_id}`));
-    }
+    await assertMachineOwnershipOrAdmin(req.user, machine_id);
 
-    await ensureMachineRegisteredInLocalDB(machine_id);
     const inv = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [machine_id]);
     if (!inv) {
       return next(new NotFoundError(`Inventory for machine ID ${machine_id} not found`));
     }
+    setNoStoreHeaders(res);
     res.status(200).json({
       status: 'success',
-      data: inv
+      data: {
+        ...inv,
+        inventory_source: 'software_estimated'
+      }
     });
   } catch (error) {
     next(error);
@@ -157,16 +368,19 @@ export const refillMachineInventory = async (
   const { ingredient } = req.body; // e.g. "milk", "coffee", "water", "vanilla", "hazelnut", "ALL"
   const db = getDB();
   try {
-    await ensureMachineRegisteredInLocalDB(machine_id);
+    await assertMachineOwnershipOrAdmin(req.user, machine_id);
+
     const inv = await db.get('SELECT id FROM inventory WHERE machine_id = ?', [machine_id]);
     if (!inv) {
       return next(new NotFoundError(`Inventory for machine ID ${machine_id} not found`));
     }
 
+    const nowIso = new Date().toISOString();
+
     if (ingredient === 'ALL') {
       await db.run(
-        'UPDATE inventory SET milk_level = 100, coffee_level = 100, vanilla_level = 100, hazelnut_level = 100, irish_level = 100, mocha_level = 100, water_level = 100 WHERE machine_id = ?',
-        [machine_id]
+        'UPDATE inventory SET milk_level = 100, coffee_level = 100, vanilla_level = 100, hazelnut_level = 100, irish_level = 100, mocha_level = 100, water_level = 100, updated_at = ? WHERE machine_id = ?',
+        [nowIso, machine_id]
       );
     } else {
       const field = `${ingredient}_level`;
@@ -176,16 +390,23 @@ export const refillMachineInventory = async (
         return next(new BadRequestError(`Invalid ingredient name: ${ingredient}`));
       }
 
-      await db.run(`UPDATE inventory SET ${field} = 100 WHERE machine_id = ?`, [machine_id]);
+      await db.run(`UPDATE inventory SET ${field} = 100, updated_at = ? WHERE machine_id = ?`, [nowIso, machine_id]);
     }
 
     logger.info(`Refilled ${ingredient} for machine ID ${machine_id}`);
 
     const updatedInv = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [machine_id]);
+    if (updatedInv) {
+      await updateMachineInventoryInFirebase(machine_id, updatedInv);
+    }
+
     res.status(200).json({
       status: 'success',
       message: `Successfully refilled ${ingredient}`,
-      data: updatedInv
+      data: {
+        ...updatedInv,
+        inventory_source: 'software_estimated'
+      }
     });
   } catch (error) {
     next(error);
@@ -197,7 +418,6 @@ export const getMachineStatus = async (
   res: Response,
   next: NextFunction
 ): Promise<void> => {
-  const db = getDB();
   try {
     const queryMachineId = typeof req.query.machine_id === 'string' ? req.query.machine_id.trim() : '';
     const tokenMachineId = req.user?.machine_id || '';
@@ -207,33 +427,129 @@ export const getMachineStatus = async (
     }
 
     const machineId = queryMachineId || tokenMachineId || 'CFX-MC-01';
-    const machine = await ensureMachineRegisteredInLocalDB(machineId);
-    if (!machine) {
-      return next(new NotFoundError(`Machine with ID ${machineId} not found`));
-    }
+    const machine = await assertMachineOwnershipOrAdmin(req.user, machineId);
 
-    const inventory = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [machineId]);
-    if (!inventory) {
-      return next(new NotFoundError(`Inventory for machine ID ${machineId} not found`));
-    }
-
+    setNoStoreHeaders(res);
     res.status(200).json({
       status: 'success',
       data: {
         machine_id: machine.id,
         name: machine.machine_name,
         location: machine.location,
+        desired_mode: machine.desired_mode,
+        connection_status: machine.connection_status,
         status: machine.status,
+        maintenance: machine.desired_mode === 'MAINTENANCE',
         last_seen: machine.last_seen,
+        inventory_source: 'software_estimated',
         inventory: {
-          milk: inventory.milk_level,
-          coffee: inventory.coffee_level,
-          vanilla: inventory.vanilla_level,
-          hazelnut: inventory.hazelnut_level,
-          irish: inventory.irish_level,
-          mocha: inventory.mocha_level,
-          water: inventory.water_level
+          milk: machine.inventory.milk_level,
+          coffee: machine.inventory.coffee_level,
+          vanilla: machine.inventory.vanilla_level,
+          hazelnut: machine.inventory.hazelnut_level,
+          irish: machine.inventory.irish_level,
+          mocha: machine.inventory.mocha_level,
+          water: machine.inventory.water_level
         }
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getMachineProducts = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  const id = String(req.params.id).trim();
+  const db = getDB();
+  try {
+    const machine = await assertMachineOwnershipOrAdmin(req.user, id);
+    const products = await getAuthoritativeMachineProducts(machine.id, db);
+    setNoStoreHeaders(res);
+    res.status(200).json({
+      status: 'success',
+      data: products
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const updateMachineProduct = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  const id = String(req.params.id).trim();
+  const productIdNum = Number(req.params.productId);
+  const { price, is_available } = req.body;
+  const db = getDB();
+
+  try {
+    const machine = await assertMachineOwnershipOrAdmin(req.user, id);
+
+    if (!Number.isInteger(productIdNum) || productIdNum <= 0) {
+      return next(new BadRequestError(`Invalid product ID: ${req.params.productId}`));
+    }
+
+    const baseProduct = await db.get('SELECT * FROM products WHERE id = ?', [productIdNum]);
+    if (!baseProduct) {
+      return next(new NotFoundError(`Product with ID ${productIdNum} not found`));
+    }
+
+    const currentMachineProduct = await getAuthoritativeMachineProduct(
+      machine.id,
+      productIdNum,
+      db
+    );
+
+    const nextPrice =
+      price !== undefined
+        ? Number(price)
+        : Number(currentMachineProduct?.price ?? baseProduct.price);
+    const nextAvailable =
+      is_available !== undefined
+        ? Boolean(is_available)
+        : Boolean(currentMachineProduct?.is_available ?? true);
+
+    if (!Number.isInteger(nextPrice) || nextPrice <= 0) {
+      return next(new BadRequestError('Price must be a positive integer'));
+    }
+
+    const nowIso = new Date().toISOString();
+
+    await db.run(
+      'INSERT OR REPLACE INTO machine_products (machine_id, product_id, price, is_available, updated_at) VALUES (?, ?, ?, ?, ?)',
+      [machine.id, productIdNum, nextPrice, nextAvailable ? 1 : 0, nowIso]
+    );
+
+    await updateMachineProductInFirebase(machine.id, productIdNum, {
+      price: nextPrice,
+      is_available: nextAvailable,
+      updated_at: nowIso
+    });
+
+    logger.info(
+      `Machine ${machine.id} product ${productIdNum} (${baseProduct.name}) updated: price=₹${nextPrice}, is_available=${nextAvailable}`
+    );
+
+    res.status(200).json({
+      status: 'success',
+      message: 'Machine product updated successfully',
+      data: {
+        id: productIdNum,
+        product_id: productIdNum,
+        machine_id: machine.id,
+        name: baseProduct.name,
+        default_price: Number(baseProduct.price),
+        price: nextPrice,
+        is_available: nextAvailable,
+        description: baseProduct.description,
+        image: baseProduct.image,
+        updated_at: nowIso
       }
     });
   } catch (error) {

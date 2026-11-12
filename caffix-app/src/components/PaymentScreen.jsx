@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { ArrowLeft, RefreshCw, CreditCard, QrCode, Smartphone, Landmark, Check, Wallet } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || (
@@ -7,11 +7,17 @@ const API_BASE = import.meta.env.VITE_API_URL || (
     : '/api'
 );
 
-export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymentFailed, onCancel }) {
+export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymentFailed, onCancel, onDismissed }) {
   const [timeLeft, setTimeLeft] = useState(180); // 3 minutes
   const [activeTab, setActiveTab] = useState('UPI'); // UPI, QR, CARD, NETBANKING
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStatus, setProcessingStatus] = useState('');
+
+  const isVerifyingRef = useRef(false);
+  const isTerminalHandledRef = useRef(false);
+  const cancelInFlightRef = useRef(false);
+  const hasGatewayFailedRef = useRef(false);
+  const launchedRpOrderIdRef = useRef(null);
 
   // Form states for mock checkout
   const [vpa, setVpa] = useState('kiosk01@caffix');
@@ -21,10 +27,79 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
   const [selectedBank, setSelectedBank] = useState('');
   const [selectedWallet, setSelectedWallet] = useState('');
 
+  const notifyCheckoutDismissed = async (reason = 'checkout_dismissed') => {
+    if (isVerifyingRef.current || isTerminalHandledRef.current || cancelInFlightRef.current) {
+      return;
+    }
+    cancelInFlightRef.current = true;
+
+    try {
+      const token = localStorage.getItem('kioskToken') || '';
+      if (orderDetails?.dbId && token) {
+        const cancelRes = await fetch(`${API_BASE}/orders/${orderDetails.dbId}/cancel`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            razorpay_order_id: orderDetails.razorpay_order_id,
+            reason
+          })
+        });
+        const cancelData = await cancelRes.json().catch(() => ({}));
+        const resolvedStatus = String(cancelData?.data?.status || '').toUpperCase();
+
+        if (cancelRes.status === 409 || ['PAID', 'PREPARING', 'COMPLETED'].includes(resolvedStatus)) {
+          isTerminalHandledRef.current = true;
+          onPaymentSuccess();
+          return;
+        }
+
+        if (!cancelRes.ok) {
+          const checkRes = await fetch(`${API_BASE}/orders/${orderDetails.dbId}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          }).catch(() => null);
+          const checkData = checkRes ? await checkRes.json().catch(() => ({})) : {};
+          const checkedStatus = String(checkData?.data?.status || '').toUpperCase();
+          if (['PAID', 'PREPARING', 'COMPLETED'].includes(checkedStatus)) {
+            isTerminalHandledRef.current = true;
+            onPaymentSuccess();
+            return;
+          }
+        }
+
+        if (resolvedStatus === 'FAILED' || hasGatewayFailedRef.current) {
+          isTerminalHandledRef.current = true;
+          onPaymentFailed();
+          return;
+        }
+      }
+
+      isTerminalHandledRef.current = true;
+      if (onDismissed) {
+        onDismissed(reason);
+      } else {
+        onCancel({ alreadyCancelled: true, reason });
+      }
+    } catch (err) {
+      console.error('Failed to notify checkout dismissal:', err);
+      if (hasGatewayFailedRef.current) {
+        isTerminalHandledRef.current = true;
+        onPaymentFailed();
+      } else {
+        isTerminalHandledRef.current = true;
+        onCancel({ alreadyCancelled: false, reason });
+      }
+    } finally {
+      cancelInFlightRef.current = false;
+    }
+  };
+
   // 1. Session Countdown
   useEffect(() => {
     if (timeLeft <= 0) {
-      onCancel();
+      notifyCheckoutDismissed('timeout');
       return;
     }
     const timer = setInterval(() => {
@@ -33,9 +108,45 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
     return () => clearInterval(timer);
   }, [timeLeft]);
 
+  // 1b. Abandonment cleanup if page/tab unloads while checkout is still PENDING
+  useEffect(() => {
+    const handlePageHide = () => {
+      if (isVerifyingRef.current || isTerminalHandledRef.current || !orderDetails?.dbId) {
+        return;
+      }
+      const token = localStorage.getItem('kioskToken') || '';
+      if (!token) return;
+      try {
+        fetch(`${API_BASE}/orders/${orderDetails.dbId}/cancel`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            razorpay_order_id: orderDetails.razorpay_order_id,
+            reason: 'checkout_dismissed'
+          }),
+          keepalive: true
+        }).catch(() => {});
+      } catch {
+        // Ignore best-effort unload notification error
+      }
+    };
+
+    window.addEventListener('pagehide', handlePageHide);
+    return () => window.removeEventListener('pagehide', handlePageHide);
+  }, [orderDetails]);
+
   // 2. Automatically launch Razorpay if keys are real
   useEffect(() => {
-    if (orderDetails?.razorpay_key && orderDetails.razorpay_key !== 'mock') {
+    if (
+      orderDetails?.razorpay_key &&
+      orderDetails.razorpay_key !== 'mock' &&
+      orderDetails?.razorpay_order_id &&
+      launchedRpOrderIdRef.current !== orderDetails.razorpay_order_id
+    ) {
+      launchedRpOrderIdRef.current = orderDetails.razorpay_order_id;
       launchRealRazorpay();
     }
   }, [orderDetails]);
@@ -65,6 +176,7 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
         contact: true
       },
       handler: async function (response) {
+        isVerifyingRef.current = true;
         setIsProcessing(true);
         setProcessingStatus('Verifying secure signature...');
         try {
@@ -82,14 +194,21 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
             })
           });
 
-          const verifyData = await verifyRes.json();
-          if (verifyData.status === 'success') {
+          const verifyData = await verifyRes.json().catch(() => ({}));
+          if (verifyRes.ok && verifyData.status === 'success') {
+            isTerminalHandledRef.current = true;
             onPaymentSuccess();
           } else {
+            isVerifyingRef.current = false;
+            setIsProcessing(false);
+            isTerminalHandledRef.current = true;
             onPaymentFailed();
           }
         } catch (e) {
           console.error('Signature verification call failed:', e);
+          isVerifyingRef.current = false;
+          setIsProcessing(false);
+          isTerminalHandledRef.current = true;
           onPaymentFailed();
         }
       },
@@ -98,18 +217,29 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
       },
       modal: {
         ondismiss: function () {
-          // If modal closed without paying, route to payment failed
-          onPaymentFailed();
+          // Do not mark an order failed merely because the customer closes the UI;
+          // notify backend safely and check whether payment already succeeded.
+          if (isVerifyingRef.current || isTerminalHandledRef.current) {
+            return;
+          }
+          notifyCheckoutDismissed('checkout_dismissed');
         }
       }
     };
 
     const rzp = new window.Razorpay(options);
+    if (typeof rzp.on === 'function') {
+      rzp.on('payment.failed', function () {
+        hasGatewayFailedRef.current = true;
+      });
+    }
     rzp.open();
   };
 
   // 3. Process Mock Payment Verification
   const handleMockPay = async () => {
+    if (isVerifyingRef.current || isTerminalHandledRef.current) return;
+    isVerifyingRef.current = true;
     setIsProcessing(true);
     setProcessingStatus('Connecting Gateway...');
 
@@ -145,16 +275,21 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
           })
         });
 
-        const verifyData = await verifyRes.json();
+        const verifyData = await verifyRes.json().catch(() => ({}));
         setIsProcessing(false);
-        if (verifyData.status === 'success') {
+        if (verifyRes.ok && verifyData.status === 'success') {
+          isTerminalHandledRef.current = true;
           onPaymentSuccess();
         } else {
+          isVerifyingRef.current = false;
+          isTerminalHandledRef.current = true;
           onPaymentFailed();
         }
       } catch (err) {
         console.error('Verify mock signature call failed:', err);
+        isVerifyingRef.current = false;
         setIsProcessing(false);
+        isTerminalHandledRef.current = true;
         onPaymentFailed();
       }
     }, 2400);
@@ -174,7 +309,7 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-3">
           <button
-            onClick={onCancel}
+            onClick={() => notifyCheckoutDismissed('customer_cancelled')}
             className="p-2 rounded-xl bg-cream border border-coffee-light/20 hover:bg-cream-dark active:scale-95 active-touch-feedback"
             aria-label="Cancel order"
           >
@@ -224,7 +359,7 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
 
           {/* Cancel button */}
           <button
-            onClick={onCancel}
+            onClick={() => notifyCheckoutDismissed('customer_cancelled')}
             className="w-full py-2.5 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 font-bold text-xs rounded-xl transition-colors active:scale-98 active-touch-feedback"
           >
             Cancel Order

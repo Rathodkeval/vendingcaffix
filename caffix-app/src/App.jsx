@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import KioskHeader from './components/KioskHeader';
 import WelcomeScreen from './components/WelcomeScreen';
 import SelectionScreen from './components/SelectionScreen';
@@ -11,12 +11,21 @@ import AdminDashboard from './components/AdminDashboard';
 import PaymentFailedScreen from './components/PaymentFailedScreen';
 import { Wrench, Loader2, ShieldAlert } from 'lucide-react';
 import { AnimatePresence, LayoutGroup } from 'framer-motion';
+import {
+  DEFAULT_PRICES,
+  DEFAULT_AVAILABILITY,
+  fetchKioskSyncState,
+  resolveEffectiveMachineId
+} from './utils/kioskSync';
 
 const API_BASE = import.meta.env.VITE_API_URL || (
   window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.port === '8000' || window.location.port === '5173'
     ? 'http://localhost:5000/api'
     : '/api'
 );
+
+const KIOSK_POLL_INTERVAL_MS = 15000;
+const SYNC_PAUSED_SCREENS = ['PAYMENT', 'PAYMENT_FAILED', 'SUCCESS'];
 
 export default function App() {
   const [kioskStatus, setKioskStatus] = useState('VERIFYING'); // 'VERIFYING' | 'AUTHORIZED' | 'UNAUTHORIZED'
@@ -26,7 +35,8 @@ export default function App() {
   const [orderDetails, setOrderDetails] = useState(null);
   
   // Admin & Settings States
-  const [prices, setPrices] = useState({ classic: 100, vanilla: 100, hazelnut: 100, irish: 100, mocha: 100 });
+  const [prices, setPrices] = useState(DEFAULT_PRICES);
+  const [availability, setAvailability] = useState(DEFAULT_AVAILABILITY);
   const [maintenanceMode, setMaintenanceMode] = useState(false);
   const [inventory, setInventory] = useState({
     water: 100,
@@ -40,53 +50,48 @@ export default function App() {
 
   // Orders Log history
   const [orderHistory, setOrderHistory] = useState([]);
+  const screenRef = useRef(screen);
+  const refreshSeqRef = useRef(0);
 
-  // Kiosk Startup: Pull prices and machine-specific status/levels
-  const refreshKioskData = async (token, targetMachineId = machineId) => {
+  useEffect(() => {
+    screenRef.current = screen;
+  }, [screen]);
+
+  // Kiosk Startup & Live Sync: Pull machine-scoped prices, availability, and status/levels
+  const refreshKioskData = useCallback(async (tokenOverride, targetMachineId) => {
+    const seq = ++refreshSeqRef.current;
     try {
-      // 1. Get products list
-      const prodRes = await fetch(`${API_BASE}/products`);
-      const prodData = await prodRes.json();
-      if (prodData.status === 'success') {
-        const prodList = prodData.data;
-        const priceMap = {};
-        prodList.forEach((p) => {
-          if (p.id === 1) priceMap.classic = p.price;
-          if (p.id === 2) priceMap.vanilla = p.price;
-          if (p.id === 3) priceMap.hazelnut = p.price;
-          if (p.id === 4) priceMap.irish = p.price;
-          if (p.id === 5) priceMap.mocha = p.price;
-        });
-        setPrices(priceMap);
-      }
+      const activeToken = tokenOverride ?? localStorage.getItem('kioskToken') ?? '';
+      const activeMachineId = resolveEffectiveMachineId(
+        targetMachineId ?? machineId ?? localStorage.getItem('machineId'),
+        import.meta.env.VITE_MACHINE_ID
+      );
 
-      // 2. Get machine status/levels for the active machine
-      if (targetMachineId) {
-        const machineRes = await fetch(
-          `${API_BASE}/machine-status?machine_id=${encodeURIComponent(targetMachineId)}`,
-          {
-            headers: { 'Authorization': `Bearer ${token}` }
-          }
-        );
-        const machineData = await machineRes.json();
-        if (machineData.status === 'success') {
-          const m = machineData.data;
-          setMaintenanceMode(m.status === 'maintenance');
-          setInventory({
-            water: m.inventory.water,
-            coffee: m.inventory.coffee,
-            milk: m.inventory.milk,
-            vanilla: m.inventory.vanilla,
-            hazelnut: m.inventory.hazelnut,
-            irish: m.inventory.irish,
-            mocha: m.inventory.mocha
-          });
-        }
+      const syncState = await fetchKioskSyncState({
+        apiBase: API_BASE,
+        token: activeToken,
+        machineId: activeMachineId
+      });
+
+      // Ignore superseded in-flight responses
+      if (seq !== refreshSeqRef.current) return;
+
+      if (syncState.prices) {
+        setPrices(syncState.prices);
+      }
+      if (syncState.availability) {
+        setAvailability(syncState.availability);
+      }
+      if (syncState.maintenanceMode !== null) {
+        setMaintenanceMode(syncState.maintenanceMode);
+      }
+      if (syncState.inventory) {
+        setInventory(syncState.inventory);
       }
     } catch (error) {
       console.error('Kiosk data refresh failed:', error);
     }
-  };
+  }, [machineId]);
 
   const refreshAdminData = async (token, targetMachineId = machineId) => {
     try {
@@ -132,12 +137,16 @@ export default function App() {
       }
 
       try {
+        const fallbackEnvMachineId = resolveEffectiveMachineId(null, import.meta.env.VITE_MACHINE_ID);
+        const queryMachineId = hasMachineParam ? machineParam.trim() : fallbackEnvMachineId;
         const verifyQuery = new URLSearchParams({ kiosk: kioskParam });
-        if (hasMachineParam) {
-          verifyQuery.set('machine_id', machineParam.trim());
+        if (queryMachineId) {
+          verifyQuery.set('machine_id', queryMachineId);
         }
 
-        const res = await fetch(`${API_BASE}/kiosk/verify?${verifyQuery.toString()}`);
+        const res = await fetch(`${API_BASE}/kiosk/verify?${verifyQuery.toString()}`, {
+          cache: 'no-store'
+        });
         if (!res.ok) {
           setKioskStatus('UNAUTHORIZED');
           return;
@@ -162,9 +171,37 @@ export default function App() {
     verifyKioskDevice();
   }, []);
 
+  // Background polling, focus, visibility, and online resume sync
+  useEffect(() => {
+    if (kioskStatus !== 'AUTHORIZED' || !machineId) return undefined;
+
+    const triggerSyncIfIdle = () => {
+      if (SYNC_PAUSED_SCREENS.includes(screenRef.current)) return;
+      refreshKioskData(undefined, machineId);
+    };
+
+    const intervalId = setInterval(triggerSyncIfIdle, KIOSK_POLL_INTERVAL_MS);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        triggerSyncIfIdle();
+      }
+    };
+
+    window.addEventListener('focus', triggerSyncIfIdle);
+    window.addEventListener('online', triggerSyncIfIdle);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      clearInterval(intervalId);
+      window.removeEventListener('focus', triggerSyncIfIdle);
+      window.removeEventListener('online', triggerSyncIfIdle);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [kioskStatus, machineId, refreshKioskData]);
 
   // Transition handlers
   const handleStartOrder = () => {
+    refreshKioskData(undefined, machineId);
     setScreen('SELECTION');
   };
 
@@ -210,7 +247,17 @@ export default function App() {
         });
         setScreen('PAYMENT');
       } else {
-        alert(data.message || 'Failed to place order. Depleted ingredients!');
+        await refreshKioskData(token, activeMachineId);
+        const msg = data.message || 'Failed to place order. Depleted ingredients!';
+        if (
+          msg.toLowerCase().includes('unavailable') ||
+          msg.toLowerCase().includes('depleted') ||
+          msg.toLowerCase().includes('invalid order amount')
+        ) {
+          setSelectedCoffee(null);
+          setScreen('SELECTION');
+        }
+        alert(msg);
       }
     } catch (e) {
       console.error('Checkout creation failed:', e);
@@ -243,18 +290,29 @@ export default function App() {
     setScreen('WELCOME');
   };
 
-  const handleCancelOrder = async () => {
+  const handleCancelOrder = async (options = {}) => {
     const token = localStorage.getItem('kioskToken') || '';
     try {
-      if (orderDetails && orderDetails.dbId) {
-        await fetch(`${API_BASE}/orders/${orderDetails.dbId}/status`, {
-          method: 'PUT',
+      if (!options?.alreadyCancelled && orderDetails && orderDetails.dbId) {
+        const cancelRes = await fetch(`${API_BASE}/orders/${orderDetails.dbId}/cancel`, {
+          method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${token}`
           },
-          body: JSON.stringify({ status: 'CANCELLED' })
+          body: JSON.stringify({
+            razorpay_order_id: orderDetails.razorpay_order_id,
+            reason: options?.reason || 'customer_cancelled'
+          })
         });
+        if (cancelRes.status === 409) {
+          const cancelData = await cancelRes.json().catch(() => ({}));
+          const resolvedStatus = String(cancelData?.data?.status || '').toUpperCase();
+          if (['PAID', 'PREPARING', 'COMPLETED'].includes(resolvedStatus)) {
+            await handlePaymentSuccess();
+            return;
+          }
+        }
       }
     } catch (e) {
       console.error('Cancel order failed:', e);
@@ -262,6 +320,43 @@ export default function App() {
     setSelectedCoffee(null);
     setOrderDetails(null);
     setScreen('SELECTION');
+  };
+
+  const handleCheckoutDismissed = () => {
+    setSelectedCoffee(null);
+    setOrderDetails(null);
+    setScreen('SELECTION');
+  };
+
+  const handleRetryFailedPayment = async () => {
+    const token = localStorage.getItem('kioskToken') || '';
+    try {
+      if (orderDetails && orderDetails.dbId) {
+        const cancelRes = await fetch(`${API_BASE}/orders/${orderDetails.dbId}/cancel`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            razorpay_order_id: orderDetails.razorpay_order_id,
+            reason: 'payment_failed'
+          })
+        });
+        if (cancelRes.status === 409) {
+          const cancelData = await cancelRes.json().catch(() => ({}));
+          const resolvedStatus = String(cancelData?.data?.status || '').toUpperCase();
+          if (['PAID', 'PREPARING', 'COMPLETED'].includes(resolvedStatus)) {
+            await handlePaymentSuccess();
+            return;
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Retry order cleanup failed:', e);
+    }
+    setOrderDetails(null);
+    setScreen('SUMMARY');
   };
 
   // Refill ingredients helper
@@ -370,7 +465,8 @@ export default function App() {
     setScreen('PASSCODE');
   };
 
-  const handleAdminSuccess = async (passcode = '1234') => {
+  const handleAdminSuccess = async (passcode) => {
+    if (!passcode) return false;
     const kioskToken = localStorage.getItem('kioskToken') || '';
     const activeMachineId = machineId || localStorage.getItem('machineId');
     try {
@@ -383,13 +479,16 @@ export default function App() {
         body: JSON.stringify({ passcode: String(passcode), machine_id: activeMachineId })
       });
       const data = await res.json();
-      if (data.status === 'success') {
+      if (res.ok && data.status === 'success' && data.token) {
         localStorage.setItem('adminToken', data.token);
         await refreshAdminData(data.token, activeMachineId);
         setScreen('ADMIN');
+        return true;
       }
+      return false;
     } catch (error) {
       console.error('Admin login failed:', error);
+      return false;
     }
   };
 
@@ -505,6 +604,8 @@ export default function App() {
                 key="flavor_and_summary"
                 initialStep={screen}
                 prices={prices}
+                availability={availability}
+                inventory={inventory}
                 selectedCoffee={selectedCoffee}
                 onSelectCoffee={(coffee) => setSelectedCoffee(coffee)}
                 onConfirmOrder={handleConfirmOrder}
@@ -522,14 +623,15 @@ export default function App() {
                   orderDetails={orderDetails} 
                   onPaymentSuccess={handlePaymentSuccess} 
                   onPaymentFailed={() => setScreen('PAYMENT_FAILED')}
-                  onCancel={handleCancelOrder} 
+                  onCancel={handleCancelOrder}
+                  onDismissed={handleCheckoutDismissed}
                 />
               )}
               {screen === 'PAYMENT_FAILED' && (
                 <PaymentFailedScreen 
                   key="payment_failed"
                   orderDetails={orderDetails} 
-                  onRetry={() => setScreen('PAYMENT')}
+                  onRetry={handleRetryFailedPayment}
                   onCancel={handleCancelOrder}
                 />
               )}

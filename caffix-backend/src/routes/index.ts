@@ -5,6 +5,7 @@ import machineRoutes from './machineRoutes';
 import orderRoutes from './orderRoutes';
 import paymentRoutes from './paymentRoutes';
 import kioskRoutes from './kioskRoutes';
+import cronRoutes from './cronRoutes';
 import { getMachineStatus } from '../controllers/machineController';
 import { authenticateJWT } from '../middleware/auth';
 
@@ -16,6 +17,7 @@ router.use('/machines', machineRoutes);
 router.use('/orders', orderRoutes);
 router.use('/payments', paymentRoutes);
 router.use('/kiosk', kioskRoutes);
+router.use('/cron', cronRoutes);
 router.get('/machine-status', authenticateJWT, getMachineStatus);
 
 export default router;

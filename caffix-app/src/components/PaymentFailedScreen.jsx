@@ -1,7 +1,14 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { AlertCircle, RefreshCw, XCircle } from 'lucide-react';
 
 export default function PaymentFailedScreen({ orderDetails, onRetry, onCancel }) {
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (onCancel) onCancel();
+    }, 60000);
+    return () => clearTimeout(timer);
+  }, [onCancel]);
+
   return (
     <div className="w-full h-full flex flex-col justify-between items-center py-10 px-6 bg-cream-light relative overflow-hidden text-center">
       {/* Decorative Blur Rings */}

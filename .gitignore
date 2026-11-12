@@ -14,12 +14,26 @@ ENV/
 # Local databases
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 *.sqlite
+*.sqlite3
 
-# Local env files
+# Local env files (preserve example templates)
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!.env.*.example
+
+# Private keys & service account credentials
+*.pem
+*.key
+*.p12
+*.pfx
+*service-account*.json
+*serviceAccountKey*.json
+*firebase-adminsdk*.json
+*credentials*.json
 
 # Build outputs
 dist/

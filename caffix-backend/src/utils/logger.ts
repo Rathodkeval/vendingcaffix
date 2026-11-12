@@ -1,10 +1,11 @@
 import winston from 'winston';
 import path from 'path';
+import { redactSensitiveText } from './security';
 
 const logFormat = winston.format.printf(({ level, message, timestamp, ...metadata }) => {
-  let msg = `[${timestamp}] [${level.toUpperCase()}]: ${message}`;
+  let msg = `[${timestamp}] [${level.toUpperCase()}]: ${redactSensitiveText(String(message))}`;
   if (Object.keys(metadata).length > 0) {
-    msg += ` ${JSON.stringify(metadata)}`;
+    msg += ` ${redactSensitiveText(JSON.stringify(metadata))}`;
   }
   return msg;
 });

@@ -8,7 +8,9 @@ import swaggerUi from 'swagger-ui-express';
 // Load environment variables
 dotenv.config();
 
-import { initDB } from './config/db';
+import { initDB, getDB } from './config/db';
+import { ensureFirebaseReady, ensureFirestoreSeeded } from './utils/firebase';
+import { ensureSecurityConfigReady, sanitizeUrlForLogging } from './utils/security';
 import apiRoutes from './routes';
 import { errorHandler } from './middleware/errorHandler';
 import logger from './utils/logger';
@@ -16,13 +18,73 @@ import logger from './utils/logger';
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Enable CORS and JSON parsing
-app.use(cors());
-app.use(express.json());
+// Explicit CORS origin allowlist (never unrestricted wildcard '*' for browser origins)
+export const DEFAULT_ALLOWED_ORIGINS = [
+  'https://caffix-owner.vercel.app',
+  'https://caffix-admin.vercel.app',
+  'https://vendingcaffix.vercel.app',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:5174',
+  'http://127.0.0.1:5174',
+  'http://localhost:5175',
+  'http://127.0.0.1:5175',
+  'http://localhost:8000',
+  'http://127.0.0.1:8000',
+  'http://localhost:5000',
+  'http://127.0.0.1:5000'
+];
 
-// Custom request logging middleware
+export function isAllowedCorsOrigin(origin?: string): boolean {
+  // Allow non-browser / server-to-server requests (e.g. Razorpay webhooks, RPi scripts, curl)
+  if (!origin) return true;
+
+  const normalized = origin.trim().replace(/\/+$/, '');
+  const extraOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((o) => o.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+
+  if (DEFAULT_ALLOWED_ORIGINS.includes(normalized) || extraOrigins.includes(normalized)) {
+    return true;
+  }
+
+  // Allow localhost / 127.0.0.1 development ports
+  if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(normalized)) {
+    return true;
+  }
+
+  return false;
+}
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (isAllowedCorsOrigin(origin)) {
+        callback(null, true);
+      } else {
+        callback(null, false);
+      }
+    },
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-razorpay-signature', 'x-machine-id'],
+    credentials: true
+  })
+);
+app.use(
+  express.json({
+    verify: (req: any, _res, buf) => {
+      const requestUrl = String(req.originalUrl || req.url || '');
+      if (Buffer.isBuffer(buf) && requestUrl.includes('/payments/webhook')) {
+        req.rawBody = Buffer.from(buf);
+      }
+    }
+  })
+);
+
+// Custom request logging middleware (redacts sensitive query parameters such as kiosk tokens)
 app.use((req, res, next) => {
-  logger.info(`${req.method} ${req.originalUrl}`);
+  logger.info(`${req.method} ${sanitizeUrlForLogging(req.originalUrl)}`);
   next();
 });
 
@@ -35,20 +97,33 @@ try {
   logger.error('Failed to load Swagger YAML definition file:', error);
 }
 
-// Lazy Database Initialization Middleware (for Serverless / Vercel compatibility)
+// Lazy Database & Firestore Initialization Middleware (for Serverless / Vercel compatibility)
 let dbInitialized = false;
 let dbPromise: Promise<any> | null = null;
 
 const ensureDB = async () => {
+  // 1. Validate security & Firebase environment credentials first (fail-closed HTTP 503 before touching MockDatabase)
+  ensureSecurityConfigReady();
+  ensureFirebaseReady();
+
+  // 2. Initialize local SQLite / MockDatabase schema
   if (!dbInitialized) {
     if (!dbPromise) {
-      dbPromise = initDB().then(() => {
-        dbInitialized = true;
-        logger.info('SQLite database schema parsed and seeded successfully');
-      });
+      dbPromise = initDB()
+        .then(() => {
+          dbInitialized = true;
+          logger.info('SQLite database schema parsed and seeded successfully');
+        })
+        .catch((err) => {
+          dbPromise = null;
+          throw err;
+        });
     }
     await dbPromise;
   }
+
+  // 3. Ensure authoritative Firestore records (default admin & machines) are seeded safely without overwriting existing state
+  await ensureFirestoreSeeded(getDB());
 };
 
 app.use(async (req, res, next) => {

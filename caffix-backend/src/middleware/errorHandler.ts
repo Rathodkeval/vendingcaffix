@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { AppError } from '../utils/errors';
+import { sanitizeUrlForLogging } from '../utils/security';
 import logger from '../utils/logger';
 
 export const errorHandler = (
@@ -18,15 +19,17 @@ export const errorHandler = (
     isOperational = err.isOperational;
   }
 
+  const safeUrl = sanitizeUrlForLogging(req.originalUrl);
+
   // Log error using Winston
   if (statusCode === 500) {
-    logger.error(`${req.method} ${req.originalUrl} - ${err.message}`, {
+    logger.error(`${req.method} ${safeUrl} - ${err.message}`, {
       stack: err.stack,
-      url: req.originalUrl,
+      url: safeUrl,
       method: req.method
     });
   } else {
-    logger.warn(`${req.method} ${req.originalUrl} - ${statusCode} - ${err.message}`);
+    logger.warn(`${req.method} ${safeUrl} - ${statusCode} - ${err.message}`);
   }
 
   // Send JSON response

@@ -35,8 +35,20 @@ export class NotFoundError extends AppError {
   }
 }
 
+export class ConflictError extends AppError {
+  constructor(message = 'Resource Conflict') {
+    super(message, 409);
+  }
+}
+
 export class InternalServerError extends AppError {
   constructor(message = 'Internal Server Error') {
     super(message, 500, false);
+  }
+}
+
+export class ServiceUnavailableError extends AppError {
+  constructor(message = 'Service Unavailable') {
+    super(message, 503);
   }
 }
