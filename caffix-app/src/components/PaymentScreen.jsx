@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { ArrowLeft, RefreshCw, CreditCard, QrCode, Smartphone, Landmark, Check, Wallet } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { ArrowLeft, RefreshCw, CreditCard, QrCode, Smartphone, Landmark, Check, Wallet, AlertTriangle } from 'lucide-react';
+import { verifyPaymentWithRetry, safeCheckAndCancelOrder } from '../utils/paymentLifecycle';
 
 const API_BASE = import.meta.env.VITE_API_URL || (
   window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.port === '8000' || window.location.port === '5173'
@@ -7,13 +8,15 @@ const API_BASE = import.meta.env.VITE_API_URL || (
     : '/api'
 );
 
-export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymentFailed, onCancel, onDismissed }) {
+export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymentFailed, onPaymentUncertain, onCancel, onDismissed }) {
   const [timeLeft, setTimeLeft] = useState(180); // 3 minutes
   const [activeTab, setActiveTab] = useState('UPI'); // UPI, QR, CARD, NETBANKING
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStatus, setProcessingStatus] = useState('');
+  const [sdkError, setSdkError] = useState('');
 
   const isVerifyingRef = useRef(false);
+  const pendingVerifyPayloadRef = useRef(null);
   const isTerminalHandledRef = useRef(false);
   const cancelInFlightRef = useRef(false);
   const hasGatewayFailedRef = useRef(false);
@@ -27,51 +30,95 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
   const [selectedBank, setSelectedBank] = useState('');
   const [selectedWallet, setSelectedWallet] = useState('');
 
-  const notifyCheckoutDismissed = async (reason = 'checkout_dismissed') => {
-    if (isVerifyingRef.current || isTerminalHandledRef.current || cancelInFlightRef.current) {
+  const orderId = orderDetails?.dbId;
+  const rpOrderId = orderDetails?.razorpay_order_id;
+
+  const executeVerificationFlow = useCallback(async (verifyPayload) => {
+    if (isTerminalHandledRef.current) return;
+    pendingVerifyPayloadRef.current = verifyPayload;
+    isVerifyingRef.current = true;
+    setIsProcessing(true);
+    setProcessingStatus('Verifying secure signature...');
+
+    const token = localStorage.getItem('kioskToken') || '';
+    const result = await verifyPaymentWithRetry({
+      apiBase: API_BASE,
+      token,
+      payload: verifyPayload,
+      maxAttempts: 4,
+      initialDelayMs: 800,
+      backoffFactor: 2,
+      onAttempt: ({ attempt, maxAttempts }) => {
+        if (attempt === 1) {
+          setProcessingStatus('Verifying payment confirmation...');
+        } else {
+          setProcessingStatus(`Connection delayed. Retrying confirmation (${attempt}/${maxAttempts})...`);
+        }
+      }
+    });
+
+    isVerifyingRef.current = false;
+    setIsProcessing(false);
+    isTerminalHandledRef.current = true;
+
+    if (result.outcome === 'VERIFIED') {
+      onPaymentSuccess(result.order);
+    } else if (result.outcome === 'UNCERTAIN') {
+      onPaymentUncertain?.({
+        verifyPayload,
+        message: result.message
+      });
+    } else {
+      onPaymentFailed?.({
+        message: result.message
+      });
+    }
+  }, [onPaymentFailed, onPaymentSuccess, onPaymentUncertain]);
+
+  const notifyCheckoutDismissed = useCallback(async (reason = 'checkout_dismissed') => {
+    if (
+      isVerifyingRef.current ||
+      pendingVerifyPayloadRef.current ||
+      isTerminalHandledRef.current ||
+      cancelInFlightRef.current
+    ) {
       return;
     }
     cancelInFlightRef.current = true;
 
     try {
       const token = localStorage.getItem('kioskToken') || '';
-      if (orderDetails?.dbId && token) {
-        const cancelRes = await fetch(`${API_BASE}/orders/${orderDetails.dbId}/cancel`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify({
-            razorpay_order_id: orderDetails.razorpay_order_id,
-            reason
-          })
+      if (orderId && token) {
+        const res = await safeCheckAndCancelOrder({
+          apiBase: API_BASE,
+          token,
+          orderId,
+          razorpayOrderId: rpOrderId,
+          reason,
+          hasPendingVerification: Boolean(pendingVerifyPayloadRef.current)
         });
-        const cancelData = await cancelRes.json().catch(() => ({}));
-        const resolvedStatus = String(cancelData?.data?.status || '').toUpperCase();
 
-        if (cancelRes.status === 409 || ['PAID', 'PREPARING', 'COMPLETED'].includes(resolvedStatus)) {
+        if (res.action === 'ALREADY_PAID') {
           isTerminalHandledRef.current = true;
-          onPaymentSuccess();
+          onPaymentSuccess(res.order);
           return;
         }
 
-        if (!cancelRes.ok) {
-          const checkRes = await fetch(`${API_BASE}/orders/${orderDetails.dbId}`, {
-            headers: { 'Authorization': `Bearer ${token}` }
-          }).catch(() => null);
-          const checkData = checkRes ? await checkRes.json().catch(() => ({})) : {};
-          const checkedStatus = String(checkData?.data?.status || '').toUpperCase();
-          if (['PAID', 'PREPARING', 'COMPLETED'].includes(checkedStatus)) {
-            isTerminalHandledRef.current = true;
-            onPaymentSuccess();
-            return;
-          }
+        if (res.action === 'UNCERTAIN') {
+          isTerminalHandledRef.current = true;
+          onPaymentUncertain?.({
+            verifyPayload: pendingVerifyPayloadRef.current,
+            message: res.message
+          });
+          return;
         }
 
-        if (resolvedStatus === 'FAILED' || hasGatewayFailedRef.current) {
+        if (
+          hasGatewayFailedRef.current ||
+          String(res.order?.status || '').toUpperCase() === 'FAILED'
+        ) {
           isTerminalHandledRef.current = true;
-          onPaymentFailed();
+          onPaymentFailed?.();
           return;
         }
       }
@@ -84,9 +131,15 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
       }
     } catch (err) {
       console.error('Failed to notify checkout dismissal:', err);
-      if (hasGatewayFailedRef.current) {
+      if (pendingVerifyPayloadRef.current) {
         isTerminalHandledRef.current = true;
-        onPaymentFailed();
+        onPaymentUncertain?.({
+          verifyPayload: pendingVerifyPayloadRef.current,
+          message: 'Payment confirmation is pending. Please verify status.'
+        });
+      } else if (hasGatewayFailedRef.current) {
+        isTerminalHandledRef.current = true;
+        onPaymentFailed?.();
       } else {
         isTerminalHandledRef.current = true;
         onCancel({ alreadyCancelled: false, reason });
@@ -94,24 +147,98 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
     } finally {
       cancelInFlightRef.current = false;
     }
-  };
+  }, [
+    onCancel,
+    onDismissed,
+    onPaymentFailed,
+    onPaymentSuccess,
+    onPaymentUncertain,
+    orderId,
+    rpOrderId
+  ]);
 
-  // 1. Session Countdown
-  useEffect(() => {
-    if (timeLeft <= 0) {
-      notifyCheckoutDismissed('timeout');
+  const launchRealRazorpay = useCallback(() => {
+    if (!orderDetails) return;
+    if (!window.Razorpay) {
+      setSdkError('Razorpay payment gateway failed to load. Please check connectivity and retry.');
       return;
+    }
+    setSdkError('');
+
+    const options = {
+      key: orderDetails.razorpay_key,
+      amount: orderDetails.price * 100, // in paise
+      currency: 'INR',
+      name: 'CAFFIX',
+      description: `Order ${orderDetails.name} (${orderDetails.size})`,
+      order_id: orderDetails.razorpay_order_id,
+      prefill: {
+        name: "CAFFIX",
+        email: "support@caffix.com",
+        contact: "9426412200"
+      },
+      readonly: {
+        name: true,
+        email: true,
+        contact: true
+      },
+      handler: async function (response) {
+        await executeVerificationFlow({
+          order_id: orderDetails.dbId,
+          razorpay_payment_id: response.razorpay_payment_id,
+          razorpay_order_id: response.razorpay_order_id,
+          razorpay_signature: response.razorpay_signature
+        });
+      },
+      theme: {
+        color: '#2C1E17'
+      },
+      modal: {
+        ondismiss: function () {
+          // Do not mark an order failed or cancel if payment response or verification already arrived
+          if (isVerifyingRef.current || pendingVerifyPayloadRef.current || isTerminalHandledRef.current) {
+            return;
+          }
+          notifyCheckoutDismissed('checkout_dismissed');
+        }
+      }
+    };
+
+    const rzp = new window.Razorpay(options);
+    if (typeof rzp.on === 'function') {
+      rzp.on('payment.failed', function () {
+        hasGatewayFailedRef.current = true;
+      });
+    }
+    rzp.open();
+  }, [executeVerificationFlow, notifyCheckoutDismissed, orderDetails]);
+
+  // 1. Session Countdown (pauses automatically during payment verification)
+  useEffect(() => {
+    if (isProcessing || pendingVerifyPayloadRef.current || isTerminalHandledRef.current) {
+      return undefined;
+    }
+    if (timeLeft <= 0) {
+      const timeoutTimer = setTimeout(() => {
+        notifyCheckoutDismissed('timeout');
+      }, 0);
+      return () => clearTimeout(timeoutTimer);
     }
     const timer = setInterval(() => {
       setTimeLeft((prev) => prev - 1);
     }, 1000);
     return () => clearInterval(timer);
-  }, [timeLeft]);
+  }, [timeLeft, isProcessing, notifyCheckoutDismissed]);
 
-  // 1b. Abandonment cleanup if page/tab unloads while checkout is still PENDING
+  // 1b. Abandonment cleanup if page/tab unloads while checkout is still PENDING and unsubmitted
   useEffect(() => {
     const handlePageHide = () => {
-      if (isVerifyingRef.current || isTerminalHandledRef.current || !orderDetails?.dbId) {
+      if (
+        isVerifyingRef.current ||
+        pendingVerifyPayloadRef.current ||
+        isTerminalHandledRef.current ||
+        !orderDetails?.dbId
+      ) {
         return;
       }
       const token = localStorage.getItem('kioskToken') || '';
@@ -147,98 +274,17 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
       launchedRpOrderIdRef.current !== orderDetails.razorpay_order_id
     ) {
       launchedRpOrderIdRef.current = orderDetails.razorpay_order_id;
-      launchRealRazorpay();
+      const launchTimer = setTimeout(() => {
+        launchRealRazorpay();
+      }, 0);
+      return () => clearTimeout(launchTimer);
     }
-  }, [orderDetails]);
+    return undefined;
+  }, [orderDetails, launchRealRazorpay]);
 
-  const launchRealRazorpay = () => {
-    if (!window.Razorpay) {
-      alert('Razorpay SDK failed to load. Running mock interface instead.');
-      return;
-    }
-
-    const token = localStorage.getItem('kioskToken') || '';
-    const options = {
-      key: orderDetails.razorpay_key,
-      amount: orderDetails.price * 100, // in paise
-      currency: 'INR',
-      name: 'CAFFIX',
-      description: `Order ${orderDetails.name} (${orderDetails.size})`,
-      order_id: orderDetails.razorpay_order_id,
-      prefill: {
-        name: "CAFFIX",
-        email: "support@caffix.com",
-        contact: "9426412200"
-      },
-      readonly: {
-        name: true,
-        email: true,
-        contact: true
-      },
-      handler: async function (response) {
-        isVerifyingRef.current = true;
-        setIsProcessing(true);
-        setProcessingStatus('Verifying secure signature...');
-        try {
-          const verifyRes = await fetch(`${API_BASE}/payments/verify`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${token}`
-            },
-            body: JSON.stringify({
-              order_id: orderDetails.dbId,
-              razorpay_payment_id: response.razorpay_payment_id,
-              razorpay_order_id: response.razorpay_order_id,
-              razorpay_signature: response.razorpay_signature
-            })
-          });
-
-          const verifyData = await verifyRes.json().catch(() => ({}));
-          if (verifyRes.ok && verifyData.status === 'success') {
-            isTerminalHandledRef.current = true;
-            onPaymentSuccess();
-          } else {
-            isVerifyingRef.current = false;
-            setIsProcessing(false);
-            isTerminalHandledRef.current = true;
-            onPaymentFailed();
-          }
-        } catch (e) {
-          console.error('Signature verification call failed:', e);
-          isVerifyingRef.current = false;
-          setIsProcessing(false);
-          isTerminalHandledRef.current = true;
-          onPaymentFailed();
-        }
-      },
-      theme: {
-        color: '#2C1E17'
-      },
-      modal: {
-        ondismiss: function () {
-          // Do not mark an order failed merely because the customer closes the UI;
-          // notify backend safely and check whether payment already succeeded.
-          if (isVerifyingRef.current || isTerminalHandledRef.current) {
-            return;
-          }
-          notifyCheckoutDismissed('checkout_dismissed');
-        }
-      }
-    };
-
-    const rzp = new window.Razorpay(options);
-    if (typeof rzp.on === 'function') {
-      rzp.on('payment.failed', function () {
-        hasGatewayFailedRef.current = true;
-      });
-    }
-    rzp.open();
-  };
-
-  // 3. Process Mock Payment Verification
+  // 3. Process Mock Payment Verification (uses identical bounded retry flow)
   const handleMockPay = async () => {
-    if (isVerifyingRef.current || isTerminalHandledRef.current) return;
+    if (isVerifyingRef.current || pendingVerifyPayloadRef.current || isTerminalHandledRef.current) return;
     isVerifyingRef.current = true;
     setIsProcessing(true);
     setProcessingStatus('Connecting Gateway...');
@@ -256,42 +302,15 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
     });
 
     setTimeout(async () => {
-      const token = localStorage.getItem('kioskToken') || '';
       const mockPayId = 'pay_mock_' + Math.floor(100000 + Math.random() * 900000);
       const mockSignature = 'sig_mock_' + Math.floor(100000 + Math.random() * 900000);
 
-      try {
-        const verifyRes = await fetch(`${API_BASE}/payments/verify`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify({
-            order_id: orderDetails.dbId,
-            razorpay_payment_id: mockPayId,
-            razorpay_order_id: orderDetails.razorpay_order_id,
-            razorpay_signature: mockSignature
-          })
-        });
-
-        const verifyData = await verifyRes.json().catch(() => ({}));
-        setIsProcessing(false);
-        if (verifyRes.ok && verifyData.status === 'success') {
-          isTerminalHandledRef.current = true;
-          onPaymentSuccess();
-        } else {
-          isVerifyingRef.current = false;
-          isTerminalHandledRef.current = true;
-          onPaymentFailed();
-        }
-      } catch (err) {
-        console.error('Verify mock signature call failed:', err);
-        isVerifyingRef.current = false;
-        setIsProcessing(false);
-        isTerminalHandledRef.current = true;
-        onPaymentFailed();
-      }
+      await executeVerificationFlow({
+        order_id: orderDetails.dbId,
+        razorpay_payment_id: mockPayId,
+        razorpay_order_id: orderDetails.razorpay_order_id,
+        razorpay_signature: mockSignature
+      });
     }, 2400);
   };
 
@@ -381,20 +400,39 @@ export default function PaymentScreen({ orderDetails, onPaymentSuccess, onPaymen
           {isRealRazorpay ? (
             /* REAL RAZORPAY VIEW */
             <div className="flex flex-col items-center justify-center text-center p-6 space-y-4">
-              <div className="p-4 bg-emerald-50 rounded-full border border-emerald-100 text-emerald-600 animate-pulse">
-                <Smartphone className="w-12 h-12" />
-              </div>
-              <h3 className="font-extrabold text-lg text-coffee-dark">Razorpay Portal Launched</h3>
-              <p className="text-xs text-coffee-light max-w-xs leading-relaxed">
-                A secure modal checkout sheet has loaded. Complete payment on the overlay interface to vend your coffee.
-              </p>
-              <button
-                onClick={launchRealRazorpay}
-                className="py-2.5 px-6 bg-coffee text-cream-light font-bold text-xs rounded-xl shadow-md hover:bg-coffee-dark border border-gold/20 flex items-center gap-2 transition-all active:scale-95"
-              >
-                <RefreshCw className="w-4 h-4" />
-                <span>Relaunch Checkout Sheet</span>
-              </button>
+              {sdkError ? (
+                <>
+                  <div className="p-4 bg-red-50 rounded-full border border-red-200 text-red-600">
+                    <AlertTriangle className="w-12 h-12" />
+                  </div>
+                  <h3 className="font-extrabold text-lg text-coffee-dark">Checkout Gateway Unavailable</h3>
+                  <p className="text-xs text-red-700 max-w-xs leading-relaxed font-semibold">{sdkError}</p>
+                  <button
+                    onClick={launchRealRazorpay}
+                    className="py-2.5 px-6 bg-coffee text-cream-light font-bold text-xs rounded-xl shadow-md hover:bg-coffee-dark border border-gold/20 flex items-center gap-2 transition-all active:scale-95"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    <span>Retry Checkout Gateway</span>
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div className="p-4 bg-emerald-50 rounded-full border border-emerald-100 text-emerald-600 animate-pulse">
+                    <Smartphone className="w-12 h-12" />
+                  </div>
+                  <h3 className="font-extrabold text-lg text-coffee-dark">Razorpay Portal Launched</h3>
+                  <p className="text-xs text-coffee-light max-w-xs leading-relaxed">
+                    A secure modal checkout sheet has loaded. Complete payment on the overlay interface to vend your coffee.
+                  </p>
+                  <button
+                    onClick={launchRealRazorpay}
+                    className="py-2.5 px-6 bg-coffee text-cream-light font-bold text-xs rounded-xl shadow-md hover:bg-coffee-dark border border-gold/20 flex items-center gap-2 transition-all active:scale-95"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    <span>Relaunch Checkout Sheet</span>
+                  </button>
+                </>
+              )}
             </div>
           ) : (
             /* MOCK INTERACTIVE RAZORPAY POPUP MODAL */

@@ -12,7 +12,8 @@ import app from '../index';
 import { initDB, getDB } from '../config/db';
 import {
   generateCandidateOrderId,
-  setOrderIdGeneratorForTesting
+  setOrderIdGeneratorForTesting,
+  setRazorpayClientForTesting
 } from '../controllers/orderController';
 import { syncOrderToFirebase } from '../utils/firebase';
 
@@ -56,6 +57,38 @@ async function runWave21HardeningTests() {
 
   await initDB();
   const db = getDB();
+
+  const w21Orders: Array<{ id: string; amount: number; currency: string; receipt: string }> = [];
+  let w21Seq = 0;
+  setRazorpayClientForTesting({
+    orders: {
+      create: async (opts: any) => {
+        w21Seq += 1;
+        const created = {
+          id: `order_w21_${w21Seq}`,
+          amount: Number(opts.amount),
+          currency: opts.currency || 'INR',
+          receipt: String(opts.receipt || '')
+        };
+        w21Orders.push(created);
+        return created;
+      }
+    },
+    payments: {
+      fetch: async (paymentId: string) => {
+        const match =
+          w21Orders.find((o) => o.receipt === 'CFX-90000001') ||
+          w21Orders[w21Orders.length - 1];
+        return {
+          id: paymentId,
+          order_id: match?.id || 'order_w21_unknown',
+          status: 'captured',
+          currency: 'INR',
+          amount: match?.amount ?? 10000
+        };
+      }
+    }
+  });
   await db.run('DELETE FROM machine_products');
   await db.run("DELETE FROM products WHERE name LIKE 'Wave21 Admin Espresso%'");
   await db.run('DELETE FROM inventory_ledger WHERE order_id IN (?, ?)', ['CFX-90000001', 'CFX-90000002']).catch(() => {});

@@ -608,13 +608,17 @@ async function performOrderStatusUpdateInternal(
     return existingOrder;
   }
 
+  const isFinalizingDispensedOrder =
+    (currentStatus === 'PAID' || currentStatus === 'PREPARING') &&
+    newStatus === 'COMPLETED' &&
+    (currentDispense === 'DISPENSED' || order.dispensed === true);
+
   // Never allow paid/completed/dispensing/dispensed orders to be downgraded or overwritten by FAILED/CANCELLED/PENDING,
-  // and never mutate an already-COMPLETED or DISPENSED order.
+  // and never mutate an already-COMPLETED or DISPENSED order (except finalizing PAID/PREPARING -> COMPLETED once DISPENSED).
   if (
     (isNonPaidTarget && alreadyPaidOrActive) ||
     currentStatus === 'COMPLETED' ||
-    currentDispense === 'DISPENSED' ||
-    order.dispensed === true ||
+    (!isFinalizingDispensedOrder && (currentDispense === 'DISPENSED' || order.dispensed === true)) ||
     (isNonPaidTarget && currentStatus !== 'PENDING') ||
     (isClosedUnpaidOrigin && !(paymentMetadata?.allowPaidOrderRecovery && newStatus === 'PAID'))
   ) {
@@ -773,6 +777,12 @@ async function performOrderStatusUpdateInternal(
       ]);
     }
     await db.run('UPDATE orders SET status = ? WHERE id = ?', [newStatus, id]);
+    const syncedDispenseStatus = firebaseTransition.authoritativeOrder?.dispense_status
+      ? String(firebaseTransition.authoritativeOrder.dispense_status).toUpperCase()
+      : null;
+    if (syncedDispenseStatus) {
+      await db.run('UPDATE orders SET dispense_status = ? WHERE id = ?', [syncedDispenseStatus, id]);
+    }
     logger.info(`Updated order ${id} status from ${currentStatus} to ${newStatus}`);
     const updatedOrder = await fetchFormattedOrder(db, id);
     paymentMetadata?.onTransitionOutcome?.({
@@ -943,6 +953,15 @@ async function performOrderStatusUpdateInternal(
       }
     } else {
       await db.run('UPDATE orders SET status = ? WHERE id = ?', [newStatus, id]);
+      const localDispenseStatus =
+        newStatus === 'PAID'
+          ? 'QUEUED'
+          : (newStatus === 'FAILED' || newStatus === 'CANCELLED')
+            ? newStatus
+            : null;
+      if (localDispenseStatus) {
+        await db.run('UPDATE orders SET dispense_status = ? WHERE id = ?', [localDispenseStatus, id]);
+      }
     }
   }
 
@@ -1107,7 +1126,15 @@ export const updateOrderStatus = async (
       }
 
       if (alreadyPaidOrActive) {
-        if (currentStatus === 'COMPLETED' || currentDispense === 'DISPENSED' || existing.dispensed === true) {
+        const isFinalizingDispensedOrder =
+          (currentStatus === 'PAID' || currentStatus === 'PREPARING') &&
+          requestedStatus === 'COMPLETED' &&
+          (currentDispense === 'DISPENSED' || existing.dispensed === true);
+
+        if (
+          currentStatus === 'COMPLETED' ||
+          (!isFinalizingDispensedOrder && (currentDispense === 'DISPENSED' || existing.dispensed === true))
+        ) {
           return next(
             new ForbiddenError(
               `Customers cannot change completed order ${id} status (${currentStatus} -> ${requestedStatus})`

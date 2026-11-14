@@ -203,6 +203,15 @@ async function createPendingOrder(
         currency: opts.currency,
         receipt: opts.receipt
       })
+    },
+    payments: {
+      fetch: async (paymentId: string) => ({
+        id: paymentId,
+        order_id: rpOrderId,
+        status: 'captured',
+        currency: 'INR',
+        amount: 10000
+      })
     }
   });
   const res = await api(

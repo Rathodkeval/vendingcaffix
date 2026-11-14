@@ -9,6 +9,7 @@ process.env.KIOSK_SECRET =
 
 import app from '../index';
 import { initDB, getDB, resetMockDatabaseForColdStartSimulation } from '../config/db';
+import { setRazorpayClientForTesting } from '../controllers/orderController';
 import { getSyncedFirebaseMachine, getSyncedFirebaseOrder } from '../utils/firebase';
 
 const PORT = 5098;
@@ -53,6 +54,41 @@ async function runTests() {
 
   await initDB();
   await getDB().run('DELETE FROM machine_products');
+
+  const mockCreatedOrders: Array<{ id: string; amount: number; currency: string; receipt: string }> = [];
+  let mockOrderSeq = 0;
+  setRazorpayClientForTesting({
+    orders: {
+      create: async (opts: any) => {
+        mockOrderSeq += 1;
+        const created = {
+          id: `order_stage3_${mockOrderSeq}`,
+          amount: Number(opts.amount),
+          currency: opts.currency || 'INR',
+          receipt: String(opts.receipt || '')
+        };
+        mockCreatedOrders.push(created);
+        return created;
+      }
+    },
+    payments: {
+      fetch: async (paymentId: string) => {
+        const match =
+          paymentId === 'pay_test_hist_120'
+            ? [...mockCreatedOrders].reverse().find((o) => o.amount === 12000)
+            : paymentId === 'pay_test_inflight_115'
+              ? [...mockCreatedOrders].reverse().find((o) => o.amount === 11500)
+              : mockCreatedOrders[mockCreatedOrders.length - 1];
+        return {
+          id: paymentId,
+          order_id: match?.id || 'order_stage3_unknown',
+          status: 'captured',
+          currency: 'INR',
+          amount: match?.amount ?? 10000
+        };
+      }
+    }
+  });
 
   const server: http.Server = await new Promise((resolve) => {
     const s = app.listen(PORT, '127.0.0.1', () => resolve(s));

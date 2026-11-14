@@ -2,7 +2,8 @@ import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { getDB } from '../config/db';
 import { AuthRequest, assertMachineOwnershipOrAdmin } from '../middleware/auth';
-import { executeOrderStatusUpdate, updateOrderPaymentCapture } from './orderController';
+import { executeOrderStatusUpdate, resolveRazorpayOrderConfig, updateOrderPaymentCapture } from './orderController';
+import { validateCapturedRazorpayPayment } from '../utils/razorpayPaymentValidation';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError } from '../utils/errors';
 import {
   reconcileAuthoritativeGatewayRefundOutcome,
@@ -139,14 +140,82 @@ export const verifyPaymentSignature = async (
       return;
     }
 
-    // 6. Atomically store Razorpay tokens and transition unpaid -> PAID (triggers single ingredient deduction & Firestore transaction)
-    const updatedOrder = await executeOrderStatusUpdate(String(order_id), 'PAID', {
+    // 5b. Gateway capture verification via Razorpay server SDK:
+    // Never mark an order PAID based only on checkout HMAC when a real/configured Razorpay client is required.
+    let verifiedCapturedAmountPaise: number | null = null;
+    if (!isMockOrder) {
+      const { isMockMode, razorpayClient } = resolveRazorpayOrderConfig();
+      if (strict || !isMockMode) {
+        if (!razorpayClient || !razorpayClient.payments || typeof razorpayClient.payments.fetch !== 'function') {
+          return next(
+            new ServiceUnavailableError(
+              'Payment verification unavailable: Razorpay gateway client cannot fetch payment status'
+            )
+          );
+        }
+
+        let rpPayment: any;
+        try {
+          rpPayment = await razorpayClient.payments.fetch(String(razorpay_payment_id).trim());
+        } catch (gwErr: any) {
+          const gwStatusCode = Number(gwErr?.statusCode || gwErr?.error?.statusCode || 0);
+          logger.warn(
+            `Gateway payment fetch failed for order ${order_id} (payment ${razorpay_payment_id}, status=${gwStatusCode || 'network'}): ${gwErr?.message || gwErr?.error?.description || 'Unknown gateway error'}`
+          );
+          if (gwStatusCode === 400 || gwStatusCode === 404) {
+            return next(new BadRequestError('Razorpay payment ID could not be found or verified'));
+          }
+          return next(
+            new ServiceUnavailableError(
+              'Unable to confirm captured payment status with Razorpay right now. Order remains pending for safe verification or reconciliation.'
+            )
+          );
+        }
+
+        const captureCheck = validateCapturedRazorpayPayment({
+          payment: rpPayment,
+          expectedAmountInr: Number(order.amount),
+          expectedRazorpayOrderId: String(razorpay_order_id)
+        });
+
+        if (!captureCheck.valid) {
+          logger.warn(
+            `Rejected payment verification for order ${order_id} (payment ${razorpay_payment_id}): ${captureCheck.reason}`
+          );
+          if (captureCheck.code === 'PENDING_CAPTURE') {
+            return next(new ServiceUnavailableError(captureCheck.reason));
+          }
+          return next(new BadRequestError(captureCheck.reason));
+        }
+
+        verifiedCapturedAmountPaise = captureCheck.data.amountPaise;
+      }
+    }
+
+    // 6. Atomically store Razorpay tokens, captured_amount_paise, and transition unpaid -> PAID
+    // (triggers single ingredient deduction & Firestore transaction)
+    let updatedOrder = await executeOrderStatusUpdate(String(order_id), 'PAID', {
       razorpayPaymentId: String(razorpay_payment_id),
       razorpaySignature: String(razorpay_signature),
+      capturedAmountPaise: verifiedCapturedAmountPaise,
       allowPaidOrderRecovery: true
     });
+
+    if (
+      verifiedCapturedAmountPaise !== null &&
+      (updatedOrder?.captured_amount_paise === null || updatedOrder?.captured_amount_paise === undefined)
+    ) {
+      updatedOrder =
+        (await updateOrderPaymentCapture(String(order_id), {
+          capturedAmountPaise: verifiedCapturedAmountPaise,
+          razorpayPaymentId: String(razorpay_payment_id),
+          razorpaySignature: String(razorpay_signature)
+        })) || updatedOrder;
+    }
     
-    logger.info(`Successfully verified payment for order ${order_id} (machine: ${order.machine_id}). Marked as PAID.`);
+    logger.info(
+      `Successfully verified payment for order ${order_id} (machine: ${order.machine_id}, captured: ${verifiedCapturedAmountPaise ?? 'mock'} paise). Marked as PAID.`
+    );
 
     res.status(200).json({
       status: 'success',

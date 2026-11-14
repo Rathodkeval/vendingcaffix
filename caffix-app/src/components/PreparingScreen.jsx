@@ -1,5 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Check } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Check, CheckCircle2, RefreshCw, AlertCircle, Home } from 'lucide-react';
+import {
+  pollOrderDispenseProgress,
+  finalizeDispensedOrder
+} from '../utils/paymentLifecycle';
 
 // Web Audio API Kiosk Sound Synthesizer Class
 class BrewingAudioController {
@@ -276,20 +280,43 @@ class BrewingAudioController {
   }
 }
 
-export default function PreparingScreen({ onComplete }) {
-  const [progress, setProgress] = useState(0);
-  const [activeStep, setActiveStep] = useState({ text: 'Preheating brewing boilers...', temp: '25°C', press: '0.0 Bar' });
-  
+const DISPENSE_POLL_INTERVAL_MS = 1500;
+const DISPENSE_STALL_TIMEOUT_MS = 120000;
+
+export default function PreparingScreen({
+  orderDetails,
+  apiBase,
+  onDispenseComplete,
+  onDispenseFailed,
+  onComplete,
+  onExit
+}) {
+  const [progress, setProgress] = useState(5);
+  const [dispensePhase, setDispensePhase] = useState('QUEUED'); // 'QUEUED' | 'DISPENSING' | 'DISPENSED' | 'STALLED'
+  const [activeStep, setActiveStep] = useState({
+    text: 'Payment confirmed. Sending order to machine...',
+    temp: '25°C',
+    press: '0.0 Bar'
+  });
+
   const canvasRef = useRef(null);
-  const progressRef = useRef(0);
+  const progressRef = useRef(5);
+  const dispensePhaseRef = useRef('QUEUED');
   const steamParticlesRef = useRef([]);
   const animationFrameIdRef = useRef(null);
   const audioControllerRef = useRef(null);
+  const orderId = orderDetails?.dbId;
+  const completedRef = useRef(false);
+  const mountedAtRef = useRef(0);
 
-  // Update helper ref
+  // Update helper refs
   useEffect(() => {
     progressRef.current = progress;
   }, [progress]);
+
+  useEffect(() => {
+    dispensePhaseRef.current = dispensePhase;
+  }, [dispensePhase]);
 
   // Autoplay Context Activation Trigger
   const handleInteraction = () => {
@@ -302,8 +329,7 @@ export default function PreparingScreen({ onComplete }) {
   useEffect(() => {
     const controller = new BrewingAudioController();
     audioControllerRef.current = controller;
-    
-    // Play startup machine hum and subtle ambient steam
+
     controller.startStartupHum();
     controller.startSteamSound();
 
@@ -315,56 +341,140 @@ export default function PreparingScreen({ onComplete }) {
     };
   }, []);
 
-  // 2. Main Progress Timer Loop
+  const triggerDispenseSuccess = useCallback(async (confirmedOrder) => {
+    if (completedRef.current) return;
+    completedRef.current = true;
+    setDispensePhase('DISPENSED');
+    setProgress(100);
+
+    const token = localStorage.getItem('kioskToken') || '';
+    const targetOrderId = confirmedOrder?.id || orderId;
+    if (apiBase && targetOrderId) {
+      await finalizeDispensedOrder({
+        apiBase,
+        token,
+        orderId: targetOrderId
+      });
+    }
+
+    setTimeout(() => {
+      if (onDispenseComplete) {
+        onDispenseComplete(confirmedOrder);
+      } else if (onComplete) {
+        onComplete(confirmedOrder);
+      }
+    }, 900);
+  }, [apiBase, onComplete, onDispenseComplete, orderId]);
+
+  const checkDispenseOnce = useCallback(async () => {
+    if (completedRef.current || !orderId || !apiBase) return;
+    const token = localStorage.getItem('kioskToken') || '';
+    const pollRes = await pollOrderDispenseProgress({
+      apiBase,
+      token,
+      orderId
+    });
+    if (!pollRes.ok) return;
+
+    if (pollRes.state === 'DISPENSED') {
+      await triggerDispenseSuccess(pollRes.order);
+      return;
+    }
+
+    if (pollRes.state === 'DISPENSE_FAILED') {
+      completedRef.current = true;
+      const audio = audioControllerRef.current;
+      if (audio) {
+        audio.stopPouringSound();
+        audio.stopBubblingSound();
+        audio.stopStartupHum();
+        audio.stopSteamSound();
+      }
+      onDispenseFailed?.(pollRes.order);
+      return;
+    }
+
+    if (pollRes.state === 'DISPENSING') {
+      setDispensePhase('DISPENSING');
+    } else if (mountedAtRef.current && Date.now() - mountedAtRef.current >= DISPENSE_STALL_TIMEOUT_MS) {
+      setDispensePhase('STALLED');
+    } else {
+      setDispensePhase('QUEUED');
+    }
+  }, [apiBase, onDispenseFailed, orderId, triggerDispenseSuccess]);
+
+  // 2. Real-time backend dispense status polling (NEVER completes on timer alone)
+  useEffect(() => {
+    if (!orderId || !apiBase) {
+      return undefined;
+    }
+
+    mountedAtRef.current = Date.now();
+    const initialTimer = setTimeout(() => {
+      checkDispenseOnce();
+    }, 0);
+    const pollInterval = setInterval(checkDispenseOnce, DISPENSE_POLL_INTERVAL_MS);
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(pollInterval);
+    };
+  }, [apiBase, checkDispenseOnce, orderId]);
+
+  // 2b. Bounded visual progress animation gated by real backend dispense phase
   useEffect(() => {
     const interval = setInterval(() => {
       setProgress((prev) => {
-        if (prev >= 100) {
-          clearInterval(interval);
-          return 100;
+        const phase = dispensePhaseRef.current;
+        if (phase === 'DISPENSED') return 100;
+        if (phase === 'QUEUED' || phase === 'STALLED') {
+          return prev < 18 ? prev + 1 : prev;
         }
-        return prev + 1;
+        if (phase === 'DISPENSING') {
+          return prev < 92 ? prev + 1 : prev;
+        }
+        return prev;
       });
-    }, 120); // 100 ticks * 120ms = 12 seconds total duration
+    }, 180);
 
     return () => clearInterval(interval);
   }, []);
 
-  // 3. Audio & Telemetry Transitions
+  // 3. Audio & Telemetry Transitions driven by phase + progress
   useEffect(() => {
     const audio = audioControllerRef.current;
     if (!audio) return;
 
-    // Trigger pouring sounds at 20%
-    if (progress === 20) {
-      audio.startPouringSound();
-      audio.startBubblingSound();
-    }
-    // Update liquid acoustics pitch
-    if (progress > 20 && progress < 100) {
+    if (dispensePhase === 'DISPENSING' && progress >= 20 && progress < 100) {
+      if (!audio.pourNoiseNode) {
+        audio.startPouringSound();
+        audio.startBubblingSound();
+      }
       audio.updatePouringPitch(progress);
     }
-    // Complete cycle chimes
-    if (progress === 100) {
+
+    if (progress === 100 || dispensePhase === 'DISPENSED') {
       audio.stopPouringSound();
       audio.stopBubblingSound();
       audio.stopStartupHum();
       audio.playCompletionChime();
     }
 
-    // Telemetry updates
-    let text = '';
-    let temp = '25°C';
-    let press = '0.0 Bar';
+    let text;
+    let temp;
+    let press;
 
-    if (progress < 20) {
-      text = 'Preheating brewing boilers...';
-      const currentTemp = Math.round(25 + (progress / 20) * 50);
+    if (dispensePhase === 'STALLED') {
+      text = 'Waiting for machine confirmation...';
+      temp = '90°C';
+      press = '0.0 Bar';
+    } else if (dispensePhase === 'QUEUED') {
+      text = 'Payment confirmed. Queued for machine...';
+      const currentTemp = Math.round(25 + (Math.min(progress, 20) / 20) * 50);
       temp = `${currentTemp}°C`;
       press = '0.0 Bar';
     } else if (progress < 35) {
-      text = 'Grinding premium Arabica beans...';
-      const currentTemp = Math.round(75 + ((progress - 20) / 15) * 10);
+      text = 'Grinding fresh beans...';
+      const currentTemp = Math.round(75 + ((Math.max(progress, 20) - 20) / 15) * 10);
       temp = `${currentTemp}°C`;
       press = '0.5 Bar';
     } else if (progress < 50) {
@@ -376,27 +486,19 @@ export default function PreparingScreen({ onComplete }) {
       text = 'Extracting espresso under 9 Bar...';
       temp = '95°C';
       press = '9.0 Bar';
-    } else if (progress < 95) {
-      text = 'Dispensing warm coffee blend...';
-      const currentTemp = Math.round(95 - ((progress - 80) / 15) * 7);
+    } else if (progress < 100) {
+      text = 'Dispensing your freshly brewed drink...';
+      const currentTemp = Math.round(95 - ((progress - 80) / 20) * 7);
       temp = `${currentTemp}°C`;
       press = '3.0 Bar';
     } else {
       text = 'Dispensing completed! Enjoy!';
-      const currentTemp = Math.round(88 - ((progress - 95) / 5) * 16);
-      temp = `${currentTemp}°C`;
+      temp = '82°C';
       press = '0.0 Bar';
     }
 
     setActiveStep({ text, temp, press });
-  }, [progress]);
-
-  // 4. Auto transition redirect timer
-  useEffect(() => {
-    if (progress === 100) {
-      onComplete();
-    }
-  }, [progress, onComplete]);
+  }, [progress, dispensePhase]);
 
   // 5. Canvas Animation Loop (60 FPS)
   useEffect(() => {
@@ -743,13 +845,23 @@ export default function PreparingScreen({ onComplete }) {
       onClick={handleInteraction}
       className="w-full h-full flex flex-col justify-between p-4 bg-cream-light relative overflow-hidden select-none"
     >
-      {/* Header title (Updated dynamically for complete state) */}
+      {/* Header title (Payment Success separated cleanly from Brewing Progress) */}
       <div className="text-center mt-2 transition-all duration-500">
+        <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-[11px] font-bold text-emerald-800 mb-2">
+          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+          <span>Payment Confirmed • Order {orderDetails?.dbId}</span>
+        </div>
         <h2 className="font-sans font-extrabold text-2xl text-coffee-dark tracking-tight leading-none">
-          {progress === 100 ? 'Order Complete!' : 'Brewing in Progress'}
+          {dispensePhase === 'DISPENSED'
+            ? 'Beverage Ready!'
+            : dispensePhase === 'QUEUED'
+              ? 'Order Queued at Machine'
+              : dispensePhase === 'STALLED'
+                ? 'Waiting for Machine Confirmation'
+                : 'Brewing in Progress'}
         </h2>
-        <p className={`text-xs font-semibold tracking-wide mt-1.5 ${progress === 100 ? 'text-coffee-light' : 'text-coffee-light animate-pulse'}`}>
-          {progress === 100 ? 'Thank you! Enjoy your coffee.' : 'Please wait while your coffee is freshly crafted'}
+        <p className={`text-xs font-semibold tracking-wide mt-1.5 ${dispensePhase === 'DISPENSED' ? 'text-emerald-700' : 'text-coffee-light animate-pulse'}`}>
+          {activeStep.text}
         </p>
       </div>
 
@@ -765,8 +877,8 @@ export default function PreparingScreen({ onComplete }) {
 
       {/* Lower section controls container */}
       <div className="w-full max-w-lg mx-auto bg-white border border-coffee-light/10 rounded-2xl p-4 shadow-sm mb-2 min-h-[94px] flex flex-col justify-center">
-        {progress === 100 ? (
-          // Success State Action Controls
+        {dispensePhase === 'DISPENSED' ? (
+          // Confirmed Dispensed State Action Controls
           <div className="flex flex-col items-center justify-center gap-2">
             <div className="flex items-center gap-2 mb-1.5 animate-scale-up">
               <div className="relative w-7 h-7 bg-emerald-500 rounded-full flex items-center justify-center shadow-md shadow-emerald-500/20">
@@ -774,20 +886,46 @@ export default function PreparingScreen({ onComplete }) {
                 <div className="absolute inset-0 rounded-full border border-emerald-500 animate-ping opacity-30" />
               </div>
               <span className="text-xs font-black text-emerald-700 uppercase tracking-widest">
-                Your coffee is ready!
+                Dispensing Confirmed!
               </span>
             </div>
 
             <button
-              onClick={onComplete}
+              onClick={() => (onDispenseComplete ? onDispenseComplete() : onComplete?.())}
               className="w-full py-3 bg-coffee text-cream-light font-sans font-bold text-sm rounded-xl shadow-md hover:bg-coffee-dark border border-gold/20 flex items-center justify-center gap-2 active:scale-95 active-touch-feedback transition-all animate-fade-in"
             >
               <span>Tap to Continue</span>
             </button>
           </div>
+        ) : dispensePhase === 'STALLED' ? (
+          <div className="flex flex-col gap-2 text-center">
+            <div className="flex items-center justify-center gap-1.5 text-xs font-bold text-amber-800">
+              <AlertCircle className="w-4 h-4 text-amber-600" />
+              <span>Machine confirmation is delayed. Check your cup tray or retry status check.</span>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={checkDispenseOnce}
+                className="flex-1 py-2.5 bg-coffee text-cream-light font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 active:scale-95"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Check Status Now</span>
+              </button>
+              <button
+                onClick={() => onExit?.()}
+                className="flex-1 py-2.5 bg-cream hover:bg-cream-dark text-coffee-dark font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 active:scale-95"
+              >
+                <Home className="w-3.5 h-3.5" />
+                <span>Return to Home</span>
+              </button>
+            </div>
+          </div>
         ) : (
           <>
-            <div className="flex justify-end items-center text-xs font-bold text-coffee-dark mb-1.5">
+            <div className="flex justify-between items-center text-xs font-bold text-coffee-dark mb-1.5">
+              <span className="text-[11px] text-coffee-light font-semibold">
+                {dispensePhase === 'QUEUED' ? 'Awaiting dispenser start...' : 'Dispensing in progress...'}
+              </span>
               <span className="font-mono">{progress}%</span>
             </div>
             

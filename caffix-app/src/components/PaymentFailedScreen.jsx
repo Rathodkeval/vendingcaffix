@@ -1,13 +1,27 @@
-import React, { useEffect } from 'react';
-import { AlertCircle, RefreshCw, XCircle } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { AlertCircle, RefreshCw, XCircle, Loader2 } from 'lucide-react';
 
-export default function PaymentFailedScreen({ orderDetails, onRetry, onCancel }) {
+export default function PaymentFailedScreen({ orderDetails, failureMessage, onRetry, onCancel }) {
+  const [pendingAction, setPendingAction] = useState(null); // 'retry' | 'cancel' | null
+
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (onCancel) onCancel();
+      if (onCancel && !pendingAction) {
+        onCancel({ reason: 'timeout' });
+      }
     }, 60000);
     return () => clearTimeout(timer);
-  }, [onCancel]);
+  }, [onCancel, pendingAction]);
+
+  const handleAction = async (actionType, handler, arg) => {
+    if (pendingAction || typeof handler !== 'function') return;
+    setPendingAction(actionType);
+    try {
+      await handler(arg);
+    } finally {
+      setPendingAction(null);
+    }
+  };
 
   return (
     <div className="w-full h-full flex flex-col justify-between items-center py-10 px-6 bg-cream-light relative overflow-hidden text-center">
@@ -47,22 +61,30 @@ export default function PaymentFailedScreen({ orderDetails, onRetry, onCancel })
 
       {/* Actions */}
       <div className="z-10 w-full max-w-xs flex flex-col gap-3">
+        {failureMessage && (
+          <div className="px-4 py-2.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-sans text-center">
+            {failureMessage}
+          </div>
+        )}
+
         {/* Retry Button */}
         <button
-          onClick={onRetry}
-          className="py-4 px-6 bg-coffee text-cream-light font-sans font-bold text-sm rounded-xl shadow-md hover:bg-coffee-dark border border-gold/20 flex items-center justify-center gap-2 active:scale-95 active-touch-feedback w-full transition-transform"
+          disabled={Boolean(pendingAction)}
+          onClick={() => handleAction('retry', onRetry)}
+          className="py-4 px-6 bg-coffee text-cream-light font-sans font-bold text-sm rounded-xl shadow-md hover:bg-coffee-dark border border-gold/20 flex items-center justify-center gap-2 active:scale-95 active-touch-feedback w-full transition-transform disabled:opacity-60 disabled:cursor-not-allowed"
         >
-          <RefreshCw className="w-4 h-4" />
-          <span>Try Payment Again</span>
+          {pendingAction === 'retry' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+          <span>{pendingAction === 'retry' ? 'Checking Payment...' : 'Try Payment Again'}</span>
         </button>
 
         {/* Cancel Button */}
         <button
-          onClick={onCancel}
-          className="py-3.5 px-6 bg-red-50 hover:bg-red-100 text-red-700 font-sans font-bold text-xs rounded-xl border border-red-200 flex items-center justify-center gap-2 active:scale-95 active-touch-feedback w-full transition-transform"
+          disabled={Boolean(pendingAction)}
+          onClick={() => handleAction('cancel', onCancel, { reason: 'customer_cancelled' })}
+          className="py-3.5 px-6 bg-red-50 hover:bg-red-100 text-red-700 font-sans font-bold text-xs rounded-xl border border-red-200 flex items-center justify-center gap-2 active:scale-95 active-touch-feedback w-full transition-transform disabled:opacity-60 disabled:cursor-not-allowed"
         >
-          <XCircle className="w-4 h-4" />
-          <span>Cancel & Return to Menu</span>
+          {pendingAction === 'cancel' ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />}
+          <span>{pendingAction === 'cancel' ? 'Checking Status...' : 'Cancel & Return to Menu'}</span>
         </button>
       </div>
     </div>

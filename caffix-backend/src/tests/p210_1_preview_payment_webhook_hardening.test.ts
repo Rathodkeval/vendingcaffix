@@ -539,12 +539,23 @@ async function runP2101Tests() {
     await withEnv(validPreviewCreds, async () => {
       // Stub Razorpay client so zero network calls occur while proving real Test Mode code path executes
       let createdOrderCount = 0;
+      const stubOrderMap = new Map<string, string>();
       setRazorpayClientForTesting({
         orders: {
           create: async () => {
             createdOrderCount += 1;
-            return { id: `order_rp_preview_real_${createdOrderCount}`, amount: 10000, currency: 'INR' };
+            const rpId = `order_rp_preview_real_${createdOrderCount}`;
+            return { id: rpId, amount: 10000, currency: 'INR' };
           }
+        },
+        payments: {
+          fetch: async (paymentId: string) => ({
+            id: paymentId,
+            order_id: stubOrderMap.get(paymentId) || null,
+            status: 'captured',
+            currency: 'INR',
+            amount: 10000
+          })
         }
       });
 

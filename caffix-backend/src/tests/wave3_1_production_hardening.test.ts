@@ -466,6 +466,14 @@ async function runWave31Tests() {
         create: async (opts: any) => ({
           id: `order_live_${opts.receipt.replace(/[^A-Za-z0-9]/g, '')}`
         })
+      },
+      payments: {
+        fetch: async (paymentId: string) => ({
+          id: paymentId,
+          status: 'captured',
+          currency: 'INR',
+          amount: 10000
+        })
       }
     });
 

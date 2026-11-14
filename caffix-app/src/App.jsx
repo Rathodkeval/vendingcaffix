@@ -5,6 +5,9 @@ import SelectionScreen from './components/SelectionScreen';
 import SummaryScreen from './components/SummaryScreen';
 import FlavorAndCustomizationView from './components/FlavorAndCustomizationView';
 import PaymentScreen from './components/PaymentScreen';
+import PreparingScreen from './components/PreparingScreen';
+import PaymentUncertainScreen from './components/PaymentUncertainScreen';
+import DispenseFailedScreen from './components/DispenseFailedScreen';
 import SuccessScreen from './components/SuccessScreen';
 import AdminPasscode from './components/AdminPasscode';
 import AdminDashboard from './components/AdminDashboard';
@@ -17,6 +20,7 @@ import {
   fetchKioskSyncState,
   resolveEffectiveMachineId
 } from './utils/kioskSync';
+import { safeCheckAndCancelOrder } from './utils/paymentLifecycle';
 
 const API_BASE = import.meta.env.VITE_API_URL || (
   window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.port === '8000' || window.location.port === '5173'
@@ -25,7 +29,14 @@ const API_BASE = import.meta.env.VITE_API_URL || (
 );
 
 const KIOSK_POLL_INTERVAL_MS = 15000;
-const SYNC_PAUSED_SCREENS = ['PAYMENT', 'PAYMENT_FAILED', 'SUCCESS'];
+const SYNC_PAUSED_SCREENS = [
+  'PAYMENT',
+  'PAYMENT_UNCERTAIN',
+  'PAYMENT_FAILED',
+  'PREPARING',
+  'DISPENSE_FAILED',
+  'SUCCESS'
+];
 
 export default function App() {
   const [kioskStatus, setKioskStatus] = useState('VERIFYING'); // 'VERIFYING' | 'AUTHORIZED' | 'UNAUTHORIZED'
@@ -33,6 +44,9 @@ export default function App() {
   const [screen, setScreen] = useState('WELCOME');
   const [selectedCoffee, setSelectedCoffee] = useState(null);
   const [orderDetails, setOrderDetails] = useState(null);
+  const [uncertainPayment, setUncertainPayment] = useState(null);
+  const [failedPaymentMessage, setFailedPaymentMessage] = useState('');
+  const [failedDispenseOrder, setFailedDispenseOrder] = useState(null);
   
   // Admin & Settings States
   const [prices, setPrices] = useState(DEFAULT_PRICES);
@@ -264,29 +278,72 @@ export default function App() {
     }
   };
 
-  const handlePaymentSuccess = async () => {
-    const token = localStorage.getItem('kioskToken') || '';
-    try {
-      await fetch(`${API_BASE}/orders/${orderDetails.dbId}/status`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ status: 'COMPLETED' })
-      });
-      setScreen('SUCCESS');
-    } catch (e) {
-      console.error('Update status to COMPLETED failed:', e);
+  const handlePaymentSuccess = async (verifiedOrder = null) => {
+    setUncertainPayment(null);
+    setFailedPaymentMessage('');
+    setFailedDispenseOrder(null);
+
+    if (verifiedOrder && typeof verifiedOrder === 'object') {
+      setOrderDetails((prev) => ({
+        ...(prev || {}),
+        status: verifiedOrder.status || prev?.status || 'PAID',
+        dispense_status: verifiedOrder.dispense_status || prev?.dispense_status,
+        dispensed: typeof verifiedOrder.dispensed === 'boolean' ? verifiedOrder.dispensed : prev?.dispensed,
+        razorpay_payment_id: verifiedOrder.razorpay_payment_id || prev?.razorpay_payment_id
+      }));
     }
+
+    const dispenseStatus = String(verifiedOrder?.dispense_status || '').toUpperCase();
+    if (verifiedOrder?.dispensed === true || dispenseStatus === 'DISPENSED' || String(verifiedOrder?.status || '').toUpperCase() === 'COMPLETED') {
+      setScreen('SUCCESS');
+      return;
+    }
+
+    if (dispenseStatus === 'FAILED') {
+      setFailedDispenseOrder(verifiedOrder);
+      setScreen('DISPENSE_FAILED');
+      return;
+    }
+
+    setScreen('PREPARING');
+  };
+
+  const handlePaymentUncertain = (info = {}) => {
+    setFailedPaymentMessage('');
+    setUncertainPayment({
+      verifyPayload: info.verifyPayload || null,
+      message: info.message || ''
+    });
+    setScreen('PAYMENT_UNCERTAIN');
+  };
+
+  const handlePaymentFailed = (info = {}) => {
+    setUncertainPayment(null);
+    setFailedPaymentMessage(info?.message || '');
+    setScreen('PAYMENT_FAILED');
+  };
+
+  const handleDispenseComplete = () => {
+    setFailedDispenseOrder(null);
+    setScreen('SUCCESS');
+  };
+
+  const handleDispenseFailed = (failedOrder = null) => {
+    setFailedDispenseOrder(failedOrder);
+    setScreen('DISPENSE_FAILED');
   };
 
   const handleFinishOrder = async () => {
     // Reset and return
     setSelectedCoffee(null);
     setOrderDetails(null);
+    setUncertainPayment(null);
+    setFailedPaymentMessage('');
+    setFailedDispenseOrder(null);
     const token = localStorage.getItem('kioskToken') || '';
-    await refreshKioskData(token, machineId);
+    if (token) {
+      await refreshKioskData(token, machineId);
+    }
     setScreen('WELCOME');
   };
 
@@ -294,24 +351,26 @@ export default function App() {
     const token = localStorage.getItem('kioskToken') || '';
     try {
       if (!options?.alreadyCancelled && orderDetails && orderDetails.dbId) {
-        const cancelRes = await fetch(`${API_BASE}/orders/${orderDetails.dbId}/cancel`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify({
-            razorpay_order_id: orderDetails.razorpay_order_id,
-            reason: options?.reason || 'customer_cancelled'
-          })
+        const res = await safeCheckAndCancelOrder({
+          apiBase: API_BASE,
+          token,
+          orderId: orderDetails.dbId,
+          razorpayOrderId: orderDetails.razorpay_order_id,
+          reason: options?.reason || 'customer_cancelled',
+          hasPendingVerification: Boolean(options?.hasPendingVerification || uncertainPayment?.verifyPayload)
         });
-        if (cancelRes.status === 409) {
-          const cancelData = await cancelRes.json().catch(() => ({}));
-          const resolvedStatus = String(cancelData?.data?.status || '').toUpperCase();
-          if (['PAID', 'PREPARING', 'COMPLETED'].includes(resolvedStatus)) {
-            await handlePaymentSuccess();
-            return;
-          }
+
+        if (res.action === 'ALREADY_PAID') {
+          await handlePaymentSuccess(res.order);
+          return;
+        }
+
+        if (res.action === 'UNCERTAIN') {
+          handlePaymentUncertain({
+            verifyPayload: uncertainPayment?.verifyPayload || null,
+            message: res.message
+          });
+          return;
         }
       }
     } catch (e) {
@@ -319,12 +378,18 @@ export default function App() {
     }
     setSelectedCoffee(null);
     setOrderDetails(null);
+    setUncertainPayment(null);
+    setFailedPaymentMessage('');
+    setFailedDispenseOrder(null);
     setScreen('SELECTION');
   };
 
   const handleCheckoutDismissed = () => {
     setSelectedCoffee(null);
     setOrderDetails(null);
+    setUncertainPayment(null);
+    setFailedPaymentMessage('');
+    setFailedDispenseOrder(null);
     setScreen('SELECTION');
   };
 
@@ -332,30 +397,34 @@ export default function App() {
     const token = localStorage.getItem('kioskToken') || '';
     try {
       if (orderDetails && orderDetails.dbId) {
-        const cancelRes = await fetch(`${API_BASE}/orders/${orderDetails.dbId}/cancel`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify({
-            razorpay_order_id: orderDetails.razorpay_order_id,
-            reason: 'payment_failed'
-          })
+        const res = await safeCheckAndCancelOrder({
+          apiBase: API_BASE,
+          token,
+          orderId: orderDetails.dbId,
+          razorpayOrderId: orderDetails.razorpay_order_id,
+          reason: 'payment_failed',
+          hasPendingVerification: Boolean(uncertainPayment?.verifyPayload)
         });
-        if (cancelRes.status === 409) {
-          const cancelData = await cancelRes.json().catch(() => ({}));
-          const resolvedStatus = String(cancelData?.data?.status || '').toUpperCase();
-          if (['PAID', 'PREPARING', 'COMPLETED'].includes(resolvedStatus)) {
-            await handlePaymentSuccess();
-            return;
-          }
+
+        if (res.action === 'ALREADY_PAID') {
+          await handlePaymentSuccess(res.order);
+          return;
+        }
+
+        if (res.action === 'UNCERTAIN') {
+          handlePaymentUncertain({
+            verifyPayload: uncertainPayment?.verifyPayload || null,
+            message: res.message
+          });
+          return;
         }
       }
     } catch (e) {
       console.error('Retry order cleanup failed:', e);
     }
     setOrderDetails(null);
+    setUncertainPayment(null);
+    setFailedPaymentMessage('');
     setScreen('SUMMARY');
   };
 
@@ -622,17 +691,49 @@ export default function App() {
                   key="payment"
                   orderDetails={orderDetails} 
                   onPaymentSuccess={handlePaymentSuccess} 
-                  onPaymentFailed={() => setScreen('PAYMENT_FAILED')}
+                  onPaymentFailed={handlePaymentFailed}
+                  onPaymentUncertain={handlePaymentUncertain}
                   onCancel={handleCancelOrder}
                   onDismissed={handleCheckoutDismissed}
+                />
+              )}
+              {screen === 'PAYMENT_UNCERTAIN' && (
+                <PaymentUncertainScreen
+                  key="payment_uncertain"
+                  orderDetails={orderDetails}
+                  verifyPayload={uncertainPayment?.verifyPayload || null}
+                  initialMessage={uncertainPayment?.message}
+                  apiBase={API_BASE}
+                  onConfirmedPaid={handlePaymentSuccess}
+                  onConfirmedFailed={handlePaymentFailed}
+                  onReturnHome={handleFinishOrder}
                 />
               )}
               {screen === 'PAYMENT_FAILED' && (
                 <PaymentFailedScreen 
                   key="payment_failed"
-                  orderDetails={orderDetails} 
+                  orderDetails={orderDetails}
+                  failureMessage={failedPaymentMessage}
                   onRetry={handleRetryFailedPayment}
                   onCancel={handleCancelOrder}
+                />
+              )}
+              {screen === 'PREPARING' && (
+                <PreparingScreen
+                  key="preparing"
+                  orderDetails={orderDetails}
+                  apiBase={API_BASE}
+                  onDispenseComplete={handleDispenseComplete}
+                  onDispenseFailed={handleDispenseFailed}
+                  onExit={handleFinishOrder}
+                />
+              )}
+              {screen === 'DISPENSE_FAILED' && (
+                <DispenseFailedScreen
+                  key="dispense_failed"
+                  orderDetails={orderDetails}
+                  failedOrder={failedDispenseOrder}
+                  onFinished={handleFinishOrder}
                 />
               )}
 

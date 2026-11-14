@@ -596,14 +596,21 @@ export async function commitOrderTransitionInFirebase(
       }
 
       // Guard against overwriting paid/preparing/completed/dispensing/dispensed orders with FAILED, CANCELLED, or PENDING,
-      // mutating already-COMPLETED/DISPENSED orders, or transitioning CLOSED unpaid orders without verified payment recovery.
+      // mutating already-COMPLETED/DISPENSED orders (except finalizing PAID/PREPARING -> COMPLETED once DISPENSED),
+      // or transitioning CLOSED unpaid orders without verified payment recovery.
       const isNonPaidTarget = ['FAILED', 'CANCELLED', 'PENDING'].includes(targetStatus);
       const transitionToActive = ['PAID', 'PREPARING', 'COMPLETED'].includes(targetStatus);
       const isClosedUnpaidOrigin = currentStatus === 'FAILED' || currentStatus === 'CANCELLED';
+      const isFinalizingDispensedOrder =
+        (currentStatus === 'PAID' || currentStatus === 'PREPARING') &&
+        targetStatus === 'COMPLETED' &&
+        (currentDispenseStatus === 'DISPENSED' || existingData.dispensed === true);
 
       if (
         (isNonPaidTarget && isPaidOrActive) ||
-        (currentStatus === 'COMPLETED' || currentDispenseStatus === 'DISPENSED' || existingData.dispensed === true) ||
+        currentStatus === 'COMPLETED' ||
+        (!isFinalizingDispensedOrder &&
+          (currentDispenseStatus === 'DISPENSED' || existingData.dispensed === true)) ||
         (isNonPaidTarget && currentStatus !== 'PENDING') ||
         (isClosedUnpaidOrigin && !(input.allowPaidOrderRecovery && targetStatus === 'PAID'))
       ) {

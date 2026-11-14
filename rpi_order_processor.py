@@ -26,9 +26,12 @@ MACHINE_ID = os.getenv("MACHINE_ID", "CFX-MC-01").strip()
 MACHINE_ID_PATTERN = re.compile(r"^CFX-MC-\d{2,4}$")
 
 # Active statuses eligible for dispensing once payment is confirmed
-ELIGIBLE_ORDER_STATUSES = {"QUEUED", "PAID", "COMPLETED"}
+ELIGIBLE_ORDER_STATUSES = {"QUEUED", "PAID", "PREPARING", "COMPLETED"}
 # Dispense lifecycle states that indicate an order has already been claimed or completed
 CLAIMED_DISPENSE_STATES = {"CLAIMING", "DISPENSING", "DISPENSED", "COMPLETED"}
+# Failed/cancelled dispense states that must never be automatically re-dispensed
+FAILED_DISPENSE_STATES = {"FAILED", "CANCELLED"}
+NON_PROCESSABLE_DISPENSE_STATES = CLAIMED_DISPENSE_STATES | FAILED_DISPENSE_STATES
 
 
 def validate_machine_id(machine_id: str) -> str:
@@ -85,15 +88,33 @@ class MachineOrderProcessor:
         if order_id and order_id in self._processed_order_ids:
             return False
 
-        # Check if already dispensed or currently dispensing in Firestore document
+        # Check if already dispensed, claimed, or previously failed in Firestore document
         if order_data.get("dispensed") is True:
             return False
 
-        dispense_status = str(order_data.get("dispense_status") or "").upper()
-        if dispense_status in {"DISPENSING", "DISPENSED"}:
+        dispense_status = str(order_data.get("dispense_status") or "").strip().upper()
+        if dispense_status in NON_PROCESSABLE_DISPENSE_STATES:
             return False
 
-        status = str(order_data.get("status") or "").upper()
+        # Reject fully refunded orders or orders with active pending refund reservations
+        refund_status = str(order_data.get("refund_status") or "").strip().upper()
+        if refund_status == "FULL":
+            return False
+
+        pending_refund_raw = order_data.get("pending_refund_amount_paise")
+        if pending_refund_raw is not None and pending_refund_raw != "":
+            try:
+                if float(pending_refund_raw) > 0:
+                    return False
+            except (TypeError, ValueError):
+                self.logger.warning(
+                    "Rejecting order %s due to invalid pending_refund_amount_paise: %r",
+                    order_id,
+                    pending_refund_raw,
+                )
+                return False
+
+        status = str(order_data.get("status") or "").strip().upper()
         if status not in ELIGIBLE_ORDER_STATUSES:
             return False
 
@@ -124,7 +145,9 @@ class MachineOrderProcessor:
             with self._lock:
                 if order_id in self._processed_order_ids or order_snapshot_data.get("dispensed") is True:
                     return False
-                if str(order_snapshot_data.get("dispense_status") or "").upper() in {"DISPENSING", "DISPENSED"}:
+                if str(order_snapshot_data.get("dispense_status") or "").strip().upper() in NON_PROCESSABLE_DISPENSE_STATES:
+                    return False
+                if not self.can_process_order(order_snapshot_data):
                     return False
                 order_snapshot_data["dispense_status"] = "DISPENSING"
                 order_snapshot_data["claimed_by"] = self.machine_id
@@ -151,7 +174,7 @@ class MachineOrderProcessor:
                 self.logger.error("Arduino dispensing error for order %s: %s", order_id, exc)
                 success = False
 
-        # Mark order as DISPENSED in Firestore after hardware command finishes
+        # Mark order as DISPENSED or FAILED in Firestore after hardware command finishes
         now_iso = datetime.now(timezone.utc).isoformat()
         if doc_ref is not None:
             try:
@@ -161,6 +184,7 @@ class MachineOrderProcessor:
                         "dispensed": bool(success),
                         "dispensed_by": self.machine_id,
                         "dispensed_at": now_iso,
+                        "updated_at": now_iso,
                     },
                     merge=True,
                 )
@@ -171,6 +195,7 @@ class MachineOrderProcessor:
             order_snapshot_data["dispensed"] = bool(success)
             order_snapshot_data["dispensed_by"] = self.machine_id
             order_snapshot_data["dispensed_at"] = now_iso
+            order_snapshot_data["updated_at"] = now_iso
 
         return success
 

@@ -2,8 +2,10 @@ import { Request, Response, NextFunction } from 'express';
 import { getDB } from '../config/db';
 import {
   executeOrderStatusUpdate,
-  resolveRazorpayOrderConfig
+  resolveRazorpayOrderConfig,
+  updateOrderPaymentCapture
 } from './orderController';
+import { validateCapturedRazorpayPayment } from '../utils/razorpayPaymentValidation';
 import { UnauthorizedError } from '../utils/errors';
 import {
   acquireReconciliationLeaseInFirebase,
@@ -40,7 +42,7 @@ export interface ReconciliationOptions {
 }
 
 type RazorpayOutcome =
-  | { outcome: 'captured'; razorpayPaymentId: string | null }
+  | { outcome: 'captured'; razorpayPaymentId: string | null; capturedAmountPaise: number | null }
   | { outcome: 'pending_or_authorized' }
   | { outcome: 'failed' }
   | { outcome: 'abandoned' }
@@ -88,29 +90,74 @@ function isOrderAlreadyActiveOrDispensed(order: any): boolean {
 
 /**
  * Classifies a Razorpay order + its fetched payments into a safe state transition decision.
- * Never cancels/fails an order while any payment is captured, authorized, or still created/pending.
+ * Never cancels/fails an order while any payment is captured, authorized, or still created/pending,
+ * and enforces the same INR + captured status + exact amount validation before promoting to PAID.
  */
-export function classifyRazorpayOrderOutcome(rpOrder: any, rpPayments: any): RazorpayOutcome {
+export function classifyRazorpayOrderOutcome(
+  rpOrder: any,
+  rpPayments: any,
+  expectedAmountInr?: number
+): RazorpayOutcome {
   const payments: any[] = Array.isArray(rpPayments)
     ? rpPayments
     : Array.isArray(rpPayments?.items)
       ? rpPayments.items
       : [];
 
-  const capturedPayment = payments.find(
-    (p) => String(p?.status || '').toLowerCase() === 'captured' || p?.captured === true
-  );
   const rpOrderStatus = String(rpOrder?.status || '').toLowerCase();
   const orderAmount = Number(rpOrder?.amount || 0);
   const orderAmountPaid = Number(rpOrder?.amount_paid || 0);
+  const resolvedExpectedInr =
+    expectedAmountInr && expectedAmountInr > 0
+      ? expectedAmountInr
+      : orderAmount > 0
+        ? orderAmount / 100
+        : 0;
+
+  const capturedCandidates = payments.filter(
+    (p) => String(p?.status || '').trim().toLowerCase() === 'captured'
+  );
+
+  if (capturedCandidates.length > 0) {
+    for (const candidate of capturedCandidates) {
+      const check = validateCapturedRazorpayPayment({
+        payment: candidate,
+        expectedAmountInr: resolvedExpectedInr,
+        expectedRazorpayOrderId: rpOrder?.id ? String(rpOrder.id) : null
+      });
+      if (check.valid) {
+        return {
+          outcome: 'captured',
+          razorpayPaymentId: check.data.paymentId || null,
+          capturedAmountPaise: check.data.amountPaise
+        };
+      }
+      logger.warn(`Reconciliation rejected captured payment candidate: ${check.reason}`);
+    }
+    return { outcome: 'uncertain' };
+  }
+
   const orderMarkedPaid =
     rpOrderStatus === 'paid' && orderAmount > 0 && orderAmountPaid >= orderAmount;
-
-  if (capturedPayment || orderMarkedPaid) {
-    return {
-      outcome: 'captured',
-      razorpayPaymentId: capturedPayment?.id ? String(capturedPayment.id) : null
-    };
+  if (orderMarkedPaid && payments.length === 0) {
+    const rpOrderCurrency = String(rpOrder?.currency || '').trim().toUpperCase();
+    const expectedPaise = Math.round(Number(resolvedExpectedInr) * 100);
+    if (
+      rpOrderCurrency === 'INR' &&
+      Number.isInteger(orderAmountPaid) &&
+      expectedPaise > 0 &&
+      orderAmountPaid === expectedPaise
+    ) {
+      return {
+        outcome: 'captured',
+        razorpayPaymentId: null,
+        capturedAmountPaise: orderAmountPaid
+      };
+    }
+    logger.warn(
+      `Reconciliation rejected ambiguous paid Razorpay order ${rpOrder?.id || 'unknown'}: currency=${rpOrderCurrency}, amount_paid=${orderAmountPaid}, expected=${expectedPaise}`
+    );
+    return { outcome: 'uncertain' };
   }
 
   const hasActiveOrAuthorizedPayment = payments.some((p) =>
@@ -176,17 +223,31 @@ export const authenticateCronSecret = (
 async function applyOrderReconciliationTransition(
   orderId: string,
   targetStatus: 'PAID' | 'FAILED' | 'CANCELLED',
-  razorpayPaymentId?: string | null
+  razorpayPaymentId?: string | null,
+  capturedAmountPaise?: number | null
 ): Promise<boolean> {
   let didTransition = false;
-  await executeOrderStatusUpdate(orderId, targetStatus, {
+  const updated = await executeOrderStatusUpdate(orderId, targetStatus, {
     razorpayPaymentId: razorpayPaymentId || null,
+    capturedAmountPaise: capturedAmountPaise ?? null,
     allowPaidOrderRecovery: targetStatus === 'PAID',
     allowPaidOrderNoop: true,
     onTransitionOutcome: (outcome) => {
       didTransition = outcome.didTransition;
     }
   });
+  if (
+    targetStatus === 'PAID' &&
+    didTransition &&
+    capturedAmountPaise !== undefined &&
+    capturedAmountPaise !== null &&
+    (updated?.captured_amount_paise === null || updated?.captured_amount_paise === undefined)
+  ) {
+    await updateOrderPaymentCapture(orderId, {
+      capturedAmountPaise,
+      razorpayPaymentId: razorpayPaymentId || null
+    });
+  }
   return didTransition;
 }
 
@@ -217,15 +278,22 @@ async function reconcileSinglePendingOrder(
       razorpayConfig.razorpayClient.orders.fetchPayments(rpOrderId)
     ]);
 
-    const decision = classifyRazorpayOrderOutcome(rpOrder, rpPayments);
+    const decision = classifyRazorpayOrderOutcome(
+      rpOrder,
+      rpPayments,
+      Number(order.amount || 0)
+    );
     if (decision.outcome === 'captured') {
       const didPay = await applyOrderReconciliationTransition(
         orderId,
         'PAID',
-        decision.razorpayPaymentId || order.razorpay_payment_id || null
+        decision.razorpayPaymentId || order.razorpay_payment_id || null,
+        decision.capturedAmountPaise
       );
       if (didPay) {
-        logger.info(`Reconciled captured payment for stale PENDING order ${orderId} -> PAID`);
+        logger.info(
+          `Reconciled captured payment (${decision.capturedAmountPaise ?? 'unknown'} paise) for stale PENDING order ${orderId} -> PAID`
+        );
         return 'paid';
       }
       return 'skipped';

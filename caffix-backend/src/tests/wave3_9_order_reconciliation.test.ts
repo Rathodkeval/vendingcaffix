@@ -338,10 +338,10 @@ async function runWave39Tests() {
               throw new Error('Razorpay payments timeout');
             }
             if (rpId === 'order_rp_cap_1') {
-              return { items: [{ id: 'pay_cap_001', status: 'captured', amount: 10000 }] };
+              return { items: [{ id: 'pay_cap_001', status: 'captured', currency: 'INR', amount: 10000 }] };
             }
             if (rpId === 'order_rp_fail_1') {
-              return { items: [{ id: 'pay_fail_001', status: 'failed', amount: 10000 }] };
+              return { items: [{ id: 'pay_fail_001', status: 'failed', currency: 'INR', amount: 10000 }] };
             }
             if (rpId === 'order_rp_aban_1' || rpId === 'order_rp_recent_1') {
               return { items: [] };
@@ -352,6 +352,7 @@ async function runWave39Tests() {
                   {
                     id: 'pay_auth_001',
                     status: authStage === 'captured' ? 'captured' : 'authorized',
+                    currency: 'INR',
                     amount: 10000
                   }
                 ]
@@ -484,10 +485,10 @@ async function runWave39Tests() {
           },
           fetchPayments: async (rpId: string) => {
             if (rpId === 'order_rp_race_cap') {
-              return { items: [{ id: 'pay_race_cap_1', status: 'captured', amount: 10000 }] };
+              return { items: [{ id: 'pay_race_cap_1', status: 'captured', currency: 'INR', amount: 10000 }] };
             }
             if (rpId === 'order_rp_race_fail') {
-              return { items: [{ id: 'pay_race_fail_1', status: 'failed', amount: 10000 }] };
+              return { items: [{ id: 'pay_race_fail_1', status: 'failed', currency: 'INR', amount: 10000 }] };
             }
             return { items: [] };
           }
@@ -711,7 +712,7 @@ async function runWave39Tests() {
           },
           fetchPayments: async () => {
             razorpayCallsDuringLock += 1;
-            return { items: [{ id: 'pay_lease_1', status: 'captured', amount: 10000 }] };
+            return { items: [{ id: 'pay_lease_1', status: 'captured', currency: 'INR', amount: 10000 }] };
           }
         }
       });
