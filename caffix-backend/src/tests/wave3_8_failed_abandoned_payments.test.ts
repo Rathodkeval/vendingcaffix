@@ -33,6 +33,7 @@ const WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET as string;
 class CountingMockFirestore {
   public collections = new Map<string, Map<string, any>>();
   public writeCount = 0;
+  public businessWriteCount = 0;
 
   private getCol(name: string): Map<string, any> {
     let col = this.collections.get(name);
@@ -51,6 +52,9 @@ class CountingMockFirestore {
         const id = String(docId);
         return {
           id,
+          collection(subColName: string) {
+            return self.collection(`${colName}/${id}/${subColName}`);
+          },
           async get() {
             const has = colMap.has(id);
             const raw = colMap.get(id);
@@ -62,6 +66,9 @@ class CountingMockFirestore {
           },
           async set(payload: any, opts?: { merge?: boolean }) {
             self.writeCount++;
+            if (colName !== 'webhook_events' && colName !== 'system_locks') {
+              self.businessWriteCount++;
+            }
             const existing = colMap.get(id);
             if (opts?.merge && existing && typeof existing === 'object') {
               colMap.set(id, {
@@ -122,6 +129,20 @@ class CountingMockFirestore {
       await w.ref.set(w.payload, w.opts);
     }
     return res;
+  }
+
+  batch() {
+    const ops: Array<() => Promise<void>> = [];
+    return {
+      set(ref: any, payload: any, opts?: { merge?: boolean }) {
+        ops.push(() => ref.set(payload, opts));
+      },
+      async commit() {
+        for (const op of ops) {
+          await op();
+        }
+      }
+    };
   }
 }
 
@@ -267,6 +288,7 @@ async function runWave38Tests() {
 
       const failedPayload = {
         event: 'payment.failed',
+        created_at: 1700000100,
         payload: {
           payment: {
             entity: {
@@ -398,7 +420,7 @@ async function runWave38Tests() {
         await sc.setup(ord.orderId, ord.razorpayOrderId);
 
         const waterBefore = machineCol.get('CFX-MC-01').estimated_inventory.water_level;
-        const writesBefore = fs.writeCount;
+        const bizWritesBefore = fs.businessWriteCount;
         const failPayload = {
           event: 'payment.failed',
           payload: {
@@ -413,7 +435,11 @@ async function runWave38Tests() {
         };
         const whRes = await sendWebhook(failPayload, signWebhookBytes(JSON.stringify(failPayload)));
         assert.strictEqual(whRes.status, 200);
-        assert.strictEqual(fs.writeCount, writesBefore, `Late payment.failed on ${sc.label} must perform 0 Firestore writes`);
+        assert.strictEqual(
+          fs.businessWriteCount,
+          bizWritesBefore,
+          `Late payment.failed on ${sc.label} must perform 0 order/machine Firestore writes`
+        );
 
         const afterDoc = ordersCol.get(ord.orderId);
         assert.strictEqual(afterDoc.status, sc.expectedStatus, `Late payment.failed must not overwrite ${sc.label}`);

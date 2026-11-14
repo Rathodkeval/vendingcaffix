@@ -11,7 +11,7 @@ const INITIAL_VERCEL = process.env.VERCEL;
 const INITIAL_VERCEL_ENV = process.env.VERCEL_ENV;
 const INITIAL_NODE_ENV = process.env.NODE_ENV;
 
-if (!process.env.JWT_SECRET) {
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'caffix_vending_secret_key_2026_xyz') {
   process.env.JWT_SECRET = 'wave1_security_test_jwt_secret_2026_strong';
 }
 if (!process.env.KIOSK_SECRET) {
@@ -280,6 +280,8 @@ async function runWave1SecurityTests() {
     );
 
     // Clean up test order & machine ownership
+    await db.run('DELETE FROM inventory_ledger WHERE order_id = ?', [orderMc02.data.data.id]).catch(() => {});
+    await db.run('DELETE FROM refunds WHERE order_id = ?', [orderMc02.data.data.id]).catch(() => {});
     await db.run('DELETE FROM orders WHERE id = ?', [orderMc02.data.data.id]);
     await api('PATCH', '/machines/CFX-MC-01/owner', { owner_id: null }, { Authorization: `Bearer ${adminToken}` });
 

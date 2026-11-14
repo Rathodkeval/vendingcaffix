@@ -89,6 +89,9 @@ class FakeFirestore {
         return {
           id: normalizedId,
           _colName: colName,
+          collection(subColName: string) {
+            return self.collection(`${colName}/${normalizedId}/${subColName}`);
+          },
           async get() {
             self.checkError();
             self.readCount++;

@@ -3,8 +3,9 @@ import { getFirestore, Firestore } from 'firebase-admin/firestore';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { getConfiguredMachineSeeds } from '../config/db';
-import { AppError, ServiceUnavailableError } from './errors';
+import { AppError, ConflictError, ServiceUnavailableError } from './errors';
 import { IngredientRequirements, assertSufficientInventory } from './inventory';
+import { reconcileOrderRefundRecords } from './refunds';
 import logger from './logger';
 
 let firestore: Firestore | null = null;
@@ -33,6 +34,10 @@ export function isStrictFirebaseEnvironment(): boolean {
 
 export function isFirestoreActive(): boolean {
   return Boolean(firestore);
+}
+
+export function getFirestoreInstance(): Firestore | null {
+  return firestore;
 }
 
 function handleFirestoreFailure(context: string, error: unknown): never {
@@ -95,6 +100,52 @@ export function ensureFirebaseReady(): void {
   const privateKey = process.env.FIREBASE_PRIVATE_KEY
     ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n').trim()
     : '';
+
+  // 0. Official Firestore Emulator Host Support (Local Development & Integration Testing only)
+  if (process.env.FIRESTORE_EMULATOR_HOST) {
+    if (vercelEnv === 'production' || vercelEnv === 'preview') {
+      firestore = null;
+      throw new ServiceUnavailableError(
+        `Firebase environment guard: FIRESTORE_EMULATOR_HOST is strictly forbidden in Vercel ${vercelEnv} (HTTP 503).`
+      );
+    }
+    const emuProjectId = projectId || 'demo-caffix-emulator';
+    const forbiddenProjectIds = new Set(['caffix-vending', 'caffix-staging']);
+    if (forbiddenProjectIds.has(emuProjectId.toLowerCase())) {
+      firestore = null;
+      throw new ServiceUnavailableError(
+        `Firebase environment guard: Emulator cannot connect to production/staging project ID "${emuProjectId}" (HTTP 503).`
+      );
+    }
+    if (!emuProjectId.startsWith('demo-') && emuProjectId !== 'caffix-emulator') {
+      firestore = null;
+      throw new ServiceUnavailableError(
+        `Firebase environment guard: Emulator project ID must start with "demo-" or be "caffix-emulator"; received "${emuProjectId}" (HTTP 503).`
+      );
+    }
+    const signature = `emulator|${emuProjectId}|${process.env.FIRESTORE_EMULATOR_HOST}`;
+    if (firestore && lastInitializedSignature === signature && !moduleInitError) {
+      return;
+    }
+    try {
+      const appName = `caffix-emulator-${emuProjectId}`;
+      const existingApp = getApps().find(
+        (a) => a?.name === appName || a?.options?.projectId === emuProjectId
+      );
+      const appInstance = existingApp || initializeApp({ projectId: emuProjectId }, appName);
+      firestore = getFirestore(appInstance);
+      lastInitializedSignature = signature;
+      moduleInitError = null;
+      logger.info(
+        `Firebase Admin SDK connected to local Firestore Emulator at ${process.env.FIRESTORE_EMULATOR_HOST} (project: ${emuProjectId})`
+      );
+      return;
+    } catch (err: any) {
+      firestore = null;
+      moduleInitError = err;
+      throw new ServiceUnavailableError(`Failed to connect to local Firestore Emulator: ${err?.message || err}`);
+    }
+  }
 
   const strictMode = isStrictFirebaseEnvironment();
   const hasAnyCredential = Boolean(projectId || clientEmail || privateKey);
@@ -288,6 +339,14 @@ export function getAllSyncedFirebaseOrders(): any[] {
   return Array.from(syncedOrdersStore.values());
 }
 
+export function updateSyncedFirebaseOrder(orderId: string, partial: any): void {
+  const normalizedId = String(orderId).trim();
+  const existing = syncedOrdersStore.get(normalizedId);
+  if (existing) {
+    syncedOrdersStore.set(normalizedId, { ...existing, ...partial });
+  }
+}
+
 export function getSyncedFirebaseMachine(machineId: string): any | undefined {
   return syncedMachinesStore.get(machineId);
 }
@@ -351,9 +410,11 @@ export interface AtomicOrderTransitionInput {
   productName?: string;
   razorpayPaymentId?: string | null;
   razorpaySignature?: string | null;
+  capturedAmountPaise?: number | null;
   requirements?: IngredientRequirements | null;
   fallbackInventory?: any;
   allowPaidOrderRecovery?: boolean;
+  webhookFencing?: { provider: string; eventId: string; claimCount: number } | null;
 }
 
 export interface AtomicOrderTransitionResult {
@@ -389,6 +450,20 @@ export async function commitOrderTransitionInFirebase(
 
   try {
     const result = await firestore.runTransaction(async (tx) => {
+      // F-1 Fencing Guard: Validate webhook claim generation inside authoritative transaction
+      if (input.webhookFencing) {
+        const whDocRef = firestore!.collection('webhook_events').doc(`${input.webhookFencing.provider}_${input.webhookFencing.eventId}`);
+        const whSnap = await tx.get(whDocRef);
+        if (whSnap.exists) {
+          const whData = whSnap.data() as any;
+          if (whData.claim_count !== undefined && whData.claim_count !== input.webhookFencing.claimCount) {
+            throw new ConflictError(
+              `[STALE_WEBHOOK_WORKER] Webhook claim generation superseded for event ${input.webhookFencing.eventId}: current=${whData.claim_count}, worker=${input.webhookFencing.claimCount}`
+            );
+          }
+        }
+      }
+
       const orderRef = firestore!.collection('orders').doc(orderId);
       const orderSnap = await tx.get(orderRef);
       const existingData = orderSnap.exists ? orderSnap.data() || {} : {};
@@ -429,6 +504,33 @@ export async function commitOrderTransitionInFirebase(
       const existingMachineInv = machineSnap?.data()?.estimated_inventory || null;
 
       if (isAlreadyProcessed) {
+        if (input.capturedAmountPaise !== undefined && input.capturedAmountPaise !== null) {
+          const incomingCap = Number(input.capturedAmountPaise);
+          const currentCap = existingData.captured_amount_paise;
+          if (Number.isInteger(incomingCap) && incomingCap > 0) {
+            if (currentCap === undefined || currentCap === null) {
+              const capUpdates: any = {
+                captured_amount_paise: incomingCap,
+                updated_at: nowIso
+              };
+              if (input.razorpayPaymentId && !existingData.razorpay_payment_id) {
+                capUpdates.razorpay_payment_id = input.razorpayPaymentId;
+              }
+              if (input.razorpaySignature && !existingData.razorpay_signature) {
+                capUpdates.razorpay_signature = input.razorpaySignature;
+              }
+              tx.set(orderRef, capUpdates, { merge: true });
+              existingData.captured_amount_paise = incomingCap;
+              if (capUpdates.razorpay_payment_id) existingData.razorpay_payment_id = capUpdates.razorpay_payment_id;
+              if (capUpdates.razorpay_signature) existingData.razorpay_signature = capUpdates.razorpay_signature;
+            } else if (currentCap !== incomingCap) {
+              logger.warn(
+                `Conflicting captured_amount_paise for order ${orderId}: existing=${currentCap}, incoming=${incomingCap}. Rejecting overwrite.`
+              );
+            }
+          }
+        }
+
         return {
           didTransition: false,
           didTransitionFromPendingToActive: false,
@@ -441,6 +543,56 @@ export async function commitOrderTransitionInFirebase(
             ? buildEstimatedInventoryPayload(existingMachineInv)
             : null
         };
+      }
+
+      // E-1 Dispensing Safety Guard (Authoritative Atomic Firestore Transaction)
+      // Strictly block dispensing transitions (PREPARING, DISPENSING, COMPLETED)
+      // if order is fully refunded or has an active in-flight pending refund reservation.
+      const isDispensingTransition =
+        ['PREPARING', 'DISPENSING', 'COMPLETED'].includes(targetStatus) ||
+        String(sanitizedOrder.dispense_status || '').toUpperCase() === 'DISPENSING';
+
+      if (isDispensingTransition) {
+        const orderRefundStatus = String(existingData.refund_status || '').toUpperCase();
+        const pendingRefundPaise = Number(existingData.pending_refund_amount_paise || 0);
+
+        if (orderRefundStatus === 'FULL') {
+          logger.warn(
+            `Dispensing transition to ${targetStatus} rejected for fully refunded order ${orderId} (refund_status=FULL)`
+          );
+          return {
+            didTransition: false,
+            didTransitionFromPendingToActive: false,
+            didDeductInventory: false,
+            alreadyProcessed: true,
+            rejectedByStateGuard: true,
+            conflictReason: `Cannot dispense order ${orderId}: order is fully refunded (refund_status=FULL)`,
+            alreadyClaimedOrDispensed,
+            authoritativeOrder: { ...existingData, id: existingData.id || orderId },
+            updatedEstimatedInventory: existingMachineInv
+              ? buildEstimatedInventoryPayload(existingMachineInv)
+              : null
+          };
+        }
+
+        if (pendingRefundPaise > 0) {
+          logger.warn(
+            `Dispensing transition to ${targetStatus} rejected for order ${orderId} with pending refund of ${pendingRefundPaise} paise`
+          );
+          return {
+            didTransition: false,
+            didTransitionFromPendingToActive: false,
+            didDeductInventory: false,
+            alreadyProcessed: true,
+            rejectedByStateGuard: true,
+            conflictReason: `Cannot dispense order ${orderId}: order has pending refund reservation (${pendingRefundPaise} paise)`,
+            alreadyClaimedOrDispensed,
+            authoritativeOrder: { ...existingData, id: existingData.id || orderId },
+            updatedEstimatedInventory: existingMachineInv
+              ? buildEstimatedInventoryPayload(existingMachineInv)
+              : null
+          };
+        }
       }
 
       // Guard against overwriting paid/preparing/completed/dispensing/dispensed orders with FAILED, CANCELLED, or PENDING,
@@ -509,6 +661,47 @@ export async function commitOrderTransitionInFirebase(
           },
           { merge: true }
         );
+
+        // Auditable Inventory Ledger (Phase 2.8): Record movement per ingredient atomically
+        const ingredientMap: Array<{ name: keyof IngredientRequirements; key: string }> = [
+          { name: 'coffee', key: 'coffee_level' },
+          { name: 'milk', key: 'milk_level' },
+          { name: 'water', key: 'water_level' },
+          { name: 'vanilla', key: 'vanilla_level' },
+          { name: 'hazelnut', key: 'hazelnut_level' },
+          { name: 'irish', key: 'irish_level' },
+          { name: 'mocha', key: 'mocha_level' }
+        ];
+
+        for (const item of ingredientMap) {
+          const qty = req[item.name];
+          if (typeof qty === 'number' && qty > 0) {
+            const balanceAfter = (updatedEstimatedInventory as any)[item.key] ?? 0;
+            const idempotencyKey = `order_${orderId}_deduct_${String(item.name)}`;
+            const movementId = `inv_mov_${idempotencyKey}`;
+            const movementDoc = {
+              id: movementId,
+              machine_id: machineId,
+              ingredient: String(item.name),
+              quantity: qty,
+              movement_type: 'DEDUCTION',
+              balance_after: balanceAfter,
+              order_id: orderId,
+              refund_id: null,
+              reason: `Order ${orderId} preparation deduction`,
+              idempotency_key: idempotencyKey,
+              created_at: nowIso
+            };
+            const rootLedgerRef = firestore!.collection('inventory_ledger').doc(movementId);
+            const subLedgerRef = firestore!
+              .collection('machines')
+              .doc(machineId)
+              .collection('inventory_ledger')
+              .doc(movementId);
+            tx.set(rootLedgerRef, movementDoc, { merge: true });
+            tx.set(subLedgerRef, movementDoc, { merge: true });
+          }
+        }
       }
 
       const payloadToWrite: any = {
@@ -527,6 +720,12 @@ export async function commitOrderTransitionInFirebase(
         payloadToWrite.razorpay_signature = existingData.razorpay_signature;
       } else if (input.razorpaySignature && !isNonPaidTarget) {
         payloadToWrite.razorpay_signature = input.razorpaySignature;
+      }
+
+      if (existingData.captured_amount_paise !== undefined && existingData.captured_amount_paise !== null) {
+        payloadToWrite.captured_amount_paise = existingData.captured_amount_paise;
+      } else if (input.capturedAmountPaise !== undefined && input.capturedAmountPaise !== null && !isNonPaidTarget) {
+        payloadToWrite.captured_amount_paise = Number(input.capturedAmountPaise);
       }
 
       if (alreadyClaimedOrDispensed) {
@@ -597,8 +796,8 @@ export async function syncOrderToFirebase(
   // Maintain local mirror for deterministic inspection
   const existingLocal = syncedOrdersStore.get(order.id) || {};
   const terminalDispenseStates = ['DISPENSING', 'DISPENSED'];
-  let nextDispenseStatus = existingLocal.dispense_status;
-  if (!terminalDispenseStates.includes(existingLocal.dispense_status)) {
+  let nextDispenseStatus = sanitizedOrder.dispense_status || existingLocal.dispense_status;
+  if (!nextDispenseStatus && !terminalDispenseStates.includes(existingLocal.dispense_status)) {
     if (sanitizedOrder.status === 'PAID' || sanitizedOrder.status === 'COMPLETED') {
       nextDispenseStatus = 'QUEUED';
     } else if (sanitizedOrder.status === 'PENDING') {
@@ -652,7 +851,9 @@ export async function syncOrderToFirebase(
       };
 
       if (!alreadyClaimedOrDispensed) {
-        if (sanitizedOrder.status === 'PAID' || sanitizedOrder.status === 'COMPLETED') {
+        if (sanitizedOrder.dispense_status) {
+          payloadToWrite.dispense_status = sanitizedOrder.dispense_status;
+        } else if (sanitizedOrder.status === 'PAID' || sanitizedOrder.status === 'COMPLETED') {
           payloadToWrite.dispense_status = 'QUEUED';
         } else if (sanitizedOrder.status === 'PENDING' && !existingData.dispense_status) {
           payloadToWrite.dispense_status = 'PENDING';
@@ -1849,11 +2050,11 @@ async function hydrateLocalOrderFromAuthoritativeRecord(remoteOrder: any, db: an
 
   if (!existing) {
     await db.run(
-      'INSERT INTO orders (id, product_id, amount, status, machine_id, created_at, razorpay_order_id, extra_sugar, base) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT OR IGNORE INTO orders (id, product_id, amount, status, machine_id, created_at, razorpay_order_id, extra_sugar, base) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
         orderId,
-        Number(remoteOrder.product_id),
-        Number(remoteOrder.amount),
+        Number(remoteOrder.product_id || remoteOrder.productId || 1),
+        Number(remoteOrder.amount || 0),
         String(remoteOrder.status || 'PENDING').toUpperCase(),
         String(remoteOrder.machine_id),
         remoteOrder.created_at || new Date().toISOString(),
@@ -1872,12 +2073,48 @@ async function hydrateLocalOrderFromAuthoritativeRecord(remoteOrder: any, db: an
         ]
       );
     }
+    if (remoteOrder.dispense_status) {
+      await db.run('UPDATE orders SET dispense_status = ? WHERE id = ?', [
+        String(remoteOrder.dispense_status).toUpperCase(),
+        orderId
+      ]).catch(() => {});
+    }
+    if (remoteOrder.customer_name || remoteOrder.customer_email) {
+      await db.run('UPDATE orders SET customer_name = ?, customer_email = ? WHERE id = ?', [
+        remoteOrder.customer_name || null,
+        remoteOrder.customer_email || null,
+        orderId
+      ]).catch(() => {});
+    }
+    if (remoteOrder.updated_at || remoteOrder.dispensed_at || remoteOrder.dispense_started_at) {
+      await db.run('UPDATE orders SET updated_at = ?, dispensed_at = ?, dispense_started_at = ? WHERE id = ?', [
+        remoteOrder.updated_at || null,
+        remoteOrder.dispensed_at || null,
+        remoteOrder.dispense_started_at || null,
+        orderId
+      ]).catch(() => {});
+    }
+    if (remoteOrder.refund_status || remoteOrder.total_refunded_amount_paise !== undefined || remoteOrder.pending_refund_amount_paise !== undefined) {
+      await reconcileOrderRefundRecords(orderId, remoteOrder, db, firestore);
+    }
+    if (remoteOrder.captured_amount_paise !== undefined && remoteOrder.captured_amount_paise !== null) {
+      await db.run('UPDATE orders SET captured_amount_paise = ? WHERE id = ?', [
+        Number(remoteOrder.captured_amount_paise),
+        orderId
+      ]).catch(() => {});
+    }
   } else {
     if (remoteOrder.status && remoteOrder.status !== existing.status) {
       await db.run('UPDATE orders SET status = ? WHERE id = ?', [
         String(remoteOrder.status).toUpperCase(),
         orderId
       ]);
+    }
+    if (remoteOrder.dispense_status && remoteOrder.dispense_status !== existing.dispense_status) {
+      await db.run('UPDATE orders SET dispense_status = ? WHERE id = ?', [
+        String(remoteOrder.dispense_status).toUpperCase(),
+        orderId
+      ]).catch(() => {});
     }
     if (remoteOrder.razorpay_payment_id && !existing.razorpay_payment_id) {
       await db.run(
@@ -1889,6 +2126,30 @@ async function hydrateLocalOrderFromAuthoritativeRecord(remoteOrder: any, db: an
         ]
       );
     }
+    if (remoteOrder.captured_amount_paise !== undefined && remoteOrder.captured_amount_paise !== null) {
+      await db.run('UPDATE orders SET captured_amount_paise = ? WHERE id = ?', [
+        Number(remoteOrder.captured_amount_paise),
+        orderId
+      ]).catch(() => {});
+    }
+    if (remoteOrder.customer_name || remoteOrder.customer_email) {
+      await db.run('UPDATE orders SET customer_name = ?, customer_email = ? WHERE id = ?', [
+        remoteOrder.customer_name || existing.customer_name || null,
+        remoteOrder.customer_email || existing.customer_email || null,
+        orderId
+      ]).catch(() => {});
+    }
+    if (remoteOrder.updated_at || remoteOrder.dispensed_at || remoteOrder.dispense_started_at) {
+      await db.run('UPDATE orders SET updated_at = ?, dispensed_at = ?, dispense_started_at = ? WHERE id = ?', [
+        remoteOrder.updated_at || existing.updated_at || null,
+        remoteOrder.dispensed_at || existing.dispensed_at || null,
+        remoteOrder.dispense_started_at || existing.dispense_started_at || null,
+        orderId
+      ]).catch(() => {});
+    }
+
+    // Reconcile individual refund documents and calculate authoritative balances (Parts B & C)
+    await reconcileOrderRefundRecords(orderId, remoteOrder, db, firestore);
   }
 
   return await db.get(
@@ -1921,23 +2182,30 @@ export async function getAuthoritativeOrderById(orderId: string, db: any): Promi
     }
 
     if (remoteOrder) {
-      return await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db);
+      const hydrated = await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db);
+      const combined = { ...remoteOrder, ...hydrated };
+      syncedOrdersStore.set(normalizedId, combined);
+      return enrichAuthoritativeOrderRecord(combined);
     }
     return null;
   }
 
   const remoteOrder: any = syncedOrdersStore.get(normalizedId) || null;
   if (remoteOrder) {
-    return await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db);
+    const hydrated = await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db);
+    const combined = { ...remoteOrder, ...hydrated };
+    syncedOrdersStore.set(normalizedId, combined);
+    return enrichAuthoritativeOrderRecord(combined);
   }
 
-  return await db.get(
+  const row = await db.get(
     `SELECT o.*, p.name as product_name, p.description as product_desc
      FROM orders o
      JOIN products p ON o.product_id = p.id
      WHERE o.id = ?`,
     [normalizedId]
   );
+  return enrichAuthoritativeOrderRecord(row);
 }
 
 export async function getAuthoritativeOrderByRazorpayOrderId(
@@ -1992,6 +2260,32 @@ export async function getAuthoritativeOrderByRazorpayOrderId(
   return await db.get('SELECT * FROM orders WHERE razorpay_order_id = ?', [normalizedRpId]);
 }
 
+export function enrichAuthoritativeOrderRecord(o: any): any {
+  if (!o) return o;
+  const synced = syncedOrdersStore.get(String(o.id));
+  return {
+    ...o,
+    captured_amount_paise: o.captured_amount_paise !== undefined && o.captured_amount_paise !== null
+      ? Number(o.captured_amount_paise)
+      : (synced?.captured_amount_paise !== undefined && synced?.captured_amount_paise !== null
+          ? Number(synced.captured_amount_paise)
+          : null),
+    dispense_status: o.dispense_status || synced?.dispense_status || 'PENDING',
+    razorpay_order_id: o.razorpay_order_id || synced?.razorpay_order_id || null,
+    razorpay_payment_id: o.razorpay_payment_id || synced?.razorpay_payment_id || null,
+    razorpay_signature: o.razorpay_signature || synced?.razorpay_signature || null,
+    customer_name: o.customer_name || synced?.customer_name || null,
+    customer_email: o.customer_email || synced?.customer_email || null,
+    updated_at: o.updated_at || synced?.updated_at || o.created_at || null,
+    dispensed_at: o.dispensed_at || synced?.dispensed_at || null,
+    dispense_started_at: o.dispense_started_at || synced?.dispense_started_at || null,
+    refund_status: o.refund_status || synced?.refund_status || 'NONE',
+    total_refunded_amount_paise: Number(o.total_refunded_amount_paise ?? synced?.total_refunded_amount_paise ?? 0),
+    pending_refund_amount_paise: Number(o.pending_refund_amount_paise ?? synced?.pending_refund_amount_paise ?? 0),
+    last_refunded_at: o.last_refunded_at || synced?.last_refunded_at || null
+  };
+}
+
 export async function getAuthoritativeOrders(
   db: any,
   filterMachineIds?: string[]
@@ -2016,13 +2310,14 @@ export async function getAuthoritativeOrders(
     await hydrateLocalOrderFromAuthoritativeRecord(o, db);
   }
 
+  let results: any[] = [];
   if (filterMachineIds !== undefined) {
     if (filterMachineIds.length === 0) {
       return [];
     }
     const allowedSet = new Set(filterMachineIds.map((m) => String(m).trim()));
     if (filterMachineIds.length === 1) {
-      return await db.all(
+      results = await db.all(
         `SELECT o.*, p.name as product_name
          FROM orders o
          JOIN products p ON o.product_id = p.id
@@ -2030,22 +2325,25 @@ export async function getAuthoritativeOrders(
          ORDER BY o.created_at DESC`,
         [filterMachineIds[0]]
       );
+    } else {
+      const allOrders = await db.all(
+        `SELECT o.*, p.name as product_name
+         FROM orders o
+         JOIN products p ON o.product_id = p.id
+         ORDER BY o.created_at DESC`
+      );
+      results = allOrders.filter((o: any) => allowedSet.has(String(o.machine_id).trim()));
     }
-    const allOrders = await db.all(
+  } else {
+    results = await db.all(
       `SELECT o.*, p.name as product_name
        FROM orders o
        JOIN products p ON o.product_id = p.id
        ORDER BY o.created_at DESC`
     );
-    return allOrders.filter((o: any) => allowedSet.has(String(o.machine_id).trim()));
   }
 
-  return await db.all(
-    `SELECT o.*, p.name as product_name
-     FROM orders o
-     JOIN products p ON o.product_id = p.id
-     ORDER BY o.created_at DESC`
-  );
+  return results.map(enrichAuthoritativeOrderRecord);
 }
 
 /**

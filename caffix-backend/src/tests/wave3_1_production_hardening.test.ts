@@ -65,6 +65,9 @@ class MockFirestore {
         const id = String(docId);
         return {
           id,
+          collection(subColName: string) {
+            return self.collection(`${colName}/${id}/${subColName}`);
+          },
           async get() {
             self.readCount++;
             const has = colMap.has(id);

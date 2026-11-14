@@ -60,7 +60,10 @@ const refillSchema = z.object({
     machine_id: z.string()
   }),
   body: z.object({
-    ingredient: z.enum(['milk', 'coffee', 'vanilla', 'hazelnut', 'irish', 'mocha', 'water', 'ALL'])
+    ingredient: z.enum(['milk', 'coffee', 'vanilla', 'hazelnut', 'irish', 'mocha', 'water', 'ALL']),
+    quantity: z.number().finite('Refill quantity must be a finite number').positive('Invalid refill quantity: expected a positive finite number').optional(),
+    target: z.number().finite('Refill target must be a finite number').min(0, 'Refill target must be between 0 and 100').max(100, 'Refill target must be between 0 and 100').optional(),
+    reason: z.string().trim().max(500, 'Refill reason must be 500 characters or fewer').optional()
   })
 });
 

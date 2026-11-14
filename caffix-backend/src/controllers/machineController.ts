@@ -18,7 +18,8 @@ import {
   normalizeDesiredMode,
   desiredModeToLegacyStatus,
   computeConnectionStatus,
-  isFirestoreActive
+  isFirestoreActive,
+  getFirestoreInstance
 } from '../utils/firebase';
 import { ensureMachineRegisteredInLocalDB } from './kioskController';
 import { setNoStoreHeaders } from '../utils/cache';
@@ -367,6 +368,8 @@ export const getInventoryByMachine = async (
   }
 };
 
+const VALID_INGREDIENTS = ['milk', 'coffee', 'vanilla', 'hazelnut', 'irish', 'mocha', 'water'] as const;
+
 export const refillMachineInventory = async (
   req: AuthRequest,
   res: Response,
@@ -378,39 +381,503 @@ export const refillMachineInventory = async (
   try {
     await assertMachineOwnershipOrAdmin(req.user, machine_id);
 
-    const inv = await db.get('SELECT id FROM inventory WHERE machine_id = ?', [machine_id]);
-    if (!inv) {
-      return next(new NotFoundError(`Inventory for machine ID ${machine_id} not found`));
+    // Validate ingredient parameter
+    if (!ingredient || (ingredient !== 'ALL' && !VALID_INGREDIENTS.includes(ingredient))) {
+      return next(new BadRequestError(`Invalid ingredient name: ${ingredient}`));
     }
+
+    const target =
+      typeof req.body.target === 'number' && Number.isFinite(req.body.target)
+        ? Math.max(0, Math.min(100, Math.round(req.body.target)))
+        : 100;
+
+    const quantitySpecified =
+      typeof req.body.quantity === 'number' && Number.isFinite(req.body.quantity) && req.body.quantity > 0
+        ? Math.round(req.body.quantity)
+        : undefined;
+
+    if (req.body.quantity !== undefined && (typeof req.body.quantity !== 'number' || !Number.isFinite(req.body.quantity) || req.body.quantity <= 0)) {
+      return next(new BadRequestError('Invalid refill quantity: expected a positive finite number'));
+    }
+
+    const rawIdempotencyHeader =
+      req.headers?.['idempotency-key'] ||
+      req.headers?.['Idempotency-Key'] ||
+      req.headers?.['IDEMPOTENCY-KEY'] ||
+      req.headers?.['x-idempotency-key'] ||
+      req.headers?.['X-Idempotency-Key'] ||
+      (typeof req.header === 'function' ? req.header('idempotency-key') || req.header('x-idempotency-key') : undefined);
+
+    const idempotencyHeader = typeof rawIdempotencyHeader === 'string' ? rawIdempotencyHeader.trim() : '';
+
+    // Requirement 2: For requests that explicitly specify an incremental refill quantity:
+    // Require an Idempotency-Key HTTP header. If missing or empty, return HTTP 400.
+    if (quantitySpecified !== undefined && !idempotencyHeader) {
+      return next(new BadRequestError('Incremental refill requires a non-empty Idempotency-Key header'));
+    }
+
+    const baseIdempotencyKey = String(idempotencyHeader || req.body?.idempotency_key || '').trim();
+
+    const reason =
+      typeof req.body.reason === 'string' && req.body.reason.trim()
+        ? req.body.reason.trim()
+        : ingredient === 'ALL'
+        ? `Full machine refill for machine ${machine_id}`
+        : `Refilled ${ingredient} for machine ${machine_id}`;
 
     const nowIso = new Date().toISOString();
+    const ingredientsToRefill: string[] = ingredient === 'ALL' ? [...VALID_INGREDIENTS] : [ingredient];
 
-    if (ingredient === 'ALL') {
-      await db.run(
-        'UPDATE inventory SET milk_level = 100, coffee_level = 100, vanilla_level = 100, hazelnut_level = 100, irish_level = 100, mocha_level = 100, water_level = 100, updated_at = ? WHERE machine_id = ?',
-        [nowIso, machine_id]
-      );
-    } else {
-      const field = `${ingredient}_level`;
-      // Protect against SQL injection by verifying column whitelist
-      const validIngredients = ['milk', 'coffee', 'vanilla', 'hazelnut', 'irish', 'mocha', 'water'];
-      if (!validIngredients.includes(ingredient)) {
-        return next(new BadRequestError(`Invalid ingredient name: ${ingredient}`));
+    let recordedMovements: any[] = [];
+    let updatedInv: any = null;
+    let isDeduplicated = false;
+
+    if (isFirestoreActive()) {
+      const firestore = getFirestoreInstance()!;
+      const machineRef = firestore.collection('machines').doc(machine_id);
+
+      const txResult = await firestore.runTransaction(async (tx) => {
+        const snap = await tx.get(machineRef);
+        if (!snap.exists) {
+          throw new NotFoundError(`Machine ID ${machine_id} not found in Firestore`);
+        }
+        const machineData = snap.data() || {};
+        const currentEstimated = machineData.estimated_inventory || {};
+
+        // Validate idempotency key reuse if key is provided (Finding B-1: hashed doc ID with legacy fallback)
+        if (baseIdempotencyKey) {
+          const hashedDocId = `idem_${crypto.createHash('sha256').update(baseIdempotencyKey).digest('hex')}`;
+          let idemRef = firestore.collection('refill_idempotency').doc(hashedDocId);
+          let idemSnap = await tx.get(idemRef);
+
+          // Backward compatibility fallback for legacy unhashed doc IDs
+          if (!idemSnap.exists && !baseIdempotencyKey.includes('/')) {
+            try {
+              const legacyRef = firestore.collection('refill_idempotency').doc(baseIdempotencyKey);
+              const legacySnap = await tx.get(legacyRef);
+              if (legacySnap.exists) {
+                idemSnap = legacySnap;
+                idemRef = legacyRef;
+              }
+            } catch {
+              // Ignore invalid path syntax on legacy doc check
+            }
+          }
+
+          if (idemSnap.exists) {
+            const existing = idemSnap.data() as any;
+            if (existing.machine_id && existing.machine_id !== machine_id) {
+              throw new ConflictError(
+                `Idempotency key '${baseIdempotencyKey}' was already used for machine '${existing.machine_id}' (cannot reuse for machine '${machine_id}')`
+              );
+            }
+            if (existing.ingredient && existing.ingredient !== ingredient) {
+              throw new ConflictError(
+                `Idempotency key '${baseIdempotencyKey}' was already used for ingredient '${existing.ingredient}' (cannot reuse for ingredient '${ingredient}')`
+              );
+            }
+            const storedQty = existing.quantity !== null && existing.quantity !== undefined ? Number(existing.quantity) : undefined;
+            if (quantitySpecified !== undefined && storedQty !== quantitySpecified) {
+              throw new ConflictError(
+                `Idempotency key '${baseIdempotencyKey}' was already used with quantity ${storedQty} (cannot reuse with quantity ${quantitySpecified})`
+              );
+            }
+            if (quantitySpecified === undefined && storedQty !== undefined) {
+              throw new ConflictError(
+                `Idempotency key '${baseIdempotencyKey}' was already used for an incremental refill with quantity ${storedQty}`
+              );
+            }
+            if (quantitySpecified === undefined && existing.target !== undefined && existing.target !== target) {
+              throw new ConflictError(
+                `Idempotency key '${baseIdempotencyKey}' was already used with target ${existing.target} (cannot reuse with target ${target})`
+              );
+            }
+
+            // Valid replay: return existing state without duplicate movements
+            return {
+              movements: [],
+              estimatedInventory: currentEstimated,
+              deduplicated: true
+            };
+          }
+        }
+
+        const txMovements: any[] = [];
+        const newEstimated: Record<string, number> = {
+          milk_level: Number(currentEstimated.milk_level ?? 100),
+          coffee_level: Number(currentEstimated.coffee_level ?? 100),
+          vanilla_level: Number(currentEstimated.vanilla_level ?? 100),
+          hazelnut_level: Number(currentEstimated.hazelnut_level ?? 100),
+          irish_level: Number(currentEstimated.irish_level ?? 100),
+          mocha_level: Number(currentEstimated.mocha_level ?? 100),
+          water_level: Number(currentEstimated.water_level ?? 100)
+        };
+
+        let hasNewMovement = false;
+
+        for (const ing of ingredientsToRefill) {
+          const currentLevel = Math.max(0, Math.min(100, Number(newEstimated[`${ing}_level`] ?? 100)));
+          const targetLevel = quantitySpecified !== undefined ? Math.min(100, currentLevel + quantitySpecified) : target;
+          const addedQty = Math.max(0, targetLevel - currentLevel);
+
+          if (addedQty > 0) {
+            const itemKey = baseIdempotencyKey
+              ? `refill_${machine_id}_${ing}_${baseIdempotencyKey}`
+              : `refill_${machine_id}_${ing}_${Date.now()}_${crypto.randomUUID().slice(-8)}`;
+            const movementId = `inv_mov_${itemKey.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+
+            const movementDoc = {
+              id: movementId,
+              machine_id,
+              ingredient: ing,
+              quantity: addedQty,
+              movement_type: 'REFILL',
+              balance_after: targetLevel,
+              order_id: null,
+              refund_id: null,
+              reason,
+              idempotency_key: itemKey,
+              created_at: nowIso
+            };
+
+            const rootLedgerRef = firestore.collection('inventory_ledger').doc(movementId);
+            const subLedgerRef = firestore
+              .collection('machines')
+              .doc(machine_id)
+              .collection('inventory_ledger')
+              .doc(movementId);
+
+            tx.set(rootLedgerRef, movementDoc, { merge: true });
+            tx.set(subLedgerRef, movementDoc, { merge: true });
+
+            newEstimated[`${ing}_level`] = targetLevel;
+            txMovements.push(movementDoc);
+            hasNewMovement = true;
+          }
+        }
+
+        if (baseIdempotencyKey) {
+          const hashedDocId = `idem_${crypto.createHash('sha256').update(baseIdempotencyKey).digest('hex')}`;
+          const idemPayload = {
+            idempotency_key: baseIdempotencyKey,
+            machine_id,
+            ingredient,
+            quantity: quantitySpecified ?? null,
+            target,
+            created_at: nowIso
+          };
+          tx.set(firestore.collection('refill_idempotency').doc(hashedDocId), idemPayload);
+          if (!baseIdempotencyKey.includes('/')) {
+            tx.set(firestore.collection('refill_idempotency').doc(baseIdempotencyKey), idemPayload);
+          }
+        }
+
+        if (hasNewMovement) {
+          tx.set(
+            machineRef,
+            {
+              id: machine_id,
+              estimated_inventory: newEstimated,
+              inventory_source: 'software_estimated',
+              inventory_updated_at: nowIso,
+              updated_at: nowIso
+            },
+            { merge: true }
+          );
+        }
+
+        return {
+          movements: txMovements,
+          estimatedInventory: newEstimated,
+          deduplicated: false
+        };
+      });
+
+      recordedMovements = txResult.movements;
+      isDeduplicated = txResult.deduplicated;
+
+      // Sync updated inventory to local SQLite database mirror
+      if (db && db.run) {
+        let hasLocalTx = false;
+        try {
+          await db.run('BEGIN IMMEDIATE TRANSACTION');
+          hasLocalTx = true;
+
+          await db.run(`
+            CREATE TABLE IF NOT EXISTS refill_idempotency (
+              idempotency_key TEXT PRIMARY KEY,
+              machine_id TEXT NOT NULL,
+              ingredient TEXT NOT NULL,
+              quantity INTEGER,
+              target INTEGER,
+              created_at TEXT NOT NULL
+            )
+          `);
+
+          if (baseIdempotencyKey) {
+            await db.run(
+              `INSERT OR IGNORE INTO refill_idempotency (
+                idempotency_key, machine_id, ingredient, quantity, target, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?)`,
+              [
+                baseIdempotencyKey,
+                machine_id,
+                ingredient,
+                quantitySpecified ?? null,
+                target,
+                nowIso
+              ]
+            ).catch(() => {});
+          }
+
+          await db.run(
+            `UPDATE inventory SET
+              milk_level = ?, coffee_level = ?, vanilla_level = ?,
+              hazelnut_level = ?, irish_level = ?, mocha_level = ?,
+              water_level = ?, updated_at = ?
+             WHERE machine_id = ?`,
+            [
+              txResult.estimatedInventory.milk_level,
+              txResult.estimatedInventory.coffee_level,
+              txResult.estimatedInventory.vanilla_level,
+              txResult.estimatedInventory.hazelnut_level,
+              txResult.estimatedInventory.irish_level,
+              txResult.estimatedInventory.mocha_level,
+              txResult.estimatedInventory.water_level,
+              nowIso,
+              machine_id
+            ]
+          );
+
+          for (const m of recordedMovements) {
+            await db.run(
+              `INSERT OR IGNORE INTO inventory_ledger (
+                id, machine_id, ingredient, quantity, movement_type,
+                balance_after, order_id, refund_id, reason, idempotency_key, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`,
+              [
+                m.id,
+                m.machine_id,
+                m.ingredient,
+                m.quantity,
+                m.movement_type,
+                m.balance_after,
+                m.reason,
+                m.idempotency_key,
+                m.created_at
+              ]
+            );
+          }
+
+          await db.run('COMMIT');
+          hasLocalTx = false;
+        } catch (localErr) {
+          if (hasLocalTx) {
+            try { await db.run('ROLLBACK'); } catch {}
+          }
+          logger.warn(`Failed to mirror Firestore refill to local SQLite for machine ${machine_id}:`, localErr);
+        }
       }
 
-      await db.run(`UPDATE inventory SET ${field} = 100, updated_at = ? WHERE machine_id = ?`, [nowIso, machine_id]);
+      updatedInv = {
+        machine_id,
+        ...txResult.estimatedInventory,
+        updated_at: nowIso
+      };
+    } else {
+      // Local SQLite / MockDatabase atomic fallback
+      let hasLocalTx = false;
+      try {
+        if (db && db.run) {
+          await db.run('BEGIN IMMEDIATE TRANSACTION');
+          hasLocalTx = true;
+
+          await db.run(`
+            CREATE TABLE IF NOT EXISTS refill_idempotency (
+              idempotency_key TEXT PRIMARY KEY,
+              machine_id TEXT NOT NULL,
+              ingredient TEXT NOT NULL,
+              quantity INTEGER,
+              target INTEGER,
+              created_at TEXT NOT NULL
+            )
+          `);
+        }
+
+        const inv = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [machine_id]);
+        if (!inv) {
+          throw new NotFoundError(`Inventory for machine ID ${machine_id} not found`);
+        }
+
+        if (baseIdempotencyKey) {
+          const existingIdem = await db.get(
+            'SELECT * FROM refill_idempotency WHERE idempotency_key = ?',
+            [baseIdempotencyKey]
+          );
+
+          if (existingIdem) {
+            if (existingIdem.machine_id && existingIdem.machine_id !== machine_id) {
+              throw new ConflictError(
+                `Idempotency key '${baseIdempotencyKey}' was already used for machine '${existingIdem.machine_id}' (cannot reuse for machine '${machine_id}')`
+              );
+            }
+            if (existingIdem.ingredient && existingIdem.ingredient !== ingredient) {
+              throw new ConflictError(
+                `Idempotency key '${baseIdempotencyKey}' was already used for ingredient '${existingIdem.ingredient}' (cannot reuse for ingredient '${ingredient}')`
+              );
+            }
+            const storedQty = existingIdem.quantity !== null && existingIdem.quantity !== undefined ? Number(existingIdem.quantity) : undefined;
+            if (quantitySpecified !== undefined && storedQty !== quantitySpecified) {
+              throw new ConflictError(
+                `Idempotency key '${baseIdempotencyKey}' was already used with quantity ${storedQty} (cannot reuse with quantity ${quantitySpecified})`
+              );
+            }
+            if (quantitySpecified === undefined && storedQty !== undefined) {
+              throw new ConflictError(
+                `Idempotency key '${baseIdempotencyKey}' was already used for an incremental refill with quantity ${storedQty}`
+              );
+            }
+            if (quantitySpecified === undefined && existingIdem.target !== null && Number(existingIdem.target) !== target) {
+              throw new ConflictError(
+                `Idempotency key '${baseIdempotencyKey}' was already used with target ${existingIdem.target} (cannot reuse with target ${target})`
+              );
+            }
+
+            // Valid replay: return existing state without duplicate movements
+            if (hasLocalTx) {
+              await db.run('COMMIT');
+              hasLocalTx = false;
+            }
+            isDeduplicated = true;
+            updatedInv = inv;
+          }
+        }
+
+        if (!isDeduplicated) {
+          const newLevels: Record<string, number> = {
+            milk_level: Number(inv.milk_level ?? 100),
+            coffee_level: Number(inv.coffee_level ?? 100),
+            vanilla_level: Number(inv.vanilla_level ?? 100),
+            hazelnut_level: Number(inv.hazelnut_level ?? 100),
+            irish_level: Number(inv.irish_level ?? 100),
+            mocha_level: Number(inv.mocha_level ?? 100),
+            water_level: Number(inv.water_level ?? 100)
+          };
+
+          let hasNewMovement = false;
+
+          for (const ing of ingredientsToRefill) {
+            const currentLevel = Math.max(0, Math.min(100, Number(newLevels[`${ing}_level`] ?? 100)));
+            const targetLevel = quantitySpecified !== undefined ? Math.min(100, currentLevel + quantitySpecified) : target;
+            const addedQty = Math.max(0, targetLevel - currentLevel);
+
+            if (addedQty > 0) {
+              const itemKey = baseIdempotencyKey
+                ? `refill_${machine_id}_${ing}_${baseIdempotencyKey}`
+                : `refill_${machine_id}_${ing}_${Date.now()}_${crypto.randomUUID().slice(-8)}`;
+              const movementId = `inv_mov_${itemKey.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+
+              await db.run(
+                `INSERT INTO inventory_ledger (
+                  id, machine_id, ingredient, quantity, movement_type,
+                  balance_after, order_id, refund_id, reason, idempotency_key, created_at
+                ) VALUES (?, ?, ?, ?, 'REFILL', ?, NULL, NULL, ?, ?, ?)`,
+                [
+                  movementId,
+                  machine_id,
+                  ing,
+                  addedQty,
+                  targetLevel,
+                  reason,
+                  itemKey,
+                  nowIso
+                ]
+              );
+
+              newLevels[`${ing}_level`] = targetLevel;
+              recordedMovements.push({
+                id: movementId,
+                machine_id,
+                ingredient: ing,
+                quantity: addedQty,
+                movement_type: 'REFILL',
+                balance_after: targetLevel,
+                reason,
+                idempotency_key: itemKey,
+                created_at: nowIso
+              });
+              hasNewMovement = true;
+            }
+          }
+
+          if (baseIdempotencyKey) {
+            await db.run(
+              `INSERT INTO refill_idempotency (
+                idempotency_key, machine_id, ingredient, quantity, target, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?)`,
+              [
+                baseIdempotencyKey,
+                machine_id,
+                ingredient,
+                quantitySpecified ?? null,
+                target,
+                nowIso
+              ]
+            );
+          }
+
+          if (hasNewMovement) {
+            await db.run(
+              `UPDATE inventory SET
+                milk_level = ?, coffee_level = ?, vanilla_level = ?,
+                hazelnut_level = ?, irish_level = ?, mocha_level = ?,
+                water_level = ?, updated_at = ?
+               WHERE machine_id = ?`,
+              [
+                newLevels.milk_level,
+                newLevels.coffee_level,
+                newLevels.vanilla_level,
+                newLevels.hazelnut_level,
+                newLevels.irish_level,
+                newLevels.mocha_level,
+                newLevels.water_level,
+                nowIso,
+                machine_id
+              ]
+            );
+          }
+
+          if (hasLocalTx) {
+            await db.run('COMMIT');
+            hasLocalTx = false;
+          }
+
+          updatedInv = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [machine_id]);
+        }
+      } catch (sqliteErr) {
+        if (hasLocalTx) {
+          try { await db.run('ROLLBACK'); } catch {}
+        }
+        throw sqliteErr;
+      }
     }
 
-    logger.info(`Refilled ${ingredient} for machine ID ${machine_id}`);
+    logger.info(
+      `Refilled ${ingredient} for machine ID ${machine_id}: ${recordedMovements.length} movements recorded (deduplicated=${isDeduplicated})`
+    );
 
-    const updatedInv = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [machine_id]);
-    if (updatedInv) {
-      await updateMachineInventoryInFirebase(machine_id, updatedInv);
+    let message = `Successfully refilled ${ingredient}`;
+    if (isDeduplicated) {
+      message = `Refill request already processed with idempotency key ${baseIdempotencyKey}`;
+    } else if (recordedMovements.length === 0) {
+      message = `Inventory stock is already at target level; no refill movement recorded`;
     }
 
     res.status(200).json({
       status: 'success',
-      message: `Successfully refilled ${ingredient}`,
+      message,
+      deduplicated: isDeduplicated,
+      refilled_movements: recordedMovements,
       data: {
         ...updatedInv,
         inventory_source: 'software_estimated'

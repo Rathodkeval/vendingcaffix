@@ -131,7 +131,8 @@ export async function apiFetch(path, options = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: options.method || 'GET',
     headers,
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined
+    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+    signal: options.signal
   });
 
   const payload = await response.json().catch(() => ({}));
@@ -148,6 +149,33 @@ export async function apiFetch(path, options = {}) {
   }
 
   return payload;
+}
+
+function buildAnalyticsQueryString(params = {}) {
+  const qs = new URLSearchParams();
+  if (params?.start_date) qs.append('start_date', params.start_date);
+  if (params?.end_date) qs.append('end_date', params.end_date);
+  if (params?.machine_id) qs.append('machine_id', params.machine_id);
+  if (params?.time_zone) qs.append('time_zone', params.time_zone);
+  if (params?.interval) qs.append('interval', params.interval);
+  if (params?.granularity) qs.append('granularity', params.granularity);
+  const str = qs.toString();
+  return str ? `?${str}` : '';
+}
+
+function resolveRequestOptions(tokenOrOptions, baseUrl, signal) {
+  if (tokenOrOptions && typeof tokenOrOptions === 'object' && !Array.isArray(tokenOrOptions)) {
+    return {
+      token: tokenOrOptions.token,
+      bUrl: tokenOrOptions.baseUrl || baseUrl,
+      sig: tokenOrOptions.signal || signal
+    };
+  }
+  return {
+    token: tokenOrOptions,
+    bUrl: baseUrl,
+    sig: signal
+  };
 }
 
 export const adminApi = {
@@ -238,6 +266,39 @@ export const adminApi = {
     });
   },
 
+  // Reconciliation API (Phase 2.8)
+  getReconciliationReport: (params, token, baseUrl) => {
+    const qs = new URLSearchParams();
+    if (params?.machine_id) qs.append('machine_id', params.machine_id);
+    if (params?.result) qs.append('result', params.result);
+    if (params?.discrepancy) qs.append('discrepancy', params.discrepancy);
+    const queryString = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch(`/reconciliation/report${queryString}`, {
+      method: 'GET',
+      token,
+      baseUrl
+    });
+  },
+
+  getOrderReconciliation: (orderId, token, baseUrl) =>
+    apiFetch(`/reconciliation/orders/${encodeURIComponent(orderId)}`, {
+      method: 'GET',
+      token,
+      baseUrl
+    }),
+
+  getMachineInventoryLedger: (machineId, params, token, baseUrl) => {
+    const qs = new URLSearchParams();
+    if (params?.limit) qs.append('limit', params.limit);
+    if (params?.offset) qs.append('offset', params.offset);
+    const queryString = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch(`/reconciliation/inventory/${encodeURIComponent(machineId)}${queryString}`, {
+      method: 'GET',
+      token,
+      baseUrl
+    });
+  },
+
   // Super Admin Fleet & Owner Management
   getOwners: (token, baseUrl) =>
     apiFetch('/auth/owners', {
@@ -273,6 +334,67 @@ export const adminApi = {
       },
       token,
       baseUrl
-    })
+    }),
+
+  // Business Analytics API (Phase 2.9)
+  getAnalyticsOverview: (params, tokenOrOptions, baseUrl, signal) => {
+    const { token, bUrl, sig } = resolveRequestOptions(tokenOrOptions, baseUrl, signal);
+    return apiFetch(`/analytics/overview${buildAnalyticsQueryString(params)}`, {
+      method: 'GET',
+      token,
+      baseUrl: bUrl,
+      signal: sig
+    });
+  },
+
+  getAnalyticsTimeSeries: (params, tokenOrOptions, baseUrl, signal) => {
+    const { token, bUrl, sig } = resolveRequestOptions(tokenOrOptions, baseUrl, signal);
+    return apiFetch(`/analytics/time-series${buildAnalyticsQueryString(params)}`, {
+      method: 'GET',
+      token,
+      baseUrl: bUrl,
+      signal: sig
+    });
+  },
+
+  getAnalyticsMachines: (params, tokenOrOptions, baseUrl, signal) => {
+    const { token, bUrl, sig } = resolveRequestOptions(tokenOrOptions, baseUrl, signal);
+    return apiFetch(`/analytics/machines${buildAnalyticsQueryString(params)}`, {
+      method: 'GET',
+      token,
+      baseUrl: bUrl,
+      signal: sig
+    });
+  },
+
+  getAnalyticsProducts: (params, tokenOrOptions, baseUrl, signal) => {
+    const { token, bUrl, sig } = resolveRequestOptions(tokenOrOptions, baseUrl, signal);
+    return apiFetch(`/analytics/products${buildAnalyticsQueryString(params)}`, {
+      method: 'GET',
+      token,
+      baseUrl: bUrl,
+      signal: sig
+    });
+  },
+
+  getAnalyticsInventory: (params, tokenOrOptions, baseUrl, signal) => {
+    const { token, bUrl, sig } = resolveRequestOptions(tokenOrOptions, baseUrl, signal);
+    return apiFetch(`/analytics/inventory${buildAnalyticsQueryString(params)}`, {
+      method: 'GET',
+      token,
+      baseUrl: bUrl,
+      signal: sig
+    });
+  },
+
+  getAnalyticsRefunds: (params, tokenOrOptions, baseUrl, signal) => {
+    const { token, bUrl, sig } = resolveRequestOptions(tokenOrOptions, baseUrl, signal);
+    return apiFetch(`/analytics/refunds${buildAnalyticsQueryString(params)}`, {
+      method: 'GET',
+      token,
+      baseUrl: bUrl,
+      signal: sig
+    });
+  }
 };
 

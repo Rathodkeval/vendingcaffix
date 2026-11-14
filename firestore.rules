@@ -1,0 +1,43 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ------------------------------------------------------------------------
+    // CAFFIX Firestore Security Rules
+    // ------------------------------------------------------------------------
+    // Strict backend-mediated security architecture:
+    // All direct unauthenticated or client-side read/write access to financial,
+    // order, machine, and refund documents is strictly forbidden.
+    //
+    // All client operations (Customer Kiosk, Machine Owner Portal, Super Admin Dashboard)
+    // are authenticated and authorized via the CAFFIX Express API using the
+    // Firebase Admin SDK.
+    // ------------------------------------------------------------------------
+
+    // Reject all direct client reads and writes across all collections
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Specific financial collection locks (defense-in-depth)
+    match /refunds/{refundId} {
+      allow read, write: if false;
+    }
+
+    match /webhook_events/{eventId} {
+      allow read, write: if false;
+    }
+
+    match /orders/{orderId} {
+      allow read, write: if false;
+
+      match /refunds/{refundId} {
+        allow read, write: if false;
+      }
+    }
+
+    match /machines/{machineId} {
+      allow read, write: if false;
+    }
+  }
+}
+

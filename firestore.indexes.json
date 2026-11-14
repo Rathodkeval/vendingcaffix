@@ -1,0 +1,107 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "machine_id", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "machine_id", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "machine_id", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "machine_id", "order": "ASCENDING" },
+        { "fieldPath": "payment_status", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "refunds",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "machine_id", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "refunds",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "machine_id", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "refunds",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "machine_id", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "refunds",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "order_id", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "inventory_ledger",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "machine_id", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "inventory_ledger",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "machine_id", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "inventory_ledger",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "machine_id", "order": "ASCENDING" },
+        { "fieldPath": "ingredient", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "inventory_ledger",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "machine_id", "order": "ASCENDING" },
+        { "fieldPath": "movement_type", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
+

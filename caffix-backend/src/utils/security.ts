@@ -16,6 +16,16 @@ const SENSITIVE_QUERY_KEYS = new Set([
   'razorpay_signature'
 ]);
 
+export type RazorpayRuntimeMode = 'production' | 'preview' | 'local';
+
+export interface ValidatedRazorpayEnvironment {
+  mode: RazorpayRuntimeMode;
+  strict: boolean;
+  keyId: string;
+  keySecret: string;
+  webhookSecret: string;
+}
+
 /**
  * Returns true when running explicitly in Vercel Production (`VERCEL_ENV=production`).
  */
@@ -38,15 +48,113 @@ export function isLiveRazorpayKeyId(keyId?: string | null): boolean {
 }
 
 /**
- * Prevents Vercel Preview deployments from using Production Razorpay Live credentials.
+ * Returns true when a Razorpay Key ID uses Sandbox Test mode (`rzp_test_*`).
  */
-export function assertRazorpayEnvironmentIsolation(): void {
-  const keyId = (process.env.RAZORPAY_KEY_ID || '').trim();
-  if (isVercelPreview() && isLiveRazorpayKeyId(keyId)) {
+export function isTestRazorpayKeyId(keyId?: string | null): boolean {
+  return (keyId || '').trim().toLowerCase().startsWith('rzp_test_');
+}
+
+/**
+ * Classifies the active Razorpay runtime mode and fails closed on ambiguous deployed environments.
+ */
+export function classifyRazorpayRuntimeMode(): RazorpayRuntimeMode {
+  const vercelEnv = (process.env.VERCEL_ENV || '').trim().toLowerCase();
+  const vercelFlag = (process.env.VERCEL || '').trim().toLowerCase();
+  const nodeEnv = (process.env.NODE_ENV || '').trim().toLowerCase();
+  const hasVercelRuntime =
+    Boolean(vercelFlag) && vercelFlag !== '0' && vercelFlag !== 'false' && vercelFlag !== 'undefined';
+
+  if (vercelEnv && !['production', 'preview', 'development', 'test'].includes(vercelEnv)) {
     throw new ServiceUnavailableError(
-      'Preview environment guard: Production Razorpay Live credentials (rzp_live_*) are not permitted in Vercel Preview (HTTP 503)'
+      'Payment/refund gateway unavailable: unrecognized VERCEL_ENV classification (HTTP 503)'
     );
   }
+
+  if (vercelEnv === 'production') {
+    return 'production';
+  }
+
+  if (vercelEnv === 'preview') {
+    return 'preview';
+  }
+
+  if (hasVercelRuntime || nodeEnv === 'production') {
+    throw new ServiceUnavailableError(
+      'Payment/refund gateway unavailable: ambiguous runtime environment identification (set VERCEL_ENV explicitly)'
+    );
+  }
+
+  return 'local';
+}
+
+/**
+ * Resolves and validates Razorpay credentials according to runtime environment boundaries.
+ * - Preview (`VERCEL_ENV=preview`): fail-closed HTTP 503 unless Test Mode `rzp_test_*`, Key Secret,
+ *   and Webhook Secret are all present and non-mock; `rzp_live_*` is blocked.
+ * - Production (`VERCEL_ENV=production`): fail-closed HTTP 503 unless Live Mode `rzp_live_*`
+ *   and non-mock secrets are configured; `rzp_test_*` and mocks are blocked.
+ * - Ambiguous deployed/production flags: fail-closed HTTP 503.
+ * - Local dev/test only: allows mock fallback when not running in Preview/Production/ambiguous env.
+ */
+export function resolveValidatedRazorpayEnvironment(
+  options: { requireWebhookSecret?: boolean } = {}
+): ValidatedRazorpayEnvironment {
+  const mode = classifyRazorpayRuntimeMode();
+  const keyId = (process.env.RAZORPAY_KEY_ID || '').trim();
+  const keySecret = (process.env.RAZORPAY_KEY_SECRET || '').trim();
+  const webhookSecret = (process.env.RAZORPAY_WEBHOOK_SECRET || '').trim();
+
+  if (mode === 'preview') {
+    if (isLiveRazorpayKeyId(keyId)) {
+      throw new ServiceUnavailableError(
+        'Preview environment guard: Production Razorpay Live credentials (rzp_live_*) are not permitted in Vercel Preview (HTTP 503)'
+      );
+    }
+    if (!keyId || isMockSecretValue(keyId) || !isTestRazorpayKeyId(keyId)) {
+      throw new ServiceUnavailableError(
+        'Preview payment service unavailable: valid Razorpay Test Key ID (rzp_test_*) is required in Vercel Preview (HTTP 503)'
+      );
+    }
+    if (!keySecret || isMockSecretValue(keySecret)) {
+      throw new ServiceUnavailableError(
+        'Preview payment service unavailable: RAZORPAY_KEY_SECRET is missing or mock in Vercel Preview (HTTP 503)'
+      );
+    }
+    if (!webhookSecret || isMockSecretValue(webhookSecret)) {
+      throw new ServiceUnavailableError(
+        'Preview webhook service unavailable: RAZORPAY_WEBHOOK_SECRET is missing or mock in Vercel Preview (HTTP 503)'
+      );
+    }
+    return { mode: 'preview', strict: true, keyId, keySecret, webhookSecret };
+  }
+
+  if (mode === 'production') {
+    if (!keyId || isMockSecretValue(keyId) || !isLiveRazorpayKeyId(keyId)) {
+      throw new ServiceUnavailableError(
+        'Payment service unavailable: valid Razorpay Live Key ID (rzp_live_*) is required in Production (HTTP 503)'
+      );
+    }
+    if (!keySecret || isMockSecretValue(keySecret)) {
+      throw new ServiceUnavailableError(
+        'Payment service unavailable: RAZORPAY_KEY_SECRET is missing or mock in Production (HTTP 503)'
+      );
+    }
+    if (options.requireWebhookSecret && (!webhookSecret || isMockSecretValue(webhookSecret))) {
+      throw new ServiceUnavailableError(
+        'Webhook service unavailable: RAZORPAY_WEBHOOK_SECRET is missing or mock in Production (HTTP 503)'
+      );
+    }
+    return { mode: 'production', strict: true, keyId, keySecret, webhookSecret };
+  }
+
+  return { mode: 'local', strict: false, keyId, keySecret, webhookSecret };
+}
+
+/**
+ * Enforces Razorpay environment boundaries for the current runtime mode.
+ */
+export function assertRazorpayEnvironmentIsolation(): void {
+  resolveValidatedRazorpayEnvironment();
 }
 
 /**
@@ -85,6 +193,8 @@ export function isMockSecretValue(value?: string | null): boolean {
   return (
     !normalized ||
     normalized === 'mock' ||
+    normalized === 'null' ||
+    normalized === 'undefined' ||
     normalized.includes('mock') ||
     normalized.includes('placeholder') ||
     normalized.includes('changeme')

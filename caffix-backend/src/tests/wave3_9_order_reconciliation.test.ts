@@ -54,6 +54,9 @@ class TrackingMockFirestore {
         const id = String(docId);
         return {
           id,
+          collection(subColName: string) {
+            return self.collection(`${colName}/${id}/${subColName}`);
+          },
           async get() {
             const has = colMap.has(id);
             const raw = colMap.get(id);

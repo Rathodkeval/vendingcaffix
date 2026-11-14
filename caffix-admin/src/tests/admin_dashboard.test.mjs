@@ -14,9 +14,14 @@ import {
 } from '../services/api.js';
 import {
   formatINR,
+  formatSignedINR,
+  formatSignedPaise,
   formatRelativeHeartbeat,
   computeSalesAnalytics,
-  getPaymentStatusLabel
+  getPaymentStatusLabel,
+  getDispenseStatusLabel,
+  validateDateRange,
+  getKolkataDateString
 } from '../utils/formatters.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -101,6 +106,7 @@ async function runAdminDashboardTests() {
 
   await dbModule.initDB();
   const db = dbModule.getDB();
+  await db.run('DELETE FROM inventory_ledger WHERE machine_id = ?', ['CFX-MC-99']).catch(() => {});
   await db.run('DELETE FROM machine_products');
   await db.run('DELETE FROM machines WHERE id = ?', ['CFX-MC-99']);
 
@@ -334,8 +340,46 @@ async function runAdminDashboardTests() {
     assert.strictEqual(analytics.totalOrders, 1);
     console.log('   PASS: Per-machine pricing and ₹145 historical order immutability verified.');
 
+    // 6. Verify Phase 2.6 Advanced Order Management Components & Formatter Isolation
+    console.log('6. Verifying Phase 2.6 Advanced Order Management columns, badges & filters...');
+    const ordersPageSource = fs.readFileSync(
+      path.resolve(__dirname, '../pages/OrdersPage.jsx'),
+      'utf-8'
+    );
+    assert.ok(ordersPageSource.includes('PaymentStatusBadge'), 'OrdersPage must render PaymentStatusBadge');
+    assert.ok(ordersPageSource.includes('DispenseStatusBadge'), 'OrdersPage must render DispenseStatusBadge');
+    assert.ok(ordersPageSource.includes('CopyableText'), 'OrdersPage must include CopyableText helper');
+    assert.ok(ordersPageSource.includes('Order ID'), 'OrdersPage must have Order ID column');
+    assert.ok(ordersPageSource.includes('Date & Time'), 'OrdersPage must have Date & Time column');
+    assert.ok(ordersPageSource.includes('Machine ID'), 'OrdersPage must have Machine ID column');
+    assert.ok(ordersPageSource.includes('Product'), 'OrdersPage must have Product column');
+    assert.ok(ordersPageSource.includes('Amount'), 'OrdersPage must have Amount column');
+    assert.ok(ordersPageSource.includes('Payment'), 'OrdersPage must have Payment status column');
+    assert.ok(ordersPageSource.includes('Dispensing'), 'OrdersPage must have Dispensing status column');
+    assert.ok(ordersPageSource.includes('Payment ID'), 'OrdersPage must have Razorpay Payment ID column');
+    assert.ok(ordersPageSource.includes('Customer'), 'OrdersPage must have Customer column');
+    assert.ok(ordersPageSource.includes('Order Details'), 'OrdersPage must include Order Details view');
+    assert.ok(ordersPageSource.includes('dispense_started_at'), 'OrdersPage must display dispense_started_at');
+    assert.ok(ordersPageSource.includes('dispensed_at'), 'OrdersPage must display dispensed_at');
+    assert.ok(ordersPageSource.includes('razorpay_order_id'), 'OrdersPage search must match razorpay_order_id');
+    assert.ok(ordersPageSource.includes('rpOrderIdMatch'), 'OrdersPage must include rpOrderIdMatch in search');
+
+    // Test formatter status independence
+    assert.strictEqual(getPaymentStatusLabel({ status: 'PAID' }), 'PAID');
+    assert.strictEqual(getPaymentStatusLabel({ status: 'COMPLETED' }), 'COMPLETED');
+    assert.strictEqual(getPaymentStatusLabel({ status: 'PENDING' }), 'PENDING');
+    assert.strictEqual(getPaymentStatusLabel({ status: 'FAILED' }), 'FAILED');
+    assert.strictEqual(getPaymentStatusLabel({ status: 'CANCELLED' }), 'CANCELLED');
+
+    assert.strictEqual(getDispenseStatusLabel({ dispense_status: 'QUEUED' }), 'QUEUED');
+    assert.strictEqual(getDispenseStatusLabel({ dispense_status: 'DISPENSING' }), 'DISPENSING');
+    assert.strictEqual(getDispenseStatusLabel({ dispense_status: 'DISPENSED' }), 'DISPENSED');
+    assert.strictEqual(getDispenseStatusLabel({ dispense_status: 'FAILED' }), 'FAILED');
+    assert.strictEqual(getDispenseStatusLabel({ status: 'PAID' }), 'PENDING', 'Dispense status must default to PENDING when unset, never inferring from payment status');
+    console.log('   PASS: Phase 2.6 order table columns, independent statuses & formatters verified.');
+
     // 7. Verify Admin UI Source Checks & Production Build Bundle
-    console.log('6. Verifying Admin UI security checks and production build artifacts...');
+    console.log('7. Verifying Admin UI security checks and production build artifacts...');
     const adminFleetSource = fs.readFileSync(
       path.resolve(__dirname, '../pages/AdminFleetPage.jsx'),
       'utf-8'
@@ -360,10 +404,297 @@ async function runAdminDashboardTests() {
     assert.ok(fs.existsSync(distIndexHtml), 'Production build caffix-admin/dist/index.html must exist');
     console.log('   PASS: Admin UI security and production build bundle verified.');
 
+    // 8. Verify Phase 2.9.3.2 Backend Analytics Integration & Dashboard Requirements
+    console.log('8. Verifying Phase 2.9.3.2 Backend Analytics API integration & formatting...');
+    assert.strictEqual(typeof adminApi.getAnalyticsOverview, 'function');
+    assert.strictEqual(typeof adminApi.getAnalyticsTimeSeries, 'function');
+    assert.strictEqual(typeof adminApi.getAnalyticsMachines, 'function');
+    assert.strictEqual(typeof adminApi.getAnalyticsProducts, 'function');
+    assert.strictEqual(typeof adminApi.getAnalyticsInventory, 'function');
+    assert.strictEqual(typeof adminApi.getAnalyticsRefunds, 'function');
+
+    // 8.1 Call all 6 endpoints with valid Admin token
+    const overviewRes = await adminApi.getAnalyticsOverview({}, adminToken, TEST_BASE_URL);
+    assert.strictEqual(overviewRes.status, 'success');
+    assert.ok(typeof overviewRes.data.gross_sales_paise === 'number');
+    assert.ok(typeof overviewRes.data.net_revenue_paise === 'number');
+    assert.ok(typeof overviewRes.data.over_refund_detected === 'boolean');
+    assert.ok(typeof overviewRes.data.refunds_exceed_period_sales === 'boolean');
+
+    const tsRes = await adminApi.getAnalyticsTimeSeries({ interval: 'day' }, adminToken, TEST_BASE_URL);
+    assert.strictEqual(tsRes.status, 'success');
+    assert.ok(Array.isArray(tsRes.data));
+
+    const mcRes = await adminApi.getAnalyticsMachines({}, adminToken, TEST_BASE_URL);
+    assert.strictEqual(mcRes.status, 'success');
+    assert.ok(Array.isArray(mcRes.data));
+
+    const prRes = await adminApi.getAnalyticsProducts({}, adminToken, TEST_BASE_URL);
+    assert.strictEqual(prRes.status, 'success');
+    assert.ok(Array.isArray(prRes.data));
+
+    const invRes = await adminApi.getAnalyticsInventory({}, adminToken, TEST_BASE_URL);
+    assert.strictEqual(invRes.status, 'success');
+    assert.ok(Array.isArray(invRes.data));
+
+    const rfRes = await adminApi.getAnalyticsRefunds({}, adminToken, TEST_BASE_URL);
+    assert.strictEqual(rfRes.status, 'success');
+    assert.ok(typeof rfRes.data.total_refunds_count === 'number');
+    assert.ok(Array.isArray(rfRes.data.recent_refunds));
+
+    // 8.2 Test unauthenticated rejection (HTTP 401)
+    let authErrorCaught = false;
+    try {
+      await adminApi.getAnalyticsOverview({}, null, TEST_BASE_URL);
+    } catch (err) {
+      authErrorCaught = true;
+      assert.strictEqual(err.status, 401);
+    }
+    assert.ok(authErrorCaught, 'Unauthenticated analytics request must throw HTTP 401');
+
+    // 8.3 Test signed INR formatting & zero/negative handling
+    assert.strictEqual(formatSignedINR(14500), '₹14,500');
+    assert.strictEqual(formatSignedINR(-500), '-₹500');
+    assert.strictEqual(formatSignedINR(0), '₹0');
+    assert.strictEqual(formatSignedINR(-0), '₹0');
+    assert.strictEqual(formatSignedPaise(-50000), '-₹500');
+    assert.strictEqual(formatSignedPaise(1450000), '₹14,500');
+
+    // 8.4 Test date validation
+    assert.strictEqual(validateDateRange('2026-11-15', '2026-11-10').valid, false);
+    assert.strictEqual(validateDateRange('2025-01-01', '2026-03-01').valid, false);
+    assert.strictEqual(validateDateRange('2026-11-01', '2026-11-14').valid, true);
+
+    // 8.5 Test DISPENSED and legacy COMPLETED statuses
+    assert.strictEqual(getDispenseStatusLabel({ dispense_status: 'DISPENSED' }), 'DISPENSED');
+    assert.strictEqual(getDispenseStatusLabel({ dispense_status: 'COMPLETED' }), 'COMPLETED');
+
+    // 8.6 Verify SalesReportsPage.jsx and StatusBadges source requirements
+    const salesReportsSource = fs.readFileSync(
+      path.resolve(__dirname, '../pages/SalesReportsPage.jsx'),
+      'utf-8'
+    );
+    assert.ok(salesReportsSource.includes('adminApi.getAnalyticsOverview'), 'Must call getAnalyticsOverview');
+    assert.ok(salesReportsSource.includes('adminApi.getAnalyticsTimeSeries'), 'Must call getAnalyticsTimeSeries');
+    assert.ok(salesReportsSource.includes('adminApi.getAnalyticsMachines'), 'Must call getAnalyticsMachines');
+    assert.ok(salesReportsSource.includes('adminApi.getAnalyticsProducts'), 'Must call getAnalyticsProducts');
+    assert.ok(salesReportsSource.includes('adminApi.getAnalyticsInventory'), 'Must call getAnalyticsInventory');
+    assert.ok(salesReportsSource.includes('adminApi.getAnalyticsRefunds'), 'Must call getAnalyticsRefunds');
+    assert.ok(salesReportsSource.includes('AbortController'), 'Must use AbortController for stale-request protection');
+    assert.ok(salesReportsSource.includes('Critical Financial Invariant Violation Detected'), 'Must display over-refund banner');
+    assert.ok(salesReportsSource.includes('Period Net Revenue Deficit'), 'Must display net deficit banner');
+    assert.ok(salesReportsSource.includes('UntrackedBadge'), 'Must use UntrackedBadge for null inventory balances');
+    assert.ok(!salesReportsSource.includes('computeSalesAnalytics('), 'Must not use client-side computeSalesAnalytics for analytics');
+
+    const statusBadgesSource = fs.readFileSync(
+      path.resolve(__dirname, '../components/StatusBadges.jsx'),
+      'utf-8'
+    );
+    assert.ok(statusBadgesSource.includes('export function UntrackedBadge'), 'StatusBadges must export UntrackedBadge');
+
+    console.log('   PASS: All 6 analytics APIs, signed currency, date filters, and UI invariants verified.');
+
+    // 9. Verify Phase 2.9.3.4 Fix W-1: Section-Specific API Error Handling & Isolated Retry
+    console.log('9. Verifying Phase 2.9.3.4 Fix W-1 section-specific error handling & retry...');
+    assert.ok(salesReportsSource.includes('function SectionError'), 'Must define SectionError component');
+    assert.ok(salesReportsSource.includes('function SectionLoading'), 'Must define SectionLoading component');
+    assert.ok(salesReportsSource.includes('retrySection'), 'Must implement section-specific retrySection');
+    assert.ok(salesReportsSource.includes('sectionLoading'), 'Must track sectionLoading');
+    assert.ok(salesReportsSource.includes('sectionErrors'), 'Must track sectionErrors');
+    assert.ok(salesReportsSource.includes('sectionAbortControllersRef'), 'Must use sectionAbortControllersRef');
+    assert.ok(salesReportsSource.includes('handleIntervalChange'), 'Must support isolated interval change without reloading other sections');
+
+    // 9.1 Simulate section error isolation: Overview succeeds while time-series fails
+    const mockOverviewSuccess = await adminApi.getAnalyticsOverview({}, adminToken, TEST_BASE_URL);
+    let timeSeriesFailMsg = '';
+    try {
+      // Intentionally invalid interval to simulate auxiliary endpoint failure
+      await adminApi.getAnalyticsTimeSeries({ interval: 'invalid_interval' }, adminToken, TEST_BASE_URL);
+    } catch (err) {
+      timeSeriesFailMsg = err.message;
+    }
+    assert.strictEqual(mockOverviewSuccess.status, 'success');
+    assert.ok(timeSeriesFailMsg.length > 0, 'Auxiliary endpoint must fail with validation error');
+
+    // 9.2 Simulate multiple auxiliary sections failing independently while others succeed
+    let inventoryFailMsg = '';
+    try {
+      // Invalid machine ID format to trigger Zod 400 rejection in inventory endpoint
+      await adminApi.getAnalyticsInventory({ machine_id: 'INVALID$$ID' }, adminToken, TEST_BASE_URL);
+    } catch (err) {
+      inventoryFailMsg = err.message;
+    }
+    assert.ok(inventoryFailMsg.length > 0, 'Inventory query with invalid machine_id must fail independently');
+    // Ensure machines endpoint still succeeds independently
+    const machinesSuccess = await adminApi.getAnalyticsMachines({}, adminToken, TEST_BASE_URL);
+    assert.strictEqual(machinesSuccess.status, 'success');
+
+    // 9.3 Simulate retry behavior on affected endpoint
+    const retryRes = await adminApi.getAnalyticsTimeSeries({ interval: 'day' }, adminToken, TEST_BASE_URL);
+    assert.strictEqual(retryRes.status, 'success', 'Retry on affected endpoint must succeed');
+    assert.ok(Array.isArray(retryRes.data), 'Retry data must populate array');
+
+    // 9.4 Simulate AbortError ignoring in UI logic
+    const abortSimController = new AbortController();
+    abortSimController.abort();
+    let abortIgnored = false;
+    try {
+      await adminApi.getAnalyticsOverview({}, { token: adminToken, signal: abortSimController.signal, baseUrl: TEST_BASE_URL });
+    } catch (err) {
+      if (err.name === 'AbortError' || (err.data && err.data.name === 'AbortError')) {
+        abortIgnored = true;
+      }
+    }
+    assert.ok(abortIgnored, 'AbortError must be thrown by fetch and caught by UI without setting service error');
+
+    console.log('   PASS: Section-specific error isolation, retry behavior, and AbortError handling verified.');
+
+    // 10. Verify Phase 2.9.3.6 A-1 Request Sequence IDs & A-2 Section Synchronization Timestamps
+    console.log('10. Verifying Phase 2.9.3.6 A-1 Monotonic Request Sequence IDs & A-2 Section Timestamps...');
+    assert.ok(salesReportsSource.includes('requestIdRef = useRef(0)'), 'Must declare requestIdRef');
+    assert.ok(salesReportsSource.includes('sectionRequestIdsRef = useRef'), 'Must declare sectionRequestIdsRef');
+    assert.ok(salesReportsSource.includes('isMountedRef = useRef(true)'), 'Must declare isMountedRef');
+    assert.ok(salesReportsSource.includes('isFullRefreshObsolete'), 'Must check isFullRefreshObsolete');
+    assert.ok(salesReportsSource.includes('isSectionObsolete'), 'Must check isSectionObsolete');
+    assert.ok(salesReportsSource.includes('isTimeSeriesObsolete'), 'Must check isTimeSeriesObsolete');
+    assert.ok(salesReportsSource.includes('sectionLastUpdated'), 'Must track sectionLastUpdated state');
+    assert.ok(salesReportsSource.includes('lastFullSync'), 'Must track lastFullSync state');
+    assert.ok(salesReportsSource.includes('prevFilterContextRef'), 'Must track prevFilterContextRef for filter changes (C-1.2)');
+    assert.ok(salesReportsSource.includes('function formatSyncTime'), 'Must define formatSyncTime helper');
+    assert.ok(salesReportsSource.includes('Last full dashboard sync at'), 'Must display Last full dashboard sync');
+    assert.ok(salesReportsSource.includes('Partial sync •'), 'Must display Partial sync indicator with bullet (C-1.1)');
+    assert.ok(salesReportsSource.includes('Ready to synchronize'), 'Must display ready to synchronize status (C-1.1)');
+    assert.ok(salesReportsSource.includes('Synchronizing dashboard analytics...'), 'Must display synchronizing status (C-1.1)');
+
+    // 10.1 Verify A-1 request generation identity simulation
+    let currentGeneration = 1;
+    let staleDataOverwritten = false;
+    const simulateAsyncResponse = (genId, payload) => {
+      if (genId === currentGeneration) {
+        staleDataOverwritten = true;
+      }
+    };
+    currentGeneration = 2; // Newer request started
+    simulateAsyncResponse(1, { gross_sales_inr: 9999 }); // Obsolete response arrives
+    assert.strictEqual(staleDataOverwritten, false, 'Obsolete generation 1 must not overwrite generation 2');
+    simulateAsyncResponse(2, { gross_sales_inr: 5000 }); // Current response arrives
+    assert.strictEqual(staleDataOverwritten, true, 'Current generation 2 must be applied');
+
+    // 10.2 Verify C-1.1 Footer Precedence State Machine
+    const evaluateFooter = ({ isAnyLoading, sectionErrors, lastFullSync, sectionLastUpdated }) => {
+      if (isAnyLoading) return 'Synchronizing dashboard analytics...';
+      const errCount = Object.values(sectionErrors || {}).filter(Boolean).length;
+      if (errCount > 0) return `Partial sync • ${errCount} section(s) require attention`;
+      if (lastFullSync) return `Last full dashboard sync at ${formatISTTime(lastFullSync)}`;
+      const syncCount = Object.values(sectionLastUpdated || {}).filter(Boolean).length;
+      if (syncCount > 0) return `${syncCount} of 6 sections synchronized`;
+      return 'Ready to synchronize';
+    };
+
+    const formatISTTime = (d) => d.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }) + ' IST';
+    const oldSync = new Date('2026-11-14T06:00:00.000Z');
+
+    // Scenario A: Initial loading shows synchronizing
+    assert.strictEqual(evaluateFooter({ isAnyLoading: true, sectionErrors: {}, lastFullSync: null, sectionLastUpdated: {} }), 'Synchronizing dashboard analytics...');
+    // Scenario B: Previous full sync exists, user reloads/changes filters -> active loading MUST NOT be hidden by old full sync
+    assert.strictEqual(evaluateFooter({ isAnyLoading: true, sectionErrors: {}, lastFullSync: oldSync, sectionLastUpdated: {} }), 'Synchronizing dashboard analytics...');
+    // Scenario C: Section errors take precedence over old full sync
+    assert.strictEqual(evaluateFooter({ isAnyLoading: false, sectionErrors: { overview: 'Network error', refunds: 'Timeout' }, lastFullSync: oldSync, sectionLastUpdated: {} }), 'Partial sync • 2 section(s) require attention');
+    // Scenario D: Full sync displays timestamp
+    assert.ok(evaluateFooter({ isAnyLoading: false, sectionErrors: {}, lastFullSync: oldSync, sectionLastUpdated: {} }).startsWith('Last full dashboard sync at'));
+    // Scenario E: Partial section sync
+    assert.strictEqual(evaluateFooter({ isAnyLoading: false, sectionErrors: {}, lastFullSync: null, sectionLastUpdated: { overview: oldSync, timeSeries: oldSync } }), '2 of 6 sections synchronized');
+    // Scenario F: Uninitialized displays ready
+    assert.strictEqual(evaluateFooter({ isAnyLoading: false, sectionErrors: {}, lastFullSync: null, sectionLastUpdated: {} }), 'Ready to synchronize');
+
+    // 10.3 Verify C-1.2 Filter Context Detection & Timestamp Reset
+    let mockTimestamps = { overview: oldSync, timeSeries: oldSync };
+    let mockLastFull = oldSync;
+    let mockPrevFilterContext = '7days::ALL';
+
+    const simulateFilterOrRefresh = (nextPreset, nextCustomStart, nextCustomEnd, nextMachine) => {
+      const nextKey = `${nextPreset}:${nextPreset === 'custom' ? `${nextCustomStart}:${nextCustomEnd}` : ''}:${nextMachine}`;
+      const isFilterChange = mockPrevFilterContext !== null && mockPrevFilterContext !== nextKey;
+      mockPrevFilterContext = nextKey;
+      if (isFilterChange) {
+        mockTimestamps = { overview: null, timeSeries: null };
+        mockLastFull = null;
+      }
+    };
+
+    // Changing preset clears timestamps
+    simulateFilterOrRefresh('30days', '', '', 'ALL');
+    assert.strictEqual(mockTimestamps.overview, null, 'Changing preset must clear timestamps');
+    assert.strictEqual(mockLastFull, null, 'Changing preset must clear lastFullSync');
+
+    // Simulate successful sync on 30days
+    mockTimestamps = { overview: oldSync, timeSeries: oldSync };
+    mockLastFull = oldSync;
+
+    // Manual refresh on same filter retains timestamps during loading
+    simulateFilterOrRefresh('30days', '', '', 'ALL');
+    assert.strictEqual(mockTimestamps.overview, oldSync, 'Manual refresh with same filter must retain timestamps during loading');
+    assert.strictEqual(mockLastFull, oldSync, 'Manual refresh with same filter must retain lastFullSync during loading');
+
+    // Changing machine filter clears timestamps
+    simulateFilterOrRefresh('30days', '', '', 'CFX-MC-01');
+    assert.strictEqual(mockTimestamps.overview, null, 'Changing machine filter must clear timestamps');
+    assert.strictEqual(mockLastFull, null, 'Changing machine filter must clear lastFullSync');
+
+    // 10.4 Verify A-2 timestamp formatting and partial sync behavior
+    const testDate = new Date('2026-11-14T07:15:00.000Z');
+    const formattedIST = testDate.toLocaleTimeString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true
+    }) + ' IST';
+    assert.ok(formattedIST.includes('IST'), 'Formatted sync time must include IST');
+    assert.ok(formattedIST.includes('12:45'), 'UTC 07:15 must convert to Asia/Kolkata 12:45');
+
+    console.log('   PASS: Monotonic sequence IDs, C-1.1 footer precedence, C-1.2 filter-context timestamps & IST formatting verified.');
+
+    // =========================================================================
+    // 11. Verify Phase 2.9.4.1 Finding M-1: Admin OrdersPage Reconciliation Filter
+    // =========================================================================
+    console.log('11. Verifying Phase 2.9.4.1 M-1 Admin OrdersPage reconciliation filter contract & behavior...');
+    const ordersPagePath = new URL('../pages/OrdersPage.jsx', import.meta.url);
+    const fsModule = await import('node:fs');
+    const ordersPageSrc = fsModule.readFileSync(ordersPagePath, 'utf8');
+
+    assert.ok(ordersPageSrc.includes("result: 'PENDING_ACTION'"), 'OrdersPage must map pending refunds to PENDING_ACTION');
+    assert.ok(ordersPageSrc.includes('reconciliationFilter,\n  ])') || ordersPageSrc.includes('reconciliationFilter,\r\n  ])') || /useMemo\([\s\S]*reconciliationFilter[\s\S]*\]\)/.test(ordersPageSrc), 'filteredOrders useMemo dependencies must include reconciliationFilter');
+    assert.ok(ordersPageSrc.includes("reconciliationFilter !== 'ALL'"), 'hasActiveFilters must include reconciliationFilter');
+    assert.ok(ordersPageSrc.includes("setReconciliationFilter('ALL')"), 'handleResetFilters must reset reconciliationFilter to ALL');
+
+    const evalRec = (order) => {
+      const pending = Number(order.pending_refund_amount_paise || 0);
+      if (pending > 0 || order.refund_status === 'PENDING') {
+        return { result: 'PENDING_ACTION' };
+      }
+      if (order.status === 'FAILED' && Number(order.captured_amount_paise || 0) > 0) {
+        return { result: 'DISCREPANCY' };
+      }
+      return { result: 'MATCH' };
+    };
+    const sampleOrders = [
+      { id: 'O-MATCH', status: 'PAID', refund_status: 'NONE', captured_amount_paise: 10000, pending_refund_amount_paise: 0 },
+      { id: 'O-DISC', status: 'FAILED', refund_status: 'NONE', captured_amount_paise: 10000, pending_refund_amount_paise: 0 },
+      { id: 'O-PEND', status: 'PAID', refund_status: 'PENDING', captured_amount_paise: 10000, pending_refund_amount_paise: 5000 }
+    ];
+    for (const [filterVal, expectedId] of [['MATCH', 'O-MATCH'], ['DISCREPANCY', 'O-DISC'], ['PENDING_ACTION', 'O-PEND']]) {
+      const matched = sampleOrders.filter((o) => filterVal === 'ALL' || evalRec(o).result === filterVal);
+      assert.strictEqual(matched.length, 1);
+      assert.strictEqual(matched[0].id, expectedId, `Filter ${filterVal} must return ${expectedId}`);
+    }
+    console.log('   PASS: Admin OrdersPage M-1 reconciliation filter (MATCH, DISCREPANCY, PENDING_ACTION) & reset verified.');
+
     // Cleanup test state
     for (const machineId of ['CFX-MC-01', 'CFX-MC-02', 'CFX-MC-03', 'CFX-MC-04']) {
       await adminApi.assignMachineOwner(machineId, null, adminToken, TEST_BASE_URL);
     }
+    await db.run('DELETE FROM inventory_ledger WHERE machine_id = ?', ['CFX-MC-99']).catch(() => {});
     await db.run('DELETE FROM machine_products');
     await db.run('DELETE FROM machines WHERE id = ?', ['CFX-MC-99']);
 

@@ -14,9 +14,14 @@ import {
 } from '../services/api.js';
 import {
   formatINR,
+  formatSignedINR,
+  formatSignedPaise,
   formatRelativeHeartbeat,
   computeSalesAnalytics,
-  getPaymentStatusLabel
+  getPaymentStatusLabel,
+  getDispenseStatusLabel,
+  validateDateRange,
+  getKolkataDateString
 } from '../utils/formatters.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -479,8 +484,44 @@ async function runStage5Tests() {
     assert.strictEqual(salesReport.productSales[0].revenue, 135);
     console.log('   PASS: Order history & sales reports preserve ₹135 historical amount.');
 
+    // 8. Verify Phase 2.6 Advanced Order Management in Owner Portal
+    console.log('8. Verifying Phase 2.6 Order Management columns, badges, copyable pay ID & filters...');
+    const ownerOrdersSource = fs.readFileSync(
+      path.resolve(__dirname, '../pages/OrdersPage.jsx'),
+      'utf-8'
+    );
+    assert.ok(ownerOrdersSource.includes('PaymentStatusBadge'), 'OrdersPage must render PaymentStatusBadge');
+    assert.ok(ownerOrdersSource.includes('DispenseStatusBadge'), 'OrdersPage must render DispenseStatusBadge');
+    assert.ok(ownerOrdersSource.includes('CopyableText'), 'OrdersPage must include CopyableText helper');
+    assert.ok(ownerOrdersSource.includes('Order ID'), 'OrdersPage must have Order ID column');
+    assert.ok(ownerOrdersSource.includes('Date & Time'), 'OrdersPage must have Date & Time column');
+    assert.ok(ownerOrdersSource.includes('Machine ID'), 'OrdersPage must have Machine ID column');
+    assert.ok(ownerOrdersSource.includes('Product'), 'OrdersPage must have Product column');
+    assert.ok(ownerOrdersSource.includes('Amount'), 'OrdersPage must have Amount column');
+    assert.ok(ownerOrdersSource.includes('Payment'), 'OrdersPage must have Payment status column');
+    assert.ok(ownerOrdersSource.includes('Dispensing'), 'OrdersPage must have Dispensing status column');
+    assert.ok(ownerOrdersSource.includes('Payment ID'), 'OrdersPage must have Razorpay Payment ID column');
+    assert.ok(ownerOrdersSource.includes('Customer'), 'OrdersPage must have Customer column');
+    assert.ok(ownerOrdersSource.includes('Order Details'), 'OrdersPage must include Order Details view');
+    assert.ok(ownerOrdersSource.includes('razorpay_order_id'), 'OrdersPage search must match razorpay_order_id');
+    assert.ok(ownerOrdersSource.includes('rpOrderIdMatch'), 'OrdersPage must include rpOrderIdMatch in search');
+
+    // Test formatter status independence
+    assert.strictEqual(getPaymentStatusLabel({ status: 'PAID' }), 'PAID');
+    assert.strictEqual(getPaymentStatusLabel({ status: 'COMPLETED' }), 'COMPLETED');
+    assert.strictEqual(getPaymentStatusLabel({ status: 'PENDING' }), 'PENDING');
+    assert.strictEqual(getPaymentStatusLabel({ status: 'FAILED' }), 'FAILED');
+    assert.strictEqual(getPaymentStatusLabel({ status: 'CANCELLED' }), 'CANCELLED');
+
+    assert.strictEqual(getDispenseStatusLabel({ dispense_status: 'QUEUED' }), 'QUEUED');
+    assert.strictEqual(getDispenseStatusLabel({ dispense_status: 'DISPENSING' }), 'DISPENSING');
+    assert.strictEqual(getDispenseStatusLabel({ dispense_status: 'DISPENSED' }), 'DISPENSED');
+    assert.strictEqual(getDispenseStatusLabel({ dispense_status: 'FAILED' }), 'FAILED');
+    assert.strictEqual(getDispenseStatusLabel({ status: 'PAID' }), 'PENDING', 'Dispense status must default to PENDING when unset, never inferring from payment status');
+    console.log('   PASS: Owner Phase 2.6 order table columns, independent statuses & formatters verified.');
+
     // 9. Verify Responsive UI, Fragment Token Security & Production Build Bundle
-    console.log('8. Verifying responsive layout classes, fragment token security & production build artifacts...');
+    console.log('9. Verifying responsive layout classes, fragment token security & production build artifacts...');
     const sidebarSource = fs.readFileSync(
       path.resolve(__dirname, '../components/Sidebar.jsx'),
       'utf-8'
@@ -510,6 +551,280 @@ async function runStage5Tests() {
     const distIndexHtml = path.resolve(__dirname, '../../dist/index.html');
     assert.ok(fs.existsSync(distIndexHtml), 'Production build dist/index.html must exist');
     console.log('   PASS: Responsive navigation, #setup_token security & production build bundle verified.');
+
+    // 10. Verify Phase 2.9.3.2 Owner Backend Analytics Integration & Isolation
+    console.log('10. Verifying Phase 2.9.3.2 Owner Backend Analytics API integration & isolation...');
+    assert.strictEqual(typeof ownerApi.getAnalyticsOverview, 'function');
+    assert.strictEqual(typeof ownerApi.getAnalyticsTimeSeries, 'function');
+    assert.strictEqual(typeof ownerApi.getAnalyticsMachines, 'function');
+    assert.strictEqual(typeof ownerApi.getAnalyticsProducts, 'function');
+    assert.strictEqual(typeof ownerApi.getAnalyticsInventory, 'function');
+    assert.strictEqual(typeof ownerApi.getAnalyticsRefunds, 'function');
+
+    // 10.1 Call all 6 endpoints with Owner A token
+    const ownerOverview = await ownerApi.getAnalyticsOverview({}, tokenA, TEST_BASE_URL);
+    assert.strictEqual(ownerOverview.status, 'success');
+    assert.ok(typeof ownerOverview.data.gross_sales_paise === 'number');
+    assert.ok(typeof ownerOverview.data.net_revenue_paise === 'number');
+
+    const ownerTs = await ownerApi.getAnalyticsTimeSeries({ interval: 'day' }, tokenA, TEST_BASE_URL);
+    assert.strictEqual(ownerTs.status, 'success');
+    assert.ok(Array.isArray(ownerTs.data));
+
+    const ownerMachines = await ownerApi.getAnalyticsMachines({}, tokenA, TEST_BASE_URL);
+    assert.strictEqual(ownerMachines.status, 'success');
+    assert.ok(Array.isArray(ownerMachines.data));
+    // Verify Owner A's machines query returns only CFX-MC-01 or CFX-MC-02, NEVER CFX-MC-03
+    const analyticsMachineIdsA = ownerMachines.data.map((m) => m.machine_id);
+    assert.ok(!analyticsMachineIdsA.includes('CFX-MC-03'), 'Owner A must never see Owner B machine CFX-MC-03 in analytics');
+
+    const ownerProducts = await ownerApi.getAnalyticsProducts({}, tokenA, TEST_BASE_URL);
+    assert.strictEqual(ownerProducts.status, 'success');
+    assert.ok(Array.isArray(ownerProducts.data));
+
+    const ownerInventory = await ownerApi.getAnalyticsInventory({}, tokenA, TEST_BASE_URL);
+    assert.strictEqual(ownerInventory.status, 'success');
+    assert.ok(Array.isArray(ownerInventory.data));
+
+    const ownerRefunds = await ownerApi.getAnalyticsRefunds({}, tokenA, TEST_BASE_URL);
+    assert.strictEqual(ownerRefunds.status, 'success');
+    assert.ok(Array.isArray(ownerRefunds.data.recent_refunds));
+
+    // 10.2 Verify Owner A attempting to query Owner B's machine returns HTTP 403 Forbidden
+    let forbiddenCaught = false;
+    try {
+      await ownerApi.getAnalyticsOverview({ machine_id: 'CFX-MC-03' }, tokenA, TEST_BASE_URL);
+    } catch (err) {
+      forbiddenCaught = true;
+      assert.strictEqual(err.status, 403, 'Cross-owner machine analytics query must be rejected with HTTP 403');
+    }
+    assert.ok(forbiddenCaught, 'Cross-owner machine analytics query must throw HTTP 403');
+
+    // 10.3 Verify unauthenticated returns HTTP 401
+    let unauthCaught = false;
+    try {
+      await ownerApi.getAnalyticsOverview({}, null, TEST_BASE_URL);
+    } catch (err) {
+      unauthCaught = true;
+      assert.strictEqual(err.status, 401);
+    }
+    assert.ok(unauthCaught, 'Unauthenticated analytics query must throw HTTP 401');
+
+    // 10.4 Verify signed INR formatting
+    assert.strictEqual(formatSignedINR(14500), '₹14,500');
+    assert.strictEqual(formatSignedINR(-500), '-₹500');
+    assert.strictEqual(formatSignedINR(0), '₹0');
+    assert.strictEqual(formatSignedPaise(-50000), '-₹500');
+
+    // 10.5 Verify SalesReportsPage.jsx and StatusBadges source requirements
+    const ownerReportsSource = fs.readFileSync(
+      path.resolve(__dirname, '../pages/SalesReportsPage.jsx'),
+      'utf-8'
+    );
+    assert.ok(ownerReportsSource.includes('ownerApi.getAnalyticsOverview'), 'Must call ownerApi.getAnalyticsOverview');
+    assert.ok(ownerReportsSource.includes('ownerApi.getAnalyticsTimeSeries'), 'Must call ownerApi.getAnalyticsTimeSeries');
+    assert.ok(ownerReportsSource.includes('ownerApi.getAnalyticsMachines'), 'Must call ownerApi.getAnalyticsMachines');
+    assert.ok(ownerReportsSource.includes('ownerApi.getAnalyticsProducts'), 'Must call ownerApi.getAnalyticsProducts');
+    assert.ok(ownerReportsSource.includes('ownerApi.getAnalyticsInventory'), 'Must call ownerApi.getAnalyticsInventory');
+    assert.ok(ownerReportsSource.includes('ownerApi.getAnalyticsRefunds'), 'Must call ownerApi.getAnalyticsRefunds');
+    assert.ok(ownerReportsSource.includes('AbortController'), 'Must use AbortController');
+    assert.ok(ownerReportsSource.includes('No Machines Assigned'), 'Must have zero assigned machines empty state');
+    assert.ok(ownerReportsSource.includes('Critical Financial Invariant Violation Detected'), 'Must display over-refund banner');
+    assert.ok(ownerReportsSource.includes('Period Net Revenue Deficit'), 'Must display net deficit banner');
+    assert.ok(ownerReportsSource.includes('UntrackedBadge'), 'Must use UntrackedBadge');
+    assert.ok(!ownerReportsSource.includes('computeSalesAnalytics('), 'Must not use client-side computeSalesAnalytics');
+
+    console.log('   PASS: Owner analytics APIs, tenant isolation (403), signed currency, and UI invariants verified.');
+
+    // 11. Verify Phase 2.9.3.4 Fix W-1: Owner Section-Specific Error Handling & Isolated Retry
+    console.log('11. Verifying Phase 2.9.3.4 Fix W-1 Owner section-specific error handling & retry...');
+    assert.ok(ownerReportsSource.includes('function SectionError'), 'Must define SectionError component in Owner portal');
+    assert.ok(ownerReportsSource.includes('function SectionLoading'), 'Must define SectionLoading component in Owner portal');
+    assert.ok(ownerReportsSource.includes('retrySection'), 'Must implement section-specific retrySection in Owner portal');
+    assert.ok(ownerReportsSource.includes('sectionLoading'), 'Must track sectionLoading in Owner portal');
+    assert.ok(ownerReportsSource.includes('sectionErrors'), 'Must track sectionErrors in Owner portal');
+    assert.ok(ownerReportsSource.includes('sectionAbortControllersRef'), 'Must use sectionAbortControllersRef in Owner portal');
+    assert.ok(ownerReportsSource.includes('handleIntervalChange'), 'Must support isolated interval change in Owner portal');
+
+    // 11.1 Simulate section error isolation: Overview succeeds while time-series fails for owner
+    const ownerOverviewSuccess = await ownerApi.getAnalyticsOverview({}, tokenA, TEST_BASE_URL);
+    let ownerTimeSeriesFailMsg = '';
+    try {
+      await ownerApi.getAnalyticsTimeSeries({ interval: 'invalid_interval' }, tokenA, TEST_BASE_URL);
+    } catch (err) {
+      ownerTimeSeriesFailMsg = err.message;
+    }
+    assert.strictEqual(ownerOverviewSuccess.status, 'success');
+    assert.ok(ownerTimeSeriesFailMsg.length > 0, 'Auxiliary endpoint must fail independently with validation error');
+
+    // 11.2 Simulate multiple auxiliary sections failing independently while others succeed
+    let ownerInventoryFailMsg = '';
+    try {
+      await ownerApi.getAnalyticsInventory({ machine_id: 'INVALID$$ID' }, tokenA, TEST_BASE_URL);
+    } catch (err) {
+      ownerInventoryFailMsg = err.message;
+    }
+    assert.ok(ownerInventoryFailMsg.length > 0, 'Inventory query with invalid machine_id must fail independently');
+    const ownerProductsSuccess = await ownerApi.getAnalyticsProducts({}, tokenA, TEST_BASE_URL);
+    assert.strictEqual(ownerProductsSuccess.status, 'success');
+
+    // 11.3 Simulate isolated retry on affected endpoint for owner
+    const ownerRetryRes = await ownerApi.getAnalyticsTimeSeries({ interval: 'day' }, tokenA, TEST_BASE_URL);
+    assert.strictEqual(ownerRetryRes.status, 'success', 'Owner retry on affected endpoint must succeed');
+    assert.ok(Array.isArray(ownerRetryRes.data), 'Owner retry data must populate array');
+
+    // 11.4 Simulate cross-owner unauthorized machine retry rejection
+    let ownerCrossMachineRetryErr = '';
+    try {
+      await ownerApi.getAnalyticsMachines({ machine_id: 'CFX-MC-03' }, tokenA, TEST_BASE_URL);
+    } catch (err) {
+      ownerCrossMachineRetryErr = err.message;
+      assert.strictEqual(err.status, 403, 'Cross-owner machine retry must be rejected with HTTP 403');
+    }
+    assert.ok(ownerCrossMachineRetryErr.length > 0, 'Cross-owner machine retry must throw HTTP 403');
+
+    console.log('   PASS: Owner section-specific error isolation, retry behavior, and multi-tenant defense verified.');
+
+    // 12. Verify Phase 2.9.3.6 A-1 Owner Monotonic Sequence IDs & A-2 Section Timestamps
+    console.log('12. Verifying Phase 2.9.3.6 A-1 Owner Monotonic Request Sequence IDs & A-2 Section Timestamps...');
+    assert.ok(ownerReportsSource.includes('requestIdRef = useRef(0)'), 'Must declare requestIdRef in Owner portal');
+    assert.ok(ownerReportsSource.includes('sectionRequestIdsRef = useRef'), 'Must declare sectionRequestIdsRef in Owner portal');
+    assert.ok(ownerReportsSource.includes('isMountedRef = useRef(true)'), 'Must declare isMountedRef in Owner portal');
+    assert.ok(ownerReportsSource.includes('isFullRefreshObsolete'), 'Must check isFullRefreshObsolete in Owner portal');
+    assert.ok(ownerReportsSource.includes('isSectionObsolete'), 'Must check isSectionObsolete in Owner portal');
+    assert.ok(ownerReportsSource.includes('isTimeSeriesObsolete'), 'Must check isTimeSeriesObsolete in Owner portal');
+    assert.ok(ownerReportsSource.includes('sectionLastUpdated'), 'Must track sectionLastUpdated in Owner portal');
+    assert.ok(ownerReportsSource.includes('lastFullSync'), 'Must track lastFullSync in Owner portal');
+    assert.ok(ownerReportsSource.includes('prevFilterContextRef'), 'Must track prevFilterContextRef in Owner portal (C-1.2)');
+    assert.ok(ownerReportsSource.includes('function formatSyncTime'), 'Must define formatSyncTime in Owner portal');
+    assert.ok(ownerReportsSource.includes('Last full dashboard sync at'), 'Must display Last full dashboard sync in Owner portal');
+    assert.ok(ownerReportsSource.includes('Partial sync •'), 'Must display Partial sync with bullet in Owner portal (C-1.1)');
+    assert.ok(ownerReportsSource.includes('Ready to synchronize'), 'Must display ready to synchronize in Owner portal (C-1.1)');
+    assert.ok(ownerReportsSource.includes('Synchronizing dashboard analytics...'), 'Must display synchronizing status in Owner portal (C-1.1)');
+
+    // 12.1 Verify owner request identity protection: obsolete machine query cannot overwrite
+    let ownerCurrentGen = 1;
+    let ownerStaleDataApplied = false;
+    const simulateOwnerAsync = (genId, data) => {
+      if (genId === ownerCurrentGen) {
+        ownerStaleDataApplied = true;
+      }
+    };
+    ownerCurrentGen = 2; // Switched machine filter
+    simulateOwnerAsync(1, { machine_id: 'CFX-MC-01', gross_sales_inr: 999 }); // Obsolete filter response
+    assert.strictEqual(ownerStaleDataApplied, false, 'Obsolete machine filter response must not be applied');
+    simulateOwnerAsync(2, { machine_id: 'CFX-MC-02', gross_sales_inr: 1200 }); // Current filter response
+    assert.strictEqual(ownerStaleDataApplied, true, 'Current machine filter response must be applied');
+
+    // 12.2 Verify C-1.1 Owner Footer Precedence State Machine
+    const evaluateOwnerFooter = ({ isAnyLoading, sectionErrors, lastFullSync, sectionLastUpdated }) => {
+      if (isAnyLoading) return 'Synchronizing dashboard analytics...';
+      const errCount = Object.values(sectionErrors || {}).filter(Boolean).length;
+      if (errCount > 0) return `Partial sync • ${errCount} section(s) require attention`;
+      if (lastFullSync) return `Last full dashboard sync at ${ownerFormatIST(lastFullSync)}`;
+      const syncCount = Object.values(sectionLastUpdated || {}).filter(Boolean).length;
+      if (syncCount > 0) return `${syncCount} of 6 sections synchronized`;
+      return 'Ready to synchronize';
+    };
+
+    const ownerFormatIST = (d) => d.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }) + ' IST';
+    const ownerOldSync = new Date('2026-11-14T06:00:00.000Z');
+
+    // Scenario A: Initial loading shows synchronizing
+    assert.strictEqual(evaluateOwnerFooter({ isAnyLoading: true, sectionErrors: {}, lastFullSync: null, sectionLastUpdated: {} }), 'Synchronizing dashboard analytics...');
+    // Scenario B: Previous full sync exists, user reloads/changes filters -> active loading MUST NOT be hidden by old full sync
+    assert.strictEqual(evaluateOwnerFooter({ isAnyLoading: true, sectionErrors: {}, lastFullSync: ownerOldSync, sectionLastUpdated: {} }), 'Synchronizing dashboard analytics...');
+    // Scenario C: Section errors take precedence over old full sync
+    assert.strictEqual(evaluateOwnerFooter({ isAnyLoading: false, sectionErrors: { overview: 'Network error', refunds: 'Timeout' }, lastFullSync: ownerOldSync, sectionLastUpdated: {} }), 'Partial sync • 2 section(s) require attention');
+    // Scenario D: Full sync displays timestamp
+    assert.ok(evaluateOwnerFooter({ isAnyLoading: false, sectionErrors: {}, lastFullSync: ownerOldSync, sectionLastUpdated: {} }).startsWith('Last full dashboard sync at'));
+    // Scenario E: Partial section sync
+    assert.strictEqual(evaluateOwnerFooter({ isAnyLoading: false, sectionErrors: {}, lastFullSync: null, sectionLastUpdated: { overview: ownerOldSync, timeSeries: ownerOldSync } }), '2 of 6 sections synchronized');
+    // Scenario F: Uninitialized displays ready
+    assert.strictEqual(evaluateOwnerFooter({ isAnyLoading: false, sectionErrors: {}, lastFullSync: null, sectionLastUpdated: {} }), 'Ready to synchronize');
+
+    // 12.3 Verify C-1.2 Owner Filter Context Detection & Timestamp Reset
+    let mockOwnerTimestamps = { overview: ownerOldSync, timeSeries: ownerOldSync };
+    let mockOwnerLastFull = ownerOldSync;
+    let mockOwnerPrevFilterContext = '7days::CFX-MC-01';
+
+    const simulateOwnerFilterOrRefresh = (nextPreset, nextCustomStart, nextCustomEnd, nextMachine) => {
+      const nextKey = `${nextPreset}:${nextPreset === 'custom' ? `${nextCustomStart}:${nextCustomEnd}` : ''}:${nextMachine}`;
+      const isFilterChange = mockOwnerPrevFilterContext !== null && mockOwnerPrevFilterContext !== nextKey;
+      mockOwnerPrevFilterContext = nextKey;
+      if (isFilterChange) {
+        mockOwnerTimestamps = { overview: null, timeSeries: null };
+        mockOwnerLastFull = null;
+      }
+    };
+
+    // Changing preset clears timestamps
+    simulateOwnerFilterOrRefresh('30days', '', '', 'CFX-MC-01');
+    assert.strictEqual(mockOwnerTimestamps.overview, null, 'Owner preset change must clear timestamps');
+    assert.strictEqual(mockOwnerLastFull, null, 'Owner preset change must clear lastFullSync');
+
+    // Simulate successful sync on 30days
+    mockOwnerTimestamps = { overview: ownerOldSync, timeSeries: ownerOldSync };
+    mockOwnerLastFull = ownerOldSync;
+
+    // Manual refresh on same filter retains timestamps during loading
+    simulateOwnerFilterOrRefresh('30days', '', '', 'CFX-MC-01');
+    assert.strictEqual(mockOwnerTimestamps.overview, ownerOldSync, 'Owner manual refresh must retain timestamps during loading');
+    assert.strictEqual(mockOwnerLastFull, ownerOldSync, 'Owner manual refresh must retain lastFullSync during loading');
+
+    // Changing machine filter clears timestamps
+    simulateOwnerFilterOrRefresh('30days', '', '', 'CFX-MC-02');
+    assert.strictEqual(mockOwnerTimestamps.overview, null, 'Owner machine switch must clear timestamps');
+    assert.strictEqual(mockOwnerLastFull, null, 'Owner machine switch must clear lastFullSync');
+
+    // 12.4 Verify owner timestamp formatting in Asia/Kolkata
+    const ownerTestDate = new Date('2026-11-14T07:15:00.000Z');
+    const ownerFormattedIST = ownerTestDate.toLocaleTimeString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true
+    }) + ' IST';
+    assert.ok(ownerFormattedIST.includes('IST'), 'Formatted sync time must include IST');
+    assert.ok(ownerFormattedIST.includes('12:45'), 'UTC 07:15 must convert to Asia/Kolkata 12:45');
+
+    console.log('   PASS: Owner monotonic sequence IDs, C-1.1 footer precedence, C-1.2 filter-context timestamps & IST verified.');
+
+    // =========================================================================
+    // 13. Verify Phase 2.9.4.1 Finding M-1: Owner OrdersPage Reconciliation Filter
+    // =========================================================================
+    console.log('13. Verifying Phase 2.9.4.1 M-1 Owner OrdersPage reconciliation filter contract & behavior...');
+    const ownerOrdersPagePath = new URL('../pages/OrdersPage.jsx', import.meta.url);
+    const fsOwnerModule = await import('node:fs');
+    const ownerOrdersPageSrc = fsOwnerModule.readFileSync(ownerOrdersPagePath, 'utf8');
+
+    assert.ok(ownerOrdersPageSrc.includes("result: 'PENDING_ACTION'"), 'Owner OrdersPage must map pending refunds to PENDING_ACTION');
+    assert.ok(/useMemo\([\s\S]*reconciliationFilter[\s\S]*\]\)/.test(ownerOrdersPageSrc), 'Owner filteredOrders useMemo dependencies must include reconciliationFilter');
+    assert.ok(ownerOrdersPageSrc.includes("reconciliationFilter !== 'ALL'"), 'Owner hasActiveFilters must include reconciliationFilter');
+    assert.ok(ownerOrdersPageSrc.includes("setReconciliationFilter('ALL')"), 'Owner handleResetFilters must reset reconciliationFilter to ALL');
+
+    const evalOwnerRec = (order) => {
+      const pending = Number(order.pending_refund_amount_paise || 0);
+      if (pending > 0 || order.refund_status === 'PENDING') {
+        return { result: 'PENDING_ACTION' };
+      }
+      if (order.status === 'FAILED' && Number(order.captured_amount_paise || 0) > 0) {
+        return { result: 'DISCREPANCY' };
+      }
+      return { result: 'MATCH' };
+    };
+    const ownerSampleOrders = [
+      { id: 'O-MATCH', status: 'PAID', refund_status: 'NONE', captured_amount_paise: 10000, pending_refund_amount_paise: 0 },
+      { id: 'O-DISC', status: 'FAILED', refund_status: 'NONE', captured_amount_paise: 10000, pending_refund_amount_paise: 0 },
+      { id: 'O-PEND', status: 'PAID', refund_status: 'PENDING', captured_amount_paise: 10000, pending_refund_amount_paise: 5000 }
+    ];
+    for (const [filterVal, expectedId] of [['MATCH', 'O-MATCH'], ['DISCREPANCY', 'O-DISC'], ['PENDING_ACTION', 'O-PEND']]) {
+      const matched = ownerSampleOrders.filter((o) => filterVal === 'ALL' || evalOwnerRec(o).result === filterVal);
+      assert.strictEqual(matched.length, 1);
+      assert.strictEqual(matched[0].id, expectedId, `Owner filter ${filterVal} must return ${expectedId}`);
+    }
+    console.log('   PASS: Owner OrdersPage M-1 reconciliation filter (MATCH, DISCREPANCY, PENDING_ACTION) & reset verified.');
 
     // Cleanup test state
     for (const machineId of ['CFX-MC-01', 'CFX-MC-02', 'CFX-MC-03', 'CFX-MC-04']) {

@@ -57,6 +57,9 @@ async function runWave21HardeningTests() {
   await initDB();
   const db = getDB();
   await db.run('DELETE FROM machine_products');
+  await db.run("DELETE FROM products WHERE name LIKE 'Wave21 Admin Espresso%'");
+  await db.run('DELETE FROM inventory_ledger WHERE order_id IN (?, ?)', ['CFX-90000001', 'CFX-90000002']).catch(() => {});
+  await db.run('DELETE FROM refunds WHERE order_id IN (?, ?)', ['CFX-90000001', 'CFX-90000002']).catch(() => {});
   await db.run('DELETE FROM orders WHERE id IN (?, ?)', ['CFX-90000001', 'CFX-90000002']);
 
   const server: http.Server = await new Promise<http.Server>((resolve) => {
@@ -317,6 +320,8 @@ async function runWave21HardeningTests() {
 
     // Cleanup test fixtures
     await db.run('DELETE FROM machine_products');
+    await db.run('DELETE FROM inventory_ledger WHERE order_id IN (?, ?)', ['CFX-90000001', 'CFX-90000002']).catch(() => {});
+    await db.run('DELETE FROM refunds WHERE order_id IN (?, ?)', ['CFX-90000001', 'CFX-90000002']).catch(() => {});
     await db.run('DELETE FROM orders WHERE id IN (?, ?)', ['CFX-90000001', 'CFX-90000002']);
     if (createdProductId) {
       await db.run('DELETE FROM products WHERE id = ?', [createdProductId]);

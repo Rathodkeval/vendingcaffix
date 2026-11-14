@@ -6,6 +6,8 @@ import orderRoutes from './orderRoutes';
 import paymentRoutes from './paymentRoutes';
 import kioskRoutes from './kioskRoutes';
 import cronRoutes from './cronRoutes';
+import reconciliationRoutes from './reconciliationRoutes';
+import analyticsRoutes from './analyticsRoutes';
 import { getMachineStatus } from '../controllers/machineController';
 import { authenticateJWT } from '../middleware/auth';
 
@@ -18,6 +20,8 @@ router.use('/orders', orderRoutes);
 router.use('/payments', paymentRoutes);
 router.use('/kiosk', kioskRoutes);
 router.use('/cron', cronRoutes);
+router.use('/reconciliation', reconciliationRoutes);
+router.use('/analytics', analyticsRoutes);
 router.get('/machine-status', authenticateJWT, getMachineStatus);
 
 export default router;

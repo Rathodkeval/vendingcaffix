@@ -87,6 +87,72 @@ export function OrderStatusBadge({ status }) {
   );
 }
 
+export function PaymentStatusBadge({ status }) {
+  const s = String(status || 'PENDING').toUpperCase();
+  const styles = {
+    PAID: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    COMPLETED: 'bg-emerald-100 text-emerald-800 border-emerald-300',
+    PENDING: 'bg-amber-50 text-amber-800 border-amber-200',
+    FAILED: 'bg-rose-50 text-rose-700 border-rose-200',
+    CANCELLED: 'bg-slate-100 text-slate-600 border-slate-200'
+  };
+
+  return (
+    <span
+      className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border ${
+        styles[s] || 'bg-slate-100 text-slate-600 border-slate-200'
+      }`}
+    >
+      {s}
+    </span>
+  );
+}
+
+export function DispenseStatusBadge({ status }) {
+  const s = String(status || 'PENDING').toUpperCase();
+  const styles = {
+    QUEUED: 'bg-sky-50 text-sky-800 border-sky-200',
+    DISPENSING: 'bg-amber-50 text-amber-800 border-amber-300',
+    DISPENSED: 'bg-teal-50 text-teal-800 border-teal-200',
+    PENDING: 'bg-slate-100 text-slate-600 border-slate-200',
+    FAILED: 'bg-rose-50 text-rose-700 border-rose-200'
+  };
+
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold border ${
+        styles[s] || 'bg-slate-100 text-slate-600 border-slate-200'
+      }`}
+    >
+      {s === 'DISPENSING' && (
+        <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-ping" />
+      )}
+      {s}
+    </span>
+  );
+}
+
+export function RefundStatusBadge({ status }) {
+  const s = String(status || 'NONE').toUpperCase();
+  const styles = {
+    NONE: 'bg-slate-100 text-slate-600 border-slate-200',
+    PENDING: 'bg-amber-50 text-amber-800 border-amber-200',
+    PARTIAL: 'bg-indigo-50 text-indigo-800 border-indigo-200',
+    FULL: 'bg-purple-50 text-purple-800 border-purple-200',
+    FAILED: 'bg-rose-50 text-rose-700 border-rose-200'
+  };
+
+  return (
+    <span
+      className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border ${
+        styles[s] || styles.NONE
+      }`}
+    >
+      {s === 'NONE' ? 'NO REFUND' : `REFUND: ${s}`}
+    </span>
+  );
+}
+
 export function SoftwareEstimatedBadge() {
   return (
     <span
@@ -95,6 +161,49 @@ export function SoftwareEstimatedBadge() {
     >
       <Info className="w-3.5 h-3.5 text-[#C9A66B]" />
       Software-Estimated (Per-Order Deduction)
+    </span>
+  );
+}
+
+export function UntrackedBadge() {
+  return (
+    <span
+      className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-500 border border-slate-200"
+      title="No inventory levels have been initialized or recorded for this machine."
+    >
+      Untracked
+    </span>
+  );
+}
+
+export function ReconciliationBadge({ result, reason }) {
+  const r = String(result || 'MATCH').toUpperCase();
+  if (r === 'MATCH') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+        RECONCILED
+      </span>
+    );
+  }
+  if (r === 'PENDING_ACTION') {
+    return (
+      <span
+        className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200"
+        title={reason}
+      >
+        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+        PENDING ACTION
+      </span>
+    );
+  }
+  return (
+    <span
+      className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-rose-50 text-rose-700 border border-rose-200"
+      title={reason}
+    >
+      <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+      DISCREPANCY
     </span>
   );
 }

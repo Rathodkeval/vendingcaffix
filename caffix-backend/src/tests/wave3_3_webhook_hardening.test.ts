@@ -72,6 +72,9 @@ class OptimisticMockFirestore {
           id,
           _colName: colName,
           _path: path,
+          collection(subColName: string) {
+            return self.collection(`${colName}/${id}/${subColName}`);
+          },
           async get() {
             if (self.readYieldMs > 0) {
               await new Promise((r) => setTimeout(r, self.readYieldMs));
