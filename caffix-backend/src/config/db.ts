@@ -354,9 +354,9 @@ class MockDatabase {
         const p = mockStore.products.find(prod => prod.id === o.product_id);
         return {
           ...o,
-          product_name: p ? p.name : ''
+          product_name: p ? p.name : (o.product_name || '')
         };
-      }).sort((a, b) => b.created_at.localeCompare(a.created_at));
+      }).sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
     }
     
     return [];
@@ -464,43 +464,71 @@ class MockDatabase {
       return { changes: user ? 1 : 0 };
     }
 
-    if (query.includes('insert into orders')) {
-      const [id, product_id, amount, status, machine_id, created_at, razorpay_order_id, extra_sugar, base] = params;
+    if (
+      query.includes('insert into orders') ||
+      query.includes('insert or replace into orders') ||
+      query.includes('insert or ignore into orders')
+    ) {
+      const colsMatch = query.match(/insert(?:\s+or\s+(?:replace|ignore))?\s+into\s+orders\s*\(([^)]+)\)\s*values/i);
+      const colValues: Record<string, any> = {};
+      if (colsMatch && colsMatch[1]) {
+        const cols = colsMatch[1].split(',').map((c) => c.trim().replace(/["`]/g, ''));
+        cols.forEach((colName, idx) => {
+          colValues[colName] = params[idx];
+        });
+      } else {
+        const [id, product_id, amount, status, machine_id, created_at, razorpay_order_id, extra_sugar, base] = params;
+        Object.assign(colValues, {
+          id,
+          product_id,
+          amount,
+          status,
+          machine_id,
+          created_at,
+          razorpay_order_id,
+          extra_sugar,
+          base
+        });
+      }
+
+      const id = colValues.id;
       const existingIdx = mockStore.orders.findIndex(o => o.id === id);
       const newOrder = {
         id,
-        product_id,
-        amount,
-        status,
-        machine_id,
-        created_at,
-        razorpay_order_id,
-        razorpay_payment_id: null,
-        razorpay_signature: null,
-        extra_sugar: extra_sugar ?? 1,
-        base: base ?? 'water',
-        dispense_status: 'PENDING',
-        customer_name: null,
-        customer_email: null,
-        updated_at: created_at || new Date().toISOString(),
-        dispensed_at: null,
-        dispense_started_at: null,
-        refund_status: 'NONE',
-        total_refunded_amount_paise: 0,
-        pending_refund_amount_paise: 0,
-        last_refunded_at: null,
-        captured_amount_paise: null
+        product_id: colValues.product_id ?? null,
+        amount: colValues.amount ?? 0,
+        status: colValues.status ?? 'PENDING',
+        machine_id: colValues.machine_id ?? null,
+        created_at: colValues.created_at ?? null,
+        razorpay_order_id: colValues.razorpay_order_id ?? null,
+        razorpay_payment_id: colValues.razorpay_payment_id ?? null,
+        razorpay_signature: colValues.razorpay_signature ?? null,
+        extra_sugar: colValues.extra_sugar ?? 1,
+        base: colValues.base ?? 'water',
+        dispense_status: colValues.dispense_status ?? 'PENDING',
+        customer_name: colValues.customer_name ?? null,
+        customer_email: colValues.customer_email ?? null,
+        updated_at: colValues.updated_at ?? colValues.created_at ?? null,
+        dispensed_at: colValues.dispensed_at ?? null,
+        dispense_started_at: colValues.dispense_started_at ?? null,
+        refund_status: colValues.refund_status ?? 'NONE',
+        total_refunded_amount_paise: Number(colValues.total_refunded_amount_paise ?? 0),
+        pending_refund_amount_paise: Number(colValues.pending_refund_amount_paise ?? 0),
+        last_refunded_at: colValues.last_refunded_at ?? null,
+        captured_amount_paise: colValues.captured_amount_paise ?? null
       };
       if (existingIdx >= 0) {
         if (query.includes('insert or replace')) {
           mockStore.orders[existingIdx] = { ...mockStore.orders[existingIdx], ...newOrder };
-        } else {
-          throw new Error(`SQLITE_CONSTRAINT: UNIQUE constraint failed: orders.id (${id})`);
+          return { lastID: id, changes: 1 };
         }
-      } else {
-        mockStore.orders.push(newOrder);
+        if (query.includes('insert or ignore')) {
+          return { lastID: mockStore.orders[existingIdx].id, changes: 0 };
+        }
+        throw new Error(`SQLITE_CONSTRAINT: UNIQUE constraint failed: orders.id (${id})`);
       }
-      return { lastID: id };
+      mockStore.orders.push(newOrder);
+      return { lastID: id, changes: 1 };
     }
     
     if (query.includes('update orders set')) {
@@ -598,6 +626,27 @@ class MockDatabase {
         const order = mockStore.orders.find(o => o.id === orderId);
         if (order) {
           order.razorpay_order_id = rpOrderId;
+        }
+        return { changes: order ? 1 : 0 };
+      } else if (query.includes('customer_name = ?') && query.includes('customer_email = ?')) {
+        const [customerName, customerEmail, orderId] = params;
+        const order = mockStore.orders.find(o => o.id === orderId);
+        if (order) {
+          order.customer_name = customerName ?? null;
+          order.customer_email = customerEmail ?? null;
+        }
+        return { changes: order ? 1 : 0 };
+      } else if (
+        query.includes('updated_at = ?') &&
+        query.includes('dispensed_at = ?') &&
+        query.includes('dispense_started_at = ?')
+      ) {
+        const [updatedAt, dispensedAt, dispenseStartedAt, orderId] = params;
+        const order = mockStore.orders.find(o => o.id === orderId);
+        if (order) {
+          order.updated_at = updatedAt ?? null;
+          order.dispensed_at = dispensedAt ?? null;
+          order.dispense_started_at = dispenseStartedAt ?? null;
         }
         return { changes: order ? 1 : 0 };
       } else if (query.includes('dispense_status = ?')) {

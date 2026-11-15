@@ -135,9 +135,49 @@ export function formatRelativeHeartbeat(lastSeenIso, nowMs = Date.now()) {
 
 export const REVENUE_ELIGIBLE_STATUSES = new Set(['PAID', 'PREPARING', 'COMPLETED']);
 
+export function hasValidOrderMachine(order) {
+  if (!order || order.is_malformed) return false;
+  const rawMachineId = order.machine_id !== undefined && order.machine_id !== null
+    ? String(order.machine_id).trim()
+    : '';
+  if (!rawMachineId) return false;
+  const lower = rawMachineId.toLowerCase();
+  return lower !== 'undefined' && lower !== 'null';
+}
+
+export function hasVerifiedGatewayPayment(order) {
+  if (!order) return false;
+  if (order.razorpay_payment_id) return true;
+  return (
+    order.captured_amount_paise !== undefined &&
+    order.captured_amount_paise !== null &&
+    Number(order.captured_amount_paise) > 0
+  );
+}
+
 export function isRevenueOrder(order) {
   if (!order) return false;
-  return REVENUE_ELIGIBLE_STATUSES.has(String(order.status || '').toUpperCase());
+  if (!hasValidOrderMachine(order)) return false;
+  if (!REVENUE_ELIGIBLE_STATUSES.has(String(order.status || '').toUpperCase())) {
+    return false;
+  }
+  return hasVerifiedGatewayPayment(order);
+}
+
+export function getOrderGrossPaise(order) {
+  if (!order) return 0;
+  if (order.captured_amount_paise !== undefined && order.captured_amount_paise !== null) {
+    const cap = Number(order.captured_amount_paise);
+    return Number.isFinite(cap) ? cap : 0;
+  }
+  const amount = Number(order.amount || 0);
+  return Number.isFinite(amount) ? Math.round(amount * 100) : 0;
+}
+
+export function getOrderRefundedPaise(order) {
+  if (!order) return 0;
+  const refunded = Number(order.total_refunded_amount_paise || 0);
+  return Number.isFinite(refunded) && refunded > 0 ? refunded : 0;
 }
 
 export function getPaymentStatusLabel(order) {
@@ -217,28 +257,41 @@ export function computeSalesAnalytics(
 
   const revenueOrdersAllTime = scopedOrders.filter(isRevenueOrder);
 
-  // Today's sales & count (always computed for Overview & summary cards)
-  let todayRevenue = 0;
+  // Today's sales & count in Asia/Kolkata calendar day (always computed for Overview & summary cards)
+  const todayKolkataDate = getKolkataDateString(nowDate);
+  let todayGrossPaise = 0;
+  let todayRefundedPaise = 0;
   let todayOrdersCount = 0;
   for (const o of revenueOrdersAllTime) {
     const createdMs = Date.parse(o.created_at);
-    if (!Number.isNaN(createdMs) && createdMs >= todayStartMs) {
-      todayRevenue += Number(o.amount) || 0;
+    if (!Number.isNaN(createdMs) && getKolkataDateString(new Date(createdMs)) === todayKolkataDate) {
+      todayGrossPaise += getOrderGrossPaise(o);
+      todayRefundedPaise += getOrderRefundedPaise(o);
       todayOrdersCount += 1;
     }
   }
+  const todayGrossRevenue = Math.round(todayGrossPaise / 100);
+  const todayRefunds = Math.round(todayRefundedPaise / 100);
+  const todayNetRevenue = Math.round((todayGrossPaise - todayRefundedPaise) / 100);
+  const todayRevenue = todayNetRevenue;
 
   // Filtered by selected time window (`period`)
   const periodRevenueOrders = revenueOrdersAllTime.filter((o) => {
     if (period === 'all') return true;
     const createdMs = Date.parse(o.created_at);
-    if (Number.isNaN(createdMs)) return true;
+    if (Number.isNaN(createdMs)) return false;
     return createdMs >= cutoffMs;
   });
 
-  const totalRevenue = periodRevenueOrders.reduce((sum, o) => sum + (Number(o.amount) || 0), 0);
+  const grossPaise = periodRevenueOrders.reduce((sum, o) => sum + getOrderGrossPaise(o), 0);
+  const refundsPaise = periodRevenueOrders.reduce((sum, o) => sum + getOrderRefundedPaise(o), 0);
+  const netPaise = grossPaise - refundsPaise;
+  const grossRevenue = Math.round(grossPaise / 100);
+  const refunds = Math.round(refundsPaise / 100);
+  const netRevenue = Math.round(netPaise / 100);
+  const totalRevenue = netRevenue;
   const totalOrders = periodRevenueOrders.length;
-  const averageOrderValue = totalOrders > 0 ? Math.round(totalRevenue / totalOrders) : 0;
+  const averageOrderValue = totalOrders > 0 ? Math.round(grossRevenue / totalOrders) : 0;
 
   // Revenue by Machine
   const machineMap = new Map();
@@ -353,8 +406,14 @@ export function computeSalesAnalytics(
 
   return {
     todayRevenue,
+    todayGrossRevenue,
+    todayRefunds,
+    todayNetRevenue,
     todayOrdersCount,
     totalRevenue,
+    grossRevenue,
+    refunds,
+    netRevenue,
     totalOrders,
     averageOrderValue,
     revenueByMachine,

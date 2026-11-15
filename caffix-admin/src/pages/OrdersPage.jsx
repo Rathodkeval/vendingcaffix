@@ -95,6 +95,15 @@ function resolveBeverageName(o) {
 
 export function evaluateOrderReconciliation(o) {
   if (!o) return { result: 'MATCH', reason: 'NONE', action: 'NO_ACTION', details: 'No order data' };
+  const rawMachineId = o.machine_id !== undefined && o.machine_id !== null ? String(o.machine_id).trim() : '';
+  if (o.is_malformed || !rawMachineId || rawMachineId.toLowerCase() === 'undefined' || rawMachineId.toLowerCase() === 'null') {
+    return {
+      result: 'DISCREPANCY',
+      reason: o.malformed_reason || 'MACHINE_ID_MISMATCH',
+      action: 'FLAG_DATA_CORRUPTION',
+      details: 'Malformed record missing valid machine_id or product reference; excluded from revenue.'
+    };
+  }
   const orderStatus = String(o.status || 'PENDING').toUpperCase();
   const dispenseStatus = String(o.dispense_status || 'PENDING').toUpperCase();
   const capturedPaise = o.captured_amount_paise !== undefined && o.captured_amount_paise !== null ? Number(o.captured_amount_paise) : null;

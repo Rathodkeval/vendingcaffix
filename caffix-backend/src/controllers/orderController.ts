@@ -495,13 +495,13 @@ async function fetchFormattedOrder(db: any, id: string): Promise<any> {
   const row = await db.get(
     `SELECT o.*, p.name as product_name
      FROM orders o
-     JOIN products p ON o.product_id = p.id
+     LEFT JOIN products p ON o.product_id = p.id
      WHERE o.id = ?`,
     [id]
   );
   if (row) {
     row.extra_sugar = 1;
-    row.coffee = row.product_name;
+    row.coffee = row.product_name || row.coffee || '';
   }
   return row;
 }

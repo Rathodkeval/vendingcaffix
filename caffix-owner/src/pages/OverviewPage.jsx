@@ -13,6 +13,7 @@ import {
 import { ConnectionBadge, ModeBadge, SoftwareEstimatedBadge } from '../components/StatusBadges';
 import {
   formatINR,
+  formatSignedINR,
   formatDateTime,
   formatRelativeHeartbeat,
   computeSalesAnalytics
@@ -21,6 +22,7 @@ import {
 export default function OverviewPage({
   machines,
   orders,
+  analyticsOverview = null,
   onSelectMachineForDetails,
   onSelectMachineForPricing,
   onNavigateTab
@@ -34,7 +36,32 @@ export default function OverviewPage({
     (m) => String(m.desired_mode || '').toUpperCase() === 'MAINTENANCE'
   ).length;
 
-  const analytics = computeSalesAnalytics(orders, machines, 'all', 'ALL');
+  const computed = computeSalesAnalytics(orders, machines, 'all', 'ALL');
+
+  const todaySummary = analyticsOverview?.today || null;
+  const allSummary = analyticsOverview?.all || null;
+
+  const todayGrossRevenue = todaySummary
+    ? (todaySummary.gross_sales_inr ?? Math.round(Number(todaySummary.gross_sales_paise || 0) / 100))
+    : computed.todayGrossRevenue;
+  const todayRefunds = todaySummary
+    ? (todaySummary.processed_refunds_inr ?? Math.round(Number(todaySummary.processed_refunds_paise || 0) / 100))
+    : computed.todayRefunds;
+  const todayNetRevenue = todaySummary
+    ? (todaySummary.net_revenue_inr ?? Math.round(Number(todaySummary.net_revenue_paise || 0) / 100))
+    : computed.todayNetRevenue;
+  const todayOrdersCount = todaySummary ? Number(todaySummary.paid_orders_count || 0) : computed.todayOrdersCount;
+
+  const allGrossRevenue = allSummary
+    ? (allSummary.gross_sales_inr ?? Math.round(Number(allSummary.gross_sales_paise || 0) / 100))
+    : computed.grossRevenue;
+  const allRefunds = allSummary
+    ? (allSummary.processed_refunds_inr ?? Math.round(Number(allSummary.processed_refunds_paise || 0) / 100))
+    : computed.refunds;
+  const allNetRevenue = allSummary
+    ? (allSummary.net_revenue_inr ?? Math.round(Number(allSummary.net_revenue_paise || 0) / 100))
+    : computed.netRevenue;
+  const allOrdersCount = allSummary ? Number(allSummary.paid_orders_count || 0) : computed.totalOrders;
 
   const kpis = [
     {
@@ -66,16 +93,16 @@ export default function OverviewPage({
       accent: 'bg-amber-600 text-white'
     },
     {
-      label: "Today's Sales",
-      value: formatINR(analytics.todayRevenue),
-      sub: `${analytics.todayOrdersCount} paid order(s) today`,
+      label: "Today's Net Revenue",
+      value: formatSignedINR(todayNetRevenue),
+      sub: `${todayOrdersCount} paid order(s) today • Gross ${formatINR(todayGrossRevenue)} − Refunds ${formatINR(todayRefunds)}`,
       icon: IndianRupee,
       accent: 'bg-[#C9A66B] text-[#2C1E17]'
     },
     {
-      label: 'Total Orders',
-      value: analytics.totalOrders,
-      sub: `All-time revenue: ${formatINR(analytics.totalRevenue)}`,
+      label: 'All-Time Net Revenue',
+      value: formatSignedINR(allNetRevenue),
+      sub: `${allOrdersCount} paid order(s) • Gross ${formatINR(allGrossRevenue)} − Refunds ${formatINR(allRefunds)}`,
       icon: ShoppingBag,
       accent: 'bg-[#8C6246] text-white'
     }
@@ -117,6 +144,43 @@ export default function OverviewPage({
             </div>
           );
         })}
+      </div>
+
+      {/* Authoritative Revenue Breakdown (Gross, Refunds, Net) */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-white rounded-2xl border border-[#EED9C4] p-4 shadow-xs">
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+            Gross Revenue (All-Time)
+          </div>
+          <div className="font-display text-xl font-extrabold text-[#2C1E17] mt-1">
+            {formatINR(allGrossRevenue)}
+          </div>
+          <div className="text-xs text-slate-500 mt-0.5">
+            Today: {formatINR(todayGrossRevenue)} • {allOrdersCount} verified paid order(s)
+          </div>
+        </div>
+        <div className="bg-white rounded-2xl border border-[#EED9C4] p-4 shadow-xs">
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-rose-700">
+            Processed Refunds (All-Time)
+          </div>
+          <div className="font-display text-xl font-extrabold text-rose-700 mt-1">
+            {formatINR(allRefunds)}
+          </div>
+          <div className="text-xs text-slate-500 mt-0.5">
+            Today: {formatINR(todayRefunds)} • Deducted from net revenue
+          </div>
+        </div>
+        <div className="bg-white rounded-2xl border border-[#EED9C4] p-4 shadow-xs">
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-emerald-700">
+            Net Revenue (All-Time)
+          </div>
+          <div className="font-display text-xl font-extrabold text-emerald-700 mt-1">
+            {formatSignedINR(allNetRevenue)}
+          </div>
+          <div className="text-xs text-slate-500 mt-0.5">
+            Today: {formatSignedINR(todayNetRevenue)} • Gross minus processed refunds
+          </div>
+        </div>
       </div>
 
       {/* Assigned Fleet Status Overview */}

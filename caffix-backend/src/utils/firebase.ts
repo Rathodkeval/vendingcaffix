@@ -2129,6 +2129,48 @@ export async function consumeSetupTokenAtomically(
   }
 }
 
+function normalizeOrderMachineId(value: any): string | null {
+  if (value === undefined || value === null) return null;
+  const trimmed = String(value).trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  if (lower === 'undefined' || lower === 'null') return null;
+  return trimmed;
+}
+
+function parseOrderProductId(value: any): number | null {
+  if (value === undefined || value === null || value === '') return null;
+  const num = Number(value);
+  if (!Number.isInteger(num) || num <= 0) return null;
+  return num;
+}
+
+function buildNormalizedAuthoritativeFallbackOrder(remoteOrder: any): any {
+  const orderId = String(remoteOrder.id);
+  const machineId = normalizeOrderMachineId(remoteOrder.machine_id);
+  const productId = parseOrderProductId(remoteOrder.product_id ?? remoteOrder.productId);
+  const rawCreatedAt =
+    typeof remoteOrder.created_at === 'string' && remoteOrder.created_at.trim().length > 0
+      ? remoteOrder.created_at
+      : null;
+  const isMalformed = !machineId || productId === null || remoteOrder.is_malformed === true;
+
+  return {
+    ...remoteOrder,
+    id: orderId,
+    machine_id: machineId,
+    product_id: productId,
+    product_name: remoteOrder.product_name || remoteOrder.coffee || '',
+    amount: Number(remoteOrder.amount ?? 0),
+    status: String(remoteOrder.status || 'PENDING').toUpperCase(),
+    created_at: rawCreatedAt,
+    is_malformed: isMalformed,
+    ...(isMalformed && !remoteOrder.malformed_reason
+      ? { malformed_reason: !machineId ? 'MISSING_MACHINE_ID' : 'MISSING_PRODUCT_ID' }
+      : {})
+  };
+}
+
 /**
  * Authoritative Firestore Order Read-Through & Hydration
  * Preserves historical charged `amount` on each order across Vercel serverless cold starts.
@@ -2136,18 +2178,52 @@ export async function consumeSetupTokenAtomically(
 async function hydrateLocalOrderFromAuthoritativeRecord(remoteOrder: any, db: any): Promise<any | null> {
   if (!remoteOrder || !remoteOrder.id) return null;
   const orderId = String(remoteOrder.id);
+  const machineId = normalizeOrderMachineId(remoteOrder.machine_id);
+  const productId = parseOrderProductId(remoteOrder.product_id ?? remoteOrder.productId);
+  const createdAt =
+    typeof remoteOrder.created_at === 'string' && remoteOrder.created_at.trim().length > 0
+      ? remoteOrder.created_at
+      : null;
+
+  if (!machineId || productId === null) {
+    logger.warn(
+      `Skipping local order hydration for malformed Firestore document ${orderId}: machine_id=${String(
+        remoteOrder.machine_id ?? 'missing'
+      )}, product_id=${String(remoteOrder.product_id ?? remoteOrder.productId ?? 'missing')}`
+    );
+    return null;
+  }
+
   const existing = await db.get('SELECT * FROM orders WHERE id = ?', [orderId]);
 
   if (!existing) {
+    if (!createdAt) {
+      logger.warn(
+        `Skipping local SQL hydration for order ${orderId}: missing authoritative created_at timestamp`
+      );
+      return null;
+    }
+
+    const localMachine = await db.get('SELECT id FROM machines WHERE id = ?', [machineId]).catch(() => null);
+    const localProduct = await db.get('SELECT id FROM products WHERE id = ?', [productId]).catch(() => null);
+    if (!localMachine || !localProduct) {
+      logger.warn(
+        `Skipping local SQL hydration for order ${orderId}: missing local reference (machine=${Boolean(
+          localMachine
+        )}, product=${Boolean(localProduct)})`
+      );
+      return null;
+    }
+
     await db.run(
       'INSERT OR IGNORE INTO orders (id, product_id, amount, status, machine_id, created_at, razorpay_order_id, extra_sugar, base) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
         orderId,
-        Number(remoteOrder.product_id || remoteOrder.productId || 1),
-        Number(remoteOrder.amount || 0),
+        productId,
+        Number(remoteOrder.amount ?? 0),
         String(remoteOrder.status || 'PENDING').toUpperCase(),
-        String(remoteOrder.machine_id),
-        remoteOrder.created_at || new Date().toISOString(),
+        machineId,
+        createdAt,
         remoteOrder.razorpay_order_id || null,
         remoteOrder.extra_sugar ?? 1,
         remoteOrder.base || 'water'
@@ -2245,7 +2321,7 @@ async function hydrateLocalOrderFromAuthoritativeRecord(remoteOrder: any, db: an
   return await db.get(
     `SELECT o.*, p.name as product_name, p.description as product_desc
      FROM orders o
-     JOIN products p ON o.product_id = p.id
+     LEFT JOIN products p ON o.product_id = p.id
      WHERE o.id = ?`,
     [orderId]
   );
@@ -2277,7 +2353,8 @@ export async function getAuthoritativeOrderById(orderId: string, db: any): Promi
 
     if (remoteOrder) {
       const hydrated = await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db);
-      const combined = { ...remoteOrder, ...hydrated };
+      const fallbackBase = buildNormalizedAuthoritativeFallbackOrder(remoteOrder);
+      const combined = hydrated ? { ...fallbackBase, ...hydrated } : fallbackBase;
       syncedOrdersStore.setIfUnchanged(normalizedId, epochBefore, combined);
       return enrichAuthoritativeOrderRecord(combined);
     }
@@ -2287,7 +2364,8 @@ export async function getAuthoritativeOrderById(orderId: string, db: any): Promi
   const remoteOrder: any = syncedOrdersStore.get(normalizedId) || null;
   if (remoteOrder) {
     const hydrated = await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db);
-    const combined = { ...remoteOrder, ...hydrated };
+    const fallbackBase = buildNormalizedAuthoritativeFallbackOrder(remoteOrder);
+    const combined = hydrated ? { ...fallbackBase, ...hydrated } : fallbackBase;
     syncedOrdersStore.set(normalizedId, combined);
     return enrichAuthoritativeOrderRecord(combined);
   }
@@ -2295,7 +2373,7 @@ export async function getAuthoritativeOrderById(orderId: string, db: any): Promi
   const row = await db.get(
     `SELECT o.*, p.name as product_name, p.description as product_desc
      FROM orders o
-     JOIN products p ON o.product_id = p.id
+     LEFT JOIN products p ON o.product_id = p.id
      WHERE o.id = ?`,
     [normalizedId]
   );
@@ -2334,7 +2412,11 @@ export async function getAuthoritativeOrderByRazorpayOrderId(
     }
 
     if (remoteOrder) {
-      return await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db);
+      const hydrated = await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db);
+      const fallbackBase = buildNormalizedAuthoritativeFallbackOrder(remoteOrder);
+      const combined = hydrated ? { ...fallbackBase, ...hydrated } : fallbackBase;
+      syncedOrdersStore.set(String(combined.id), combined);
+      return enrichAuthoritativeOrderRecord(combined);
     }
     return null;
   }
@@ -2348,17 +2430,38 @@ export async function getAuthoritativeOrderByRazorpayOrderId(
   }
 
   if (remoteOrder) {
-    return await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db);
+    const hydrated = await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db);
+    const fallbackBase = buildNormalizedAuthoritativeFallbackOrder(remoteOrder);
+    const combined = hydrated ? { ...fallbackBase, ...hydrated } : fallbackBase;
+    syncedOrdersStore.set(String(combined.id), combined);
+    return enrichAuthoritativeOrderRecord(combined);
   }
 
-  return await db.get('SELECT * FROM orders WHERE razorpay_order_id = ?', [normalizedRpId]);
+  const row = await db.get('SELECT * FROM orders WHERE razorpay_order_id = ?', [normalizedRpId]);
+  return row ? enrichAuthoritativeOrderRecord(row) : null;
 }
 
 export function enrichAuthoritativeOrderRecord(o: any): any {
   if (!o) return o;
   const synced = syncedOrdersStore.get(String(o.id));
+  const machineId = normalizeOrderMachineId(o.machine_id ?? synced?.machine_id);
+  const productId = parseOrderProductId(o.product_id ?? o.productId ?? synced?.product_id ?? synced?.productId);
+  const createdAt =
+    typeof (o.created_at ?? synced?.created_at) === 'string' && String(o.created_at ?? synced?.created_at).trim().length > 0
+      ? (o.created_at ?? synced?.created_at)
+      : null;
+  const isMalformed =
+    o.is_malformed === true ||
+    !machineId ||
+    productId === null;
+
   return {
     ...o,
+    machine_id: machineId,
+    product_id: productId,
+    product_name: o.product_name || synced?.product_name || o.coffee || synced?.coffee || '',
+    created_at: createdAt,
+    is_malformed: isMalformed,
     captured_amount_paise: o.captured_amount_paise !== undefined && o.captured_amount_paise !== null
       ? Number(o.captured_amount_paise)
       : (synced?.captured_amount_paise !== undefined && synced?.captured_amount_paise !== null
@@ -2370,7 +2473,7 @@ export function enrichAuthoritativeOrderRecord(o: any): any {
     razorpay_signature: o.razorpay_signature || synced?.razorpay_signature || null,
     customer_name: o.customer_name || synced?.customer_name || null,
     customer_email: o.customer_email || synced?.customer_email || null,
-    updated_at: o.updated_at || synced?.updated_at || o.created_at || null,
+    updated_at: o.updated_at || synced?.updated_at || createdAt || null,
     dispensed_at: o.dispensed_at || synced?.dispensed_at || null,
     dispense_started_at: o.dispense_started_at || synced?.dispense_started_at || null,
     refund_status: o.refund_status || synced?.refund_status || 'NONE',
@@ -2408,16 +2511,20 @@ export async function getAuthoritativeOrders(
   }
 
   let results: any[] = [];
+  const allowedSet =
+    filterMachineIds !== undefined
+      ? new Set(filterMachineIds.map((m) => String(m).trim()))
+      : null;
+
   if (filterMachineIds !== undefined) {
     if (filterMachineIds.length === 0) {
       return [];
     }
-    const allowedSet = new Set(filterMachineIds.map((m) => String(m).trim()));
     if (filterMachineIds.length === 1) {
       results = await db.all(
         `SELECT o.*, p.name as product_name
          FROM orders o
-         JOIN products p ON o.product_id = p.id
+         LEFT JOIN products p ON o.product_id = p.id
          WHERE o.machine_id = ?
          ORDER BY o.created_at DESC`,
         [filterMachineIds[0]]
@@ -2426,21 +2533,54 @@ export async function getAuthoritativeOrders(
       const allOrders = await db.all(
         `SELECT o.*, p.name as product_name
          FROM orders o
-         JOIN products p ON o.product_id = p.id
+         LEFT JOIN products p ON o.product_id = p.id
          ORDER BY o.created_at DESC`
       );
-      results = allOrders.filter((o: any) => allowedSet.has(String(o.machine_id).trim()));
+      results = allOrders.filter((o: any) => allowedSet!.has(String(o.machine_id || '').trim()));
     }
   } else {
     results = await db.all(
       `SELECT o.*, p.name as product_name
        FROM orders o
-       JOIN products p ON o.product_id = p.id
+       LEFT JOIN products p ON o.product_id = p.id
        ORDER BY o.created_at DESC`
     );
   }
 
-  return results.map(enrichAuthoritativeOrderRecord);
+  const mergedById = new Map<string, any>();
+  for (const localRow of results) {
+    const enriched = enrichAuthoritativeOrderRecord(localRow);
+    if (enriched && enriched.id) {
+      mergedById.set(String(enriched.id), enriched);
+    }
+  }
+
+  // Preserve authoritative Firestore / synced records even when local SQL hydration was skipped
+  for (const remoteOrder of syncedOrdersStore.values()) {
+    const fallback = buildNormalizedAuthoritativeFallbackOrder(remoteOrder);
+    if (allowedSet !== null) {
+      if (!fallback.machine_id || !allowedSet.has(fallback.machine_id)) {
+        continue;
+      }
+    }
+    const existingRow = mergedById.get(fallback.id);
+    if (!existingRow) {
+      mergedById.set(fallback.id, enrichAuthoritativeOrderRecord(fallback));
+    } else {
+      mergedById.set(
+        fallback.id,
+        enrichAuthoritativeOrderRecord({
+          ...fallback,
+          ...existingRow,
+          product_name: existingRow.product_name || fallback.product_name || ''
+        })
+      );
+    }
+  }
+
+  return Array.from(mergedById.values()).sort((a, b) =>
+    String(b.created_at || '').localeCompare(String(a.created_at || ''))
+  );
 }
 
 /**
@@ -2488,7 +2628,7 @@ export async function getPendingOrdersFromFirebase(db: any): Promise<any[]> {
   return await db.all(
     `SELECT o.*, p.name as product_name
      FROM orders o
-     JOIN products p ON o.product_id = p.id
+     LEFT JOIN products p ON o.product_id = p.id
      WHERE o.status = ?
      ORDER BY o.created_at ASC`,
     ['PENDING']

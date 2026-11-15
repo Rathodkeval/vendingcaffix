@@ -10,6 +10,7 @@ import {
 import Sidebar from './components/Sidebar';
 import AuthPage from './pages/AuthPage';
 import OverviewPage from './pages/OverviewPage';
+import { getKolkataDateString } from './utils/formatters';
 import MachinesPage from './pages/MachinesPage';
 import MachineDetailsPage from './pages/MachineDetailsPage';
 import ProductsPricingPage from './pages/ProductsPricingPage';
@@ -26,6 +27,7 @@ export default function App() {
   const [machines, setMachines] = useState([]);
   const [orders, setOrders] = useState([]);
   const [owners, setOwners] = useState([]);
+  const [analyticsOverview, setAnalyticsOverview] = useState({ today: null, all: null });
   const [selectedMachineId, setSelectedMachineId] = useState('');
   const [loadingData, setLoadingData] = useState(false);
   const [globalError, setGlobalError] = useState('');
@@ -43,17 +45,22 @@ export default function App() {
     setGlobalError('');
 
     try {
+      const todayStr = getKolkataDateString();
       const results = await Promise.allSettled([
         adminApi.getMe(token),
         adminApi.getMachines(token),
         adminApi.getOrders(undefined, token),
-        adminApi.getOwners(token)
+        adminApi.getOwners(token),
+        adminApi.getAnalyticsOverview({ start_date: todayStr, end_date: todayStr }, token),
+        adminApi.getAnalyticsOverview({}, token)
       ]);
 
       const meResult = results[0];
       const machinesResult = results[1];
       const ordersResult = results[2];
       const ownersResult = results[3];
+      const todayAnalyticsResult = results[4];
+      const allAnalyticsResult = results[5];
 
       if (meResult.status === 'rejected') {
         throw meResult.reason;
@@ -99,6 +106,11 @@ export default function App() {
       if (ownersResult.status === 'fulfilled') {
         setOwners(ownersResult.value?.data || []);
       }
+
+      setAnalyticsOverview({
+        today: todayAnalyticsResult.status === 'fulfilled' ? (todayAnalyticsResult.value?.data || null) : null,
+        all: allAnalyticsResult.status === 'fulfilled' ? (allAnalyticsResult.value?.data || null) : null
+      });
     } catch (err) {
       if (err.status === 403) {
         clearStoredToken();
@@ -165,6 +177,7 @@ export default function App() {
     setMachines([]);
     setOrders([]);
     setOwners([]);
+    setAnalyticsOverview({ today: null, all: null });
     setActiveTab('overview');
   };
 
@@ -324,6 +337,7 @@ export default function App() {
               machines={machines}
               orders={orders}
               owners={owners}
+              analyticsOverview={analyticsOverview}
               onSelectMachineForDetails={handleSelectMachineForDetails}
               onSelectMachineForPricing={handleSelectMachineForPricing}
               onNavigateTab={setActiveTab}

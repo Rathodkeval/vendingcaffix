@@ -130,7 +130,7 @@ export const verifyPaymentSignature = async (
       const existingOrder = await db.get(`
         SELECT o.*, p.name as product_name 
         FROM orders o
-        JOIN products p ON o.product_id = p.id
+        LEFT JOIN products p ON o.product_id = p.id
         WHERE o.id = ?
       `, [order_id]);
       res.status(200).json({

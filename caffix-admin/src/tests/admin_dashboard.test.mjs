@@ -690,6 +690,24 @@ async function runAdminDashboardTests() {
     }
     console.log('   PASS: Admin OrdersPage M-1 reconciliation filter (MATCH, DISCREPANCY, PENDING_ACTION) & reset verified.');
 
+    // 10.5 Verify P2/P3 Overview financial consistency (Gross, Refunds, Net, malformed/unverified exclusion)
+    console.log('10.5 Verifying P2/P3 Overview gross/refund/net revenue alignment and malformed exclusion...');
+    const nowIso = new Date().toISOString();
+    const overviewSamples = [
+      { id: 'ORD-VALID-1', machine_id: 'CFX-MC-01', product_id: 1, amount: 150, captured_amount_paise: 15000, status: 'PAID', razorpay_payment_id: 'pay_1', total_refunded_amount_paise: 0, created_at: nowIso },
+      { id: 'ORD-REFUND-1', machine_id: 'CFX-MC-01', product_id: 1, amount: 100, captured_amount_paise: 10000, status: 'PAID', razorpay_payment_id: 'pay_2', total_refunded_amount_paise: 4000, created_at: nowIso },
+      { id: 'ORD-PEND-REF', machine_id: 'CFX-MC-01', product_id: 1, amount: 80, captured_amount_paise: 8000, status: 'PAID', razorpay_payment_id: 'pay_3', total_refunded_amount_paise: 0, pending_refund_amount_paise: 8000, created_at: nowIso },
+      { id: 'ORD-UNVERIFIED', machine_id: 'CFX-MC-01', product_id: 1, amount: 500, status: 'PAID', created_at: nowIso },
+      { id: 'NpjipaUS7lHc4kObDOCR', machine_id: null, product_id: null, amount: 999, status: 'PAID', is_malformed: true, created_at: null }
+    ];
+    const overviewCalc = computeSalesAnalytics(overviewSamples, allMachines.data, 'all', 'ALL');
+    assert.strictEqual(overviewCalc.grossRevenue, 330, 'Gross must sum verified orders only (150 + 100 + 80)');
+    assert.strictEqual(overviewCalc.refunds, 40, 'Refunds must sum processed refunds only (40)');
+    assert.strictEqual(overviewCalc.netRevenue, 290, 'Net must deduct processed refunds (330 - 40)');
+    assert.strictEqual(overviewCalc.totalRevenue, 290);
+    assert.strictEqual(overviewCalc.totalOrders, 3, 'Unverified & malformed records must be excluded');
+    console.log('   PASS: Overview financial consistency & malformed record exclusion verified.');
+
     // Cleanup test state
     for (const machineId of ['CFX-MC-01', 'CFX-MC-02', 'CFX-MC-03', 'CFX-MC-04']) {
       await adminApi.assignMachineOwner(machineId, null, adminToken, TEST_BASE_URL);

@@ -10,6 +10,7 @@ import {
 import Sidebar from './components/Sidebar';
 import AuthPage from './pages/AuthPage';
 import OverviewPage from './pages/OverviewPage';
+import { getKolkataDateString } from './utils/formatters';
 import MachinesPage from './pages/MachinesPage';
 import MachineDetailsPage from './pages/MachineDetailsPage';
 import ProductsPricingPage from './pages/ProductsPricingPage';
@@ -24,6 +25,7 @@ export default function App() {
 
   const [machines, setMachines] = useState([]);
   const [orders, setOrders] = useState([]);
+  const [analyticsOverview, setAnalyticsOverview] = useState({ today: null, all: null });
   const [selectedMachineId, setSelectedMachineId] = useState('');
   const [loadingData, setLoadingData] = useState(false);
   const [globalError, setGlobalError] = useState('');
@@ -41,15 +43,20 @@ export default function App() {
     setGlobalError('');
 
     try {
+      const todayStr = getKolkataDateString();
       const results = await Promise.allSettled([
         ownerApi.getMe(token),
         ownerApi.getMachines(token),
-        ownerApi.getOrders(undefined, token)
+        ownerApi.getOrders(undefined, token),
+        ownerApi.getAnalyticsOverview({ start_date: todayStr, end_date: todayStr }, token),
+        ownerApi.getAnalyticsOverview({}, token)
       ]);
 
       const meResult = results[0];
       const machinesResult = results[1];
       const ordersResult = results[2];
+      const todayAnalyticsResult = results[3];
+      const allAnalyticsResult = results[4];
 
       if (meResult.status === 'rejected') {
         throw meResult.reason;
@@ -90,6 +97,11 @@ export default function App() {
           setGlobalError(ordersResult.reason?.message || 'Unable to synchronize order history.');
         }
       }
+
+      setAnalyticsOverview({
+        today: todayAnalyticsResult.status === 'fulfilled' ? (todayAnalyticsResult.value?.data || null) : null,
+        all: allAnalyticsResult.status === 'fulfilled' ? (allAnalyticsResult.value?.data || null) : null
+      });
     } catch (err) {
       if (err.status !== 401) {
         setGlobalError(err.message || 'Unable to synchronize dashboard data.');
@@ -139,6 +151,7 @@ export default function App() {
     setUser(null);
     setMachines([]);
     setOrders([]);
+    setAnalyticsOverview({ today: null, all: null });
     setActiveTab('overview');
   };
 
@@ -295,6 +308,7 @@ export default function App() {
             <OverviewPage
               machines={machines}
               orders={orders}
+              analyticsOverview={analyticsOverview}
               onSelectMachineForDetails={handleSelectMachineForDetails}
               onSelectMachineForPricing={handleSelectMachineForPricing}
               onNavigateTab={setActiveTab}

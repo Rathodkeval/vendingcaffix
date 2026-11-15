@@ -826,6 +826,22 @@ async function runStage5Tests() {
     }
     console.log('   PASS: Owner OrdersPage M-1 reconciliation filter (MATCH, DISCREPANCY, PENDING_ACTION) & reset verified.');
 
+    // 11.5 Verify P2/P3 Overview financial consistency (Gross, Refunds, Net, malformed/unverified exclusion)
+    console.log('11.5 Verifying P2/P3 Owner Overview gross/refund/net revenue alignment & malformed exclusion...');
+    const nowIso = new Date().toISOString();
+    const ownerOverviewSamples = [
+      { id: 'ORD-O-1', machine_id: 'CFX-MC-02', product_id: 1, amount: 200, captured_amount_paise: 20000, status: 'COMPLETED', razorpay_payment_id: 'pay_o1', total_refunded_amount_paise: 5000, created_at: nowIso },
+      { id: 'ORD-O-UNVER', machine_id: 'CFX-MC-02', product_id: 1, amount: 500, status: 'PAID', created_at: nowIso },
+      { id: 'NpjipaUS7lHc4kObDOCR', machine_id: null, is_malformed: true, amount: 100, status: 'PAID', created_at: null }
+    ];
+    const ownerOverviewCalc = computeSalesAnalytics(ownerOverviewSamples, machinesA.data, 'all', 'ALL');
+    assert.strictEqual(ownerOverviewCalc.grossRevenue, 200);
+    assert.strictEqual(ownerOverviewCalc.refunds, 50);
+    assert.strictEqual(ownerOverviewCalc.netRevenue, 150);
+    assert.strictEqual(ownerOverviewCalc.totalRevenue, 150);
+    assert.strictEqual(ownerOverviewCalc.totalOrders, 1);
+    console.log('   PASS: Owner Overview financial consistency & malformed record exclusion verified.');
+
     // Cleanup test state
     for (const machineId of ['CFX-MC-01', 'CFX-MC-02', 'CFX-MC-03', 'CFX-MC-04']) {
       await backendRequest(`/machines/${machineId}/owner`, {
