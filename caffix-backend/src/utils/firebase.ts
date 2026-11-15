@@ -16,9 +16,91 @@ let moduleInitError: Error | null = null;
 let firestoreSeededForInstance: any | null = null;
 let firestoreSeedPromise: Promise<void> | null = null;
 
+class VersionedMirrorStore {
+  private readonly store = new Map<string, any>();
+  private readonly epochs = new Map<string, number>();
+  private counter = 0;
+
+  has(id: string): boolean {
+    return this.store.has(id);
+  }
+
+  get(id: string): any | undefined {
+    return this.store.get(id);
+  }
+
+  set(id: string, value: any): void {
+    this.store.set(id, value);
+    this.epochs.set(id, ++this.counter);
+  }
+
+  delete(id: string): void {
+    this.store.delete(id);
+    this.epochs.set(id, ++this.counter);
+  }
+
+  clear(): void {
+    this.store.clear();
+    this.epochs.clear();
+    this.counter = 0;
+  }
+
+  keys(): IterableIterator<string> {
+    return this.store.keys();
+  }
+
+  values(): IterableIterator<any> {
+    return this.store.values();
+  }
+
+  entries(): IterableIterator<[string, any]> {
+    return this.store.entries();
+  }
+
+  getEpoch(id: string): number {
+    return this.epochs.get(id) ?? 0;
+  }
+
+  captureEpochs(): Map<string, number> {
+    const snapshot = new Map<string, number>();
+    for (const key of this.store.keys()) {
+      snapshot.set(key, this.getEpoch(key));
+    }
+    return snapshot;
+  }
+
+  setIfUnchanged(id: string, expectedEpoch: number, value: any): void {
+    if (this.getEpoch(id) === expectedEpoch) {
+      this.set(id, value);
+    }
+  }
+
+  deleteIfUnchanged(id: string, expectedEpoch: number): void {
+    if (this.getEpoch(id) === expectedEpoch) {
+      this.delete(id);
+    }
+  }
+
+  /**
+   * Reconciles an authoritative Firestore collection snapshot into the cache
+   * without discarding concurrent mutations made while the fetch was in flight.
+   */
+  reconcileSnapshot(preFetchEpochs: Map<string, number>, fetchedEntries: Map<string, any>): void {
+    for (const [id, record] of fetchedEntries.entries()) {
+      const epochBefore = preFetchEpochs.get(id) ?? 0;
+      this.setIfUnchanged(id, epochBefore, record);
+    }
+    for (const [id, epochBefore] of preFetchEpochs.entries()) {
+      if (!fetchedEntries.has(id)) {
+        this.deleteIfUnchanged(id, epochBefore);
+      }
+    }
+  }
+}
+
 // In-memory mirror of synced Firebase orders, machines, and users (for local verification and testing when Firebase Admin credentials are not configured)
-const syncedOrdersStore = new Map<string, any>();
-const syncedMachinesStore = new Map<string, any>();
+const syncedOrdersStore = new VersionedMirrorStore();
+const syncedMachinesStore = new VersionedMirrorStore();
 const syncedUsersStore = new Map<string, any>();
 
 export function isStrictFirebaseEnvironment(): boolean {
@@ -354,18 +436,20 @@ export function getSyncedFirebaseMachine(machineId: string): any | undefined {
 export async function checkOrderExistsInFirebase(orderId: string): Promise<boolean> {
   if (!orderId) return false;
   const normalizedId = String(orderId).trim();
-  if (syncedOrdersStore.has(normalizedId)) {
-    return true;
-  }
 
   ensureFirebaseReady();
   if (!firestore) {
-    return false;
+    return syncedOrdersStore.has(normalizedId);
   }
 
+  const epochBefore = syncedOrdersStore.getEpoch(normalizedId);
   try {
     const snap = await firestore.collection('orders').doc(normalizedId).get();
-    return snap.exists;
+    if (!snap.exists) {
+      syncedOrdersStore.deleteIfUnchanged(normalizedId, epochBefore);
+      return false;
+    }
+    return true;
   } catch (error) {
     handleFirestoreFailure(`Failed to check order uniqueness for ${normalizedId} in Firestore`, error);
     return false;
@@ -820,19 +904,19 @@ export async function syncOrderToFirebase(
     ...(nextDispenseStatus ? { dispense_status: nextDispenseStatus } : {}),
     updated_at: nowIso
   };
-  if (options.createOnly && syncedOrdersStore.has(order.id)) {
+  if (options.createOnly && !firestore && syncedOrdersStore.has(order.id)) {
     throw new Error(`ORDER_ID_COLLISION: Order ID ${order.id} already exists in Firestore mirror`);
   }
-  syncedOrdersStore.set(order.id, mergedPayload);
 
   if (!firestore) {
+    syncedOrdersStore.set(order.id, mergedPayload);
     logger.debug(`Firebase Firestore not initialized. Stored order in local mirror: ${order.id} (machine_id: ${sanitizedOrder.machine_id})`);
     return;
   }
 
   try {
     const docRef = firestore.collection('orders').doc(order.id);
-    await firestore.runTransaction(async (tx) => {
+    const committedPayload = await firestore.runTransaction(async (tx) => {
       const snap = await tx.get(docRef);
       if (options.createOnly && snap.exists) {
         throw new Error(`ORDER_ID_COLLISION: Order ID ${order.id} already exists in Firestore`);
@@ -873,14 +957,13 @@ export async function syncOrderToFirebase(
       }
 
       tx.set(docRef, payloadToWrite, { merge: true });
+      return { ...existingData, ...payloadToWrite };
     });
 
+    syncedOrdersStore.set(order.id, { ...mergedPayload, ...committedPayload });
     logger.info(`Successfully synced order ${order.id} (machine_id: ${sanitizedOrder.machine_id}) to Firestore`);
   } catch (error: any) {
     if (typeof error?.message === 'string' && error.message.startsWith('ORDER_ID_COLLISION:')) {
-      if (options.createOnly && !existingLocal?.id) {
-        syncedOrdersStore.delete(order.id);
-      }
       throw error;
     }
     handleFirestoreFailure(`Failed to sync order ${order.id} to Firestore`, error);
@@ -1305,7 +1388,7 @@ export async function syncMachineToFirebase(
   const legacyStatus = desiredModeToLegacyStatus(desiredMode);
   const nowIso = new Date().toISOString();
 
-  if (options.createOnly && syncedMachinesStore.has(machine.id)) {
+  if (options.createOnly && !firestore && syncedMachinesStore.has(machine.id)) {
     throw new Error(`MACHINE_ID_CONFLICT: Machine with ID ${machine.id} already exists`);
   }
 
@@ -1327,15 +1410,15 @@ export async function syncMachineToFirebase(
     ...(machine.products ? { products: machine.products } : {}),
     updated_at: existingMirror.updated_at || nowIso
   };
-  syncedMachinesStore.set(machine.id, nextMirrorRecord);
 
   if (!firestore) {
+    syncedMachinesStore.set(machine.id, nextMirrorRecord);
     return;
   }
 
   try {
     const docRef = firestore.collection('machines').doc(machine.id);
-    await firestore.runTransaction(async (tx) => {
+    const committedRecord = await firestore.runTransaction(async (tx) => {
       const snap = await tx.get(docRef);
       if (options.createOnly && snap.exists) {
         throw new Error(`MACHINE_ID_CONFLICT: Machine with ID ${machine.id} already exists in Firestore`);
@@ -1372,20 +1455,15 @@ export async function syncMachineToFirebase(
       } else {
         tx.set(docRef, payload, { merge: true });
       }
+      return { ...existing, ...payload };
     });
+    syncedMachinesStore.set(machine.id, committedRecord);
     logger.info(
       options.createOnly
         ? `Created exclusive machine document ${machine.id} in Firestore`
         : `Synced machine metadata ${machine.id} to Firestore without overwriting state`
     );
   } catch (error) {
-    if (options.createOnly) {
-      if (previousMirror) {
-        syncedMachinesStore.set(machine.id, previousMirror);
-      } else {
-        syncedMachinesStore.delete(machine.id);
-      }
-    }
     if (error instanceof Error && error.message.includes('MACHINE_ID_CONFLICT')) {
       throw error;
     }
@@ -1401,15 +1479,19 @@ export async function getMachineFromFirebase(machineId: string): Promise<any | n
   if (!firestore) {
     return syncedMachinesStore.get(machineId) || null;
   }
+  const epochBefore = syncedMachinesStore.getEpoch(machineId);
   try {
     const snap = await firestore.collection('machines').doc(machineId).get();
     if (snap.exists) {
       const data = snap.data() || null;
       if (data) {
-        syncedMachinesStore.set(machineId, data);
+        syncedMachinesStore.setIfUnchanged(machineId, epochBefore, data);
+      } else {
+        syncedMachinesStore.deleteIfUnchanged(machineId, epochBefore);
       }
       return data;
     }
+    syncedMachinesStore.deleteIfUnchanged(machineId, epochBefore);
     return null;
   } catch (error) {
     handleFirestoreFailure(`Failed to fetch machine ${machineId} from Firestore`, error);
@@ -1425,6 +1507,7 @@ export async function getAllMachinesFromFirebase(): Promise<Map<string, any>> {
     }
     return result;
   }
+  const preFetchEpochs = syncedMachinesStore.captureEpochs();
   try {
     const snapshot = await firestore.collection('machines').get();
     snapshot.forEach((doc) => {
@@ -1432,9 +1515,9 @@ export async function getAllMachinesFromFirebase(): Promise<Map<string, any>> {
       if (data) {
         const id = data.id || doc.id;
         result.set(id, { ...data, id });
-        syncedMachinesStore.set(id, { ...data, id });
       }
     });
+    syncedMachinesStore.reconcileSnapshot(preFetchEpochs, result);
   } catch (error) {
     handleFirestoreFailure('Failed to fetch all machines from Firestore', error);
   }
@@ -2175,14 +2258,18 @@ export async function getAuthoritativeOrderById(orderId: string, db: any): Promi
 
   if (firestore) {
     let remoteOrder: any = null;
+    const epochBefore = syncedOrdersStore.getEpoch(normalizedId);
     try {
       const snap = await firestore.collection('orders').doc(normalizedId).get();
       if (snap.exists) {
         const data = snap.data();
         if (data) {
           remoteOrder = { ...data, id: data.id || snap.id };
-          syncedOrdersStore.set(normalizedId, remoteOrder);
+        } else {
+          syncedOrdersStore.deleteIfUnchanged(normalizedId, epochBefore);
         }
+      } else {
+        syncedOrdersStore.deleteIfUnchanged(normalizedId, epochBefore);
       }
     } catch (error) {
       handleFirestoreFailure(`Failed to fetch order ${normalizedId} from Firestore`, error);
@@ -2191,7 +2278,7 @@ export async function getAuthoritativeOrderById(orderId: string, db: any): Promi
     if (remoteOrder) {
       const hydrated = await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db);
       const combined = { ...remoteOrder, ...hydrated };
-      syncedOrdersStore.set(normalizedId, combined);
+      syncedOrdersStore.setIfUnchanged(normalizedId, epochBefore, combined);
       return enrichAuthoritativeOrderRecord(combined);
     }
     return null;
@@ -2299,15 +2386,18 @@ export async function getAuthoritativeOrders(
 ): Promise<any[]> {
   ensureFirebaseReady();
   if (firestore) {
+    const preFetchEpochs = syncedOrdersStore.captureEpochs();
+    const fetchedOrders = new Map<string, any>();
     try {
       const snap = await firestore.collection('orders').get();
       snap.forEach((doc) => {
         const data = doc.data();
         if (data) {
           const id = String(data.id || doc.id);
-          syncedOrdersStore.set(id, { ...data, id });
+          fetchedOrders.set(id, { ...data, id });
         }
       });
+      syncedOrdersStore.reconcileSnapshot(preFetchEpochs, fetchedOrders);
     } catch (error) {
       handleFirestoreFailure('Failed to fetch orders from Firestore', error);
     }
