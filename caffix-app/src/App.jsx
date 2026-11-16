@@ -28,7 +28,8 @@ const API_BASE = import.meta.env.VITE_API_URL || (
     : '/api'
 );
 
-const KIOSK_POLL_INTERVAL_MS = 15000;
+const KIOSK_POLL_INTERVAL_MS = 60000;
+const MIN_KIOSK_RESYNC_COOLDOWN_MS = 15000;
 const SYNC_PAUSED_SCREENS = [
   'PAYMENT',
   'PAYMENT_UNCERTAIN',
@@ -52,20 +53,12 @@ export default function App() {
   const [prices, setPrices] = useState(DEFAULT_PRICES);
   const [availability, setAvailability] = useState(DEFAULT_AVAILABILITY);
   const [maintenanceMode, setMaintenanceMode] = useState(false);
-  const [inventory, setInventory] = useState({
-    water: 100,
-    coffee: 100,
-    milk: 100,
-    vanilla: 100,
-    hazelnut: 100,
-    irish: 100,
-    mocha: 100
-  });
 
   // Orders Log history
   const [orderHistory, setOrderHistory] = useState([]);
   const screenRef = useRef(screen);
   const refreshSeqRef = useRef(0);
+  const lastKioskSyncAtRef = useRef(0);
 
   useEffect(() => {
     screenRef.current = screen;
@@ -81,10 +74,12 @@ export default function App() {
         import.meta.env.VITE_MACHINE_ID
       );
 
+      lastKioskSyncAtRef.current = Date.now();
       const syncState = await fetchKioskSyncState({
         apiBase: API_BASE,
         token: activeToken,
-        machineId: activeMachineId
+        machineId: activeMachineId,
+        preferCombinedSync: true
       });
 
       // Ignore superseded in-flight responses
@@ -98,9 +93,6 @@ export default function App() {
       }
       if (syncState.maintenanceMode !== null) {
         setMaintenanceMode(syncState.maintenanceMode);
-      }
-      if (syncState.inventory) {
-        setInventory(syncState.inventory);
       }
     } catch (error) {
       console.error('Kiosk data refresh failed:', error);
@@ -185,30 +177,35 @@ export default function App() {
     verifyKioskDevice();
   }, []);
 
-  // Background polling, focus, visibility, and online resume sync
+  // Background polling, focus, visibility, and online resume sync (cooldown-throttled)
   useEffect(() => {
     if (kioskStatus !== 'AUTHORIZED' || !machineId) return undefined;
 
-    const triggerSyncIfIdle = () => {
+    const triggerSyncIfIdle = (force = false) => {
       if (SYNC_PAUSED_SCREENS.includes(screenRef.current)) return;
+      if (document.visibilityState === 'hidden') return;
+      if (!force && Date.now() - lastKioskSyncAtRef.current < MIN_KIOSK_RESYNC_COOLDOWN_MS) {
+        return;
+      }
       refreshKioskData(undefined, machineId);
     };
 
-    const intervalId = setInterval(triggerSyncIfIdle, KIOSK_POLL_INTERVAL_MS);
+    const intervalId = setInterval(() => triggerSyncIfIdle(true), KIOSK_POLL_INTERVAL_MS);
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        triggerSyncIfIdle();
+        triggerSyncIfIdle(false);
       }
     };
+    const handleEventSync = () => triggerSyncIfIdle(false);
 
-    window.addEventListener('focus', triggerSyncIfIdle);
-    window.addEventListener('online', triggerSyncIfIdle);
+    window.addEventListener('focus', handleEventSync);
+    window.addEventListener('online', handleEventSync);
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       clearInterval(intervalId);
-      window.removeEventListener('focus', triggerSyncIfIdle);
-      window.removeEventListener('online', triggerSyncIfIdle);
+      window.removeEventListener('focus', handleEventSync);
+      window.removeEventListener('online', handleEventSync);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [kioskStatus, machineId, refreshKioskData]);
@@ -428,26 +425,6 @@ export default function App() {
     setScreen('SUMMARY');
   };
 
-  // Refill ingredients helper
-  const handleRefillInventory = async (key) => {
-    const token = localStorage.getItem('adminToken') || '';
-    const activeMachineId = machineId || localStorage.getItem('machineId');
-    if (!activeMachineId) return;
-    try {
-      await fetch(`${API_BASE}/machines/${encodeURIComponent(activeMachineId)}/refill`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ ingredient: key })
-      });
-      await refreshAdminData(token, activeMachineId);
-    } catch (error) {
-      console.error('Inventory refill failed:', error);
-    }
-  };
-
   // Pricing Update helper
   const handleUpdatePrices = async (tempPrices) => {
     const token = localStorage.getItem('adminToken') || '';
@@ -634,7 +611,7 @@ export default function App() {
               Under Maintenance
             </h1>
             <p className="text-sm text-cream/70 font-semibold mt-3 max-w-sm leading-relaxed">
-              We are currently performing routine diagnostics and refilling ingredients. CAFFIX will be back online shortly!
+              We are currently performing routine diagnostics and maintenance. CAFFIX will be back online shortly!
             </p>
             <span className="text-[10px] text-cream/30 uppercase tracking-widest font-bold mt-12">
               CAFFIX Smart Coffee Systems
@@ -674,7 +651,6 @@ export default function App() {
                 initialStep={screen}
                 prices={prices}
                 availability={availability}
-                inventory={inventory}
                 selectedCoffee={selectedCoffee}
                 onSelectCoffee={(coffee) => setSelectedCoffee(coffee)}
                 onConfirmOrder={handleConfirmOrder}
@@ -755,8 +731,6 @@ export default function App() {
                   maintenanceMode={maintenanceMode}
                   onToggleMaintenance={handleToggleMaintenance}
                   orderHistory={orderHistory}
-                  inventory={inventory}
-                  onRefillInventory={handleRefillInventory}
                   onExit={handleFinishOrder}
                 />
               )}

@@ -22,21 +22,6 @@ export const DEFAULT_AVAILABILITY = {
   mocha: true
 };
 
-export const BASE_INGREDIENT_REQUIREMENTS = {
-  water: 5,
-  coffee: 6,
-  milk: 5
-};
-
-export const SYRUP_KEY_BY_DRINK = {
-  vanilla: 'vanilla',
-  hazelnut: 'hazelnut',
-  irish: 'irish',
-  mocha: 'mocha'
-};
-
-export const SYRUP_REQUIREMENT = 8;
-
 /**
  * Resolves the active machine ID from URL query parameter or build-time env fallback.
  */
@@ -85,56 +70,16 @@ export function isMachineInMaintenance(machineData) {
 }
 
 /**
- * Evaluates both owner product availability and ingredient stock thresholds for a drink.
+ * Evaluates owner product availability for a drink (orders depend only on product is_available).
  */
-export function getDrinkStockStatus(drinkId, availability = DEFAULT_AVAILABILITY, inventory = null) {
+export function getDrinkStockStatus(drinkId, availability = DEFAULT_AVAILABILITY) {
   const isAvailable = availability?.[drinkId] !== false;
-
-  if (!inventory || typeof inventory !== 'object') {
-    return {
-      isAvailable,
-      isInStock: true,
-      canOrder: isAvailable,
-      disabledReason: isAvailable ? null : 'unavailable',
-      statusLabel: isAvailable ? null : 'Currently Unavailable'
-    };
-  }
-
-  const hasBaseIngredients =
-    Number(inventory.water ?? 100) >= BASE_INGREDIENT_REQUIREMENTS.water &&
-    Number(inventory.coffee ?? 100) >= BASE_INGREDIENT_REQUIREMENTS.coffee &&
-    Number(inventory.milk ?? 100) >= BASE_INGREDIENT_REQUIREMENTS.milk;
-
-  const syrupKey = SYRUP_KEY_BY_DRINK[drinkId];
-  const hasSyrup = syrupKey ? Number(inventory[syrupKey] ?? 100) >= SYRUP_REQUIREMENT : true;
-  const isInStock = hasBaseIngredients && hasSyrup;
-
-  if (!isAvailable) {
-    return {
-      isAvailable: false,
-      isInStock,
-      canOrder: false,
-      disabledReason: 'unavailable',
-      statusLabel: 'Currently Unavailable'
-    };
-  }
-
-  if (!isInStock) {
-    return {
-      isAvailable: true,
-      isInStock: false,
-      canOrder: false,
-      disabledReason: 'out_of_stock',
-      statusLabel: 'Out of Stock'
-    };
-  }
-
   return {
-    isAvailable: true,
+    isAvailable,
     isInStock: true,
-    canOrder: true,
-    disabledReason: null,
-    statusLabel: null
+    canOrder: isAvailable,
+    disabledReason: isAvailable ? null : 'unavailable',
+    statusLabel: isAvailable ? null : 'Currently Unavailable'
   };
 }
 
@@ -149,17 +94,54 @@ export function buildKioskProductsUrl(apiBase, machineId) {
 }
 
 /**
- * Fetches fresh products, pricing, availability, inventory, and maintenance state
+ * Fetches fresh products, pricing, availability, and maintenance state
  * for the specified machine with strict no-store caching and machine_id scoping.
  */
-export async function fetchKioskSyncState({ fetchImpl = fetch, apiBase, token, machineId }) {
+export async function fetchKioskSyncState({
+  fetchImpl = fetch,
+  apiBase,
+  token,
+  machineId,
+  preferCombinedSync = false
+}) {
   const authHeaders = token ? { Authorization: `Bearer ${token}` } : {};
   const result = {
     prices: null,
     availability: null,
-    maintenanceMode: null,
-    inventory: null
+    maintenanceMode: null
   };
+
+  const applyMachineStatus = (m) => {
+    if (!m || typeof m !== 'object') return;
+    result.maintenanceMode = isMachineInMaintenance(m);
+  };
+
+  if (preferCombinedSync && machineId && token) {
+    try {
+      const syncRes = await fetchImpl(
+        `${apiBase}/kiosk/sync?machine_id=${encodeURIComponent(machineId)}`,
+        {
+          headers: authHeaders,
+          cache: 'no-store'
+        }
+      );
+      if (syncRes.ok) {
+        const syncData = await syncRes.json();
+        if (syncData?.status === 'success' && syncData?.data) {
+          const mapped = mapProductsPayload(syncData.data.products);
+          result.prices = mapped.prices;
+          result.availability = mapped.availability;
+          applyMachineStatus(syncData.data.machine_status);
+          return result;
+        }
+      }
+      if (syncRes.status !== 404) {
+        return result;
+      }
+    } catch {
+      // Fall back to separate endpoints if combined sync is unavailable
+    }
+  }
 
   const prodRes = await fetchImpl(buildKioskProductsUrl(apiBase, machineId), {
     headers: authHeaders,
@@ -182,19 +164,7 @@ export async function fetchKioskSyncState({ fetchImpl = fetch, apiBase, token, m
     );
     const machineData = await machineRes.json();
     if (machineRes.ok && machineData?.status === 'success' && machineData?.data) {
-      const m = machineData.data;
-      result.maintenanceMode = isMachineInMaintenance(m);
-      if (m.inventory) {
-        result.inventory = {
-          water: m.inventory.water,
-          coffee: m.inventory.coffee,
-          milk: m.inventory.milk,
-          vanilla: m.inventory.vanilla,
-          hazelnut: m.inventory.hazelnut,
-          irish: m.inventory.irish,
-          mocha: m.inventory.mocha
-        };
-      }
+      applyMachineStatus(machineData.data);
     }
   }
 

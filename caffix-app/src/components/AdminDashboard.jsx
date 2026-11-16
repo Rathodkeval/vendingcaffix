@@ -25,8 +25,6 @@ export default function AdminDashboard({
   maintenanceMode,
   onToggleMaintenance,
   orderHistory,
-  inventory,
-  onRefillInventory,
   onExit
 }) {
   const [activeTab, setActiveTab] = useState('OVERVIEW');
@@ -50,15 +48,6 @@ export default function AdminDashboard({
   }, [prices]);
 
   const [settingsSuccess, setSettingsSuccess] = useState(false);
-
-  // Inventories setup
-  const refillItem = (key) => {
-    onRefillInventory(key);
-  };
-
-  const refillAll = () => {
-    onRefillInventory('ALL');
-  };
 
   // Prices save handler
   const handleSavePrices = (e) => {
@@ -124,7 +113,6 @@ export default function AdminDashboard({
           <nav className="p-4 space-y-1">
             {[
               { id: 'OVERVIEW', label: 'Dashboard', icon: LayoutDashboard },
-              { id: 'INVENTORY', label: 'Inventory', icon: Layers },
               { id: 'MACHINE', label: 'Machine Status', icon: Cpu },
               { id: 'ORDERS', label: 'Order History', icon: Receipt },
               { id: 'ANALYTICS', label: 'Analytics', icon: BarChart3 },
@@ -214,134 +202,35 @@ export default function AdminDashboard({
                 ))}
               </div>
 
-              {/* Lower Section Grid */}
-              <div className="grid grid-cols-5 gap-6">
-                {/* Left panel: Quick Inventory status */}
-                <div className="col-span-3 bg-white border border-slate-200/60 rounded-2xl p-5 shadow-sm space-y-4">
-                  <div className="flex justify-between items-center">
-                    <h3 className="font-extrabold text-sm text-slate-800 uppercase tracking-tight">Kiosk Inventory</h3>
-                    <button onClick={refillAll} className="text-xs font-bold text-gold-dark hover:underline flex items-center gap-1">
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>Refill All</span>
-                    </button>
+              {/* Diagnostics Overview */}
+              <div className="bg-white border border-slate-200/60 rounded-2xl p-5 shadow-sm flex flex-col justify-between">
+                <h3 className="font-extrabold text-sm text-slate-800 uppercase tracking-tight mb-4">Diagnostics Overview</h3>
+                <div className="space-y-3 flex-grow">
+                  <div className="flex justify-between items-center text-xs font-semibold py-1.5 border-b border-slate-100">
+                    <span className="text-slate-500">Boiler Temp</span>
+                    <span className="text-slate-800 font-bold font-mono">92°C</span>
                   </div>
-                  <div className="space-y-3">
-                    {[
-                      { label: 'Water Level', value: inventory.water, color: 'bg-blue-500' },
-                      { label: 'Milk Level', value: inventory.coffee, color: 'bg-amber-800' },
-                      { label: 'Classic Crest', value: inventory.milk, color: 'bg-orange-400' },
-                      { label: 'Vanilla Velvet', value: inventory.vanilla, color: 'bg-yellow-400' },
-                      { label: 'Hazel Gold', value: inventory.hazelnut, color: 'bg-amber-600' },
-                      { label: 'Irish Emerald', value: inventory.irish, color: 'bg-emerald-600' },
-                      { label: 'Mocha Bliss', value: inventory.mocha, color: 'bg-amber-900' }
-                    ].map((item, idx) => (
-                      <div key={idx} className="space-y-1">
-                        <div className="flex justify-between text-xs font-semibold">
-                          <span className="text-slate-600">{item.label}</span>
-                          <span className={`${item.value < 20 ? 'text-red-600 font-bold' : 'text-slate-800'}`}>{item.value}%</span>
-                        </div>
-                        <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
-                          <div className={`h-full ${item.color} rounded-full`} style={{ width: `${item.value}%` }} />
-                        </div>
-                      </div>
-                    ))}
+                  <div className="flex justify-between items-center text-xs font-semibold py-1.5 border-b border-slate-100">
+                    <span className="text-slate-500">Dispenser Pressure</span>
+                    <span className="text-slate-800 font-bold font-mono">9.0 Bar</span>
+                  </div>
+                  <div className="flex justify-between items-center text-xs font-semibold py-1.5 border-b border-slate-100">
+                    <span className="text-slate-500">Telemetry Status</span>
+                    <span className="text-emerald-600 font-bold uppercase text-[10px]">Connected</span>
+                  </div>
+                  <div className="flex justify-between items-center text-xs font-semibold py-1.5">
+                    <span className="text-slate-500">Error Status</span>
+                    <span className="text-emerald-600 font-bold uppercase text-[10px]">0 Warnings</span>
                   </div>
                 </div>
-
-                {/* Right panel: Telemetry stats */}
-                <div className="col-span-2 bg-white border border-slate-200/60 rounded-2xl p-5 shadow-sm flex flex-col justify-between">
-                  <h3 className="font-extrabold text-sm text-slate-800 uppercase tracking-tight mb-4">Diagnostics Overview</h3>
-                  <div className="space-y-3 flex-grow">
-                    <div className="flex justify-between items-center text-xs font-semibold py-1.5 border-b border-slate-100">
-                      <span className="text-slate-500">Boiler Boiler Temp</span>
-                      <span className="text-slate-800 font-bold font-mono">92°C</span>
-                    </div>
-                    <div className="flex justify-between items-center text-xs font-semibold py-1.5 border-b border-slate-100">
-                      <span className="text-slate-500">Dispenser Pressure</span>
-                      <span className="text-slate-800 font-bold font-mono">9.0 Bar</span>
-                    </div>
-                    <div className="flex justify-between items-center text-xs font-semibold py-1.5 border-b border-slate-100">
-                      <span className="text-slate-500">Telemetry Status</span>
-                      <span className="text-emerald-600 font-bold uppercase text-[10px]">Connected</span>
-                    </div>
-                    <div className="flex justify-between items-center text-xs font-semibold py-1.5">
-                      <span className="text-slate-500">Error Status</span>
-                      <span className="text-emerald-600 font-bold uppercase text-[10px]">0 Warnings</span>
-                    </div>
-                  </div>
-                  <div className="bg-cream-light/60 p-2.5 rounded-xl border border-cream text-center text-xs text-coffee font-semibold">
-                    System health index: <span className="text-emerald-700 font-bold">100%</span>
-                  </div>
+                <div className="mt-4 bg-cream-light/60 p-2.5 rounded-xl border border-cream text-center text-xs text-coffee font-semibold">
+                  System health index: <span className="text-emerald-700 font-bold">100%</span>
                 </div>
               </div>
             </div>
           )}
 
-          {/* TAB 2: INVENTORY */}
-          {activeTab === 'INVENTORY' && (
-            <div className="bg-white border border-slate-200/60 rounded-2xl p-6 shadow-sm">
-              <div className="flex justify-between items-center mb-6">
-                <div>
-                  <h3 className="font-extrabold text-lg text-slate-800">Ingredients Inventory</h3>
-                  <p className="text-xs text-slate-400 mt-1">Live status monitor for fluids and beans inside the vending chambers</p>
-                </div>
-                <button
-                  onClick={refillAll}
-                  className="py-2 px-4 bg-coffee text-cream-light text-xs font-bold rounded-xl shadow-md hover:bg-coffee-dark active:scale-95 transition-all"
-                >
-                  Refill All Ingredients
-                </button>
-              </div>
-
-              <div className="space-y-6">
-                {[
-                  { key: 'water', label: 'Water Level', icon: Droplet, value: inventory.water, color: 'bg-blue-500' },
-                  { key: 'coffee', label: 'Milk Level', icon: Coffee, value: inventory.coffee, color: 'bg-amber-800' },
-                  { key: 'milk', label: 'Classic Crest', icon: Activity, value: inventory.milk, color: 'bg-orange-400' },
-                  { key: 'vanilla', label: 'Vanilla Velvet', icon: Layers, value: inventory.vanilla, color: 'bg-yellow-400' },
-                  { key: 'hazelnut', label: 'Hazel Gold', icon: Layers, value: inventory.hazelnut, color: 'bg-amber-600' },
-                  { key: 'irish', label: 'Irish Emerald', icon: Layers, value: inventory.irish, color: 'bg-emerald-600' },
-                  { key: 'mocha', label: 'Mocha Bliss', icon: Layers, value: inventory.mocha, color: 'bg-amber-900' }
-                ].map((item) => {
-                  const Icon = item.icon;
-                  return (
-                    <div key={item.key} className="flex items-center gap-6 p-4 rounded-2xl border border-slate-100 bg-slate-50/50">
-                      <div className="p-3 bg-white border border-slate-200/80 rounded-xl shadow-sm">
-                        <Icon className="w-6 h-6 text-coffee" />
-                      </div>
-                      <div className="flex-grow space-y-1.5">
-                        <div className="flex justify-between items-center text-sm font-bold">
-                          <span className="text-slate-700">{item.label}</span>
-                          <span className={`${item.value < 20 ? 'text-red-600 animate-pulse' : 'text-slate-800'}`}>{item.value}%</span>
-                        </div>
-                        <div className="w-full h-3 bg-slate-200/60 rounded-full overflow-hidden border border-slate-200">
-                          <div className={`h-full ${item.color} rounded-full`} style={{ width: `${item.value}%` }} />
-                        </div>
-                        {item.value < 20 && (
-                          <div className="text-[10px] text-red-600 font-bold flex items-center gap-1">
-                            <AlertTriangle className="w-3.5 h-3.5" />
-                            <span>Warning: Fluid level critically low! Refill recommended.</span>
-                          </div>
-                        )}
-                      </div>
-                      <button
-                        onClick={() => refillItem(item.key)}
-                        disabled={item.value >= 100}
-                        className={`py-2 px-3 rounded-lg text-xs font-bold transition-all ${item.value >= 100
-                          ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                          : 'bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100'
-                          }`}
-                      >
-                        Refill
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* TAB 3: MACHINE */}
+          {/* TAB 2: MACHINE */}
           {activeTab === 'MACHINE' && (
             <div className="space-y-6">
               {/* Telemetry metrics */}

@@ -18,10 +18,9 @@ assert.equal(isMachineInMaintenance({ status: 'maintenance', desired_mode: 'RUNN
 assert.equal(isMachineInMaintenance({ status: 'online', desired_mode: 'MAINTENANCE', maintenance: false }), true);
 assert.equal(isMachineInMaintenance({ status: 'online', desired_mode: 'RUNNING', maintenance: true }), true);
 
-// 3. Availability & exact inventory threshold checks
-const fullInv = { water: 100, coffee: 100, milk: 100, vanilla: 100, hazelnut: 100, irish: 100, mocha: 100 };
+// 3. Availability checks (inventory does not block kiosk orders)
 assert.deepEqual(
-  getDrinkStockStatus('vanilla', { classic: true, vanilla: false }, fullInv),
+  getDrinkStockStatus('vanilla', { classic: true, vanilla: false }),
   {
     isAvailable: false,
     isInStock: true,
@@ -31,14 +30,17 @@ assert.deepEqual(
   }
 );
 
-const lowVanillaInv = { ...fullInv, vanilla: 7 };
-assert.equal(getDrinkStockStatus('vanilla', { vanilla: true }, lowVanillaInv).canOrder, false);
-assert.equal(getDrinkStockStatus('vanilla', { vanilla: true }, lowVanillaInv).statusLabel, 'Out of Stock');
-assert.equal(getDrinkStockStatus('classic', { classic: true }, lowVanillaInv).canOrder, true);
-
-const lowBaseInv = { ...fullInv, coffee: 5 };
-assert.equal(getDrinkStockStatus('classic', { classic: true }, lowBaseInv).canOrder, false);
-assert.equal(getDrinkStockStatus('classic', { classic: true }, lowBaseInv).statusLabel, 'Out of Stock');
+assert.deepEqual(
+  getDrinkStockStatus('vanilla', { classic: true, vanilla: true }),
+  {
+    isAvailable: true,
+    isInStock: true,
+    canOrder: true,
+    disabledReason: null,
+    statusLabel: null
+  }
+);
+assert.equal(getDrinkStockStatus('classic', { classic: true }, { water: 0, coffee: 0, milk: 0 }).canOrder, true);
 
 // 4. fetchKioskSyncState passes machine_id, Authorization, cache: 'no-store' and keeps machines isolated
 const recordedCalls = [];
@@ -56,8 +58,7 @@ const mockResponses = {
       machine_id: 'CFX-MC-02',
       desired_mode: 'MAINTENANCE',
       status: 'maintenance',
-      maintenance: true,
-      inventory: { ...fullInv, vanilla: 6 }
+      maintenance: true
     }
   }
 };
@@ -88,11 +89,37 @@ assert.equal(synced.prices.vanilla, 155);
 assert.equal(synced.availability.classic, false);
 assert.equal(synced.availability.vanilla, true);
 assert.equal(synced.maintenanceMode, true);
-assert.equal(synced.inventory.vanilla, 6);
 
 // 5. mapProductsPayload fallback safety
 const defaultMapped = mapProductsPayload([]);
 assert.equal(defaultMapped.prices.mocha, 100);
 assert.equal(defaultMapped.availability.mocha, true);
+
+// 6. preferCombinedSync uses single /kiosk/sync endpoint when available
+const combinedCalls = [];
+const combinedSynced = await fetchKioskSyncState({
+  fetchImpl: async (url, init) => {
+    combinedCalls.push({ url, init });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        status: 'success',
+        data: {
+          products: mockResponses['https://api.example/api/products?machine_id=CFX-MC-02'].data,
+          machine_status: mockResponses['https://api.example/api/machine-status?machine_id=CFX-MC-02'].data
+        }
+      })
+    };
+  },
+  apiBase: 'https://api.example/api',
+  token: 'kiosk-jwt-mc02',
+  machineId: 'CFX-MC-02',
+  preferCombinedSync: true
+});
+assert.equal(combinedCalls.length, 1);
+assert.equal(combinedCalls[0].url, 'https://api.example/api/kiosk/sync?machine_id=CFX-MC-02');
+assert.equal(combinedSynced.prices.classic, 140);
+assert.equal(combinedSynced.maintenanceMode, true);
 
 console.log('ALL KIOSK SYNC UNIT TESTS PASSED!');

@@ -49,7 +49,6 @@ export default function FlavorAndCustomizationView({
   initialStep = 'SELECTION',
   prices = DEFAULT_PRICES,
   availability = DEFAULT_AVAILABILITY,
-  inventory = null,
   selectedCoffee: propSelectedCoffee,
   onSelectCoffee,
   onConfirmOrder,
@@ -76,14 +75,14 @@ export default function FlavorAndCustomizationView({
   const coffeesWithPrices = useMemo(
     () =>
       COFFEES.map((c) => {
-        const stockStatus = getDrinkStockStatus(c.id, availability, inventory);
+        const stockStatus = getDrinkStockStatus(c.id, availability);
         return {
           ...c,
           price: prices?.[c.id] ?? c.price,
           ...stockStatus
         };
       }),
-    [prices, availability, inventory]
+    [prices, availability]
   );
 
   const activeCoffee = coffeesWithPrices[activeIndex];
