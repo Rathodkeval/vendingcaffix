@@ -106,11 +106,9 @@ async function runTests() {
     assert.strictEqual(adminLogin.status, 200, 'Admin login must succeed');
     const adminToken = adminLogin.data.token;
 
-    // Ensure both machines are in RUNNING mode and have full inventory
+    // Ensure both machines are in RUNNING mode
     await apiRequest('PATCH', '/machines/CFX-MC-01/status', { desired_mode: 'RUNNING' }, adminToken);
     await apiRequest('PATCH', '/machines/CFX-MC-02/status', { desired_mode: 'RUNNING' }, adminToken);
-    await apiRequest('POST', '/machines/CFX-MC-01/refill', { ingredient: 'ALL' }, adminToken);
-    await apiRequest('POST', '/machines/CFX-MC-02/refill', { ingredient: 'ALL' }, adminToken);
 
     // Record heartbeat on CFX-MC-01 to verify product updates do not overwrite last_seen
     const hbRes = await apiRequest('POST', '/machines/CFX-MC-01/heartbeat', {}, adminToken);
@@ -580,7 +578,7 @@ async function runTests() {
     assert.strictEqual(syncedInFlight?.amount, 115);
     console.log('  PASS: New orders rejected during MAINTENANCE while already-initiated/paid orders complete safely.');
 
-    // Restore CFX-MC-01 to RUNNING mode before running live kiosk synchronization & inventory validation checks
+    // Restore CFX-MC-01 to RUNNING mode before running live kiosk synchronization checks
     await apiRequest('PATCH', '/machines/CFX-MC-01/status', { desired_mode: 'RUNNING' }, ownerAToken);
 
     // -------------------------------------------------------------------------
@@ -590,8 +588,8 @@ async function runTests() {
     const headerEndpoints = [
       { path: '/products?machine_id=CFX-MC-01', token: kiosk1Token },
       { path: '/machine-status?machine_id=CFX-MC-01', token: kiosk1Token },
-      { path: '/machines/CFX-MC-01/products', token: ownerAToken },
-      { path: '/machines/CFX-MC-01/inventory', token: ownerAToken }
+      { path: '/kiosk/sync?machine_id=CFX-MC-01', token: kiosk1Token },
+      { path: '/machines/CFX-MC-01/products', token: ownerAToken }
     ];
     for (const endpoint of headerEndpoints) {
       const rawRes = await fetch(`${BASE_URL}${endpoint.path}`, {
@@ -619,67 +617,33 @@ async function runTests() {
     console.log('  PASS: no-store cache headers present on all dynamic endpoints and cross-machine kiosk /products blocked.');
 
     // -------------------------------------------------------------------------
-    // Test 14: Pre-payment inventory validation in POST /api/orders/create
+    // Test 14: Removed inventory endpoints return 404 and per-machine product availability controls checkout
     // -------------------------------------------------------------------------
-    console.log('Test 14: POST /api/orders/create rejects depleted ingredients BEFORE Razorpay order creation...');
+    console.log('Test 14: Inventory endpoints removed & only product is_available gates checkout...');
+    const invEndpointRes = await apiRequest('GET', '/machines/CFX-MC-01/inventory', undefined, ownerAToken);
+    assert.strictEqual(invEndpointRes.status, 404);
+    const refillEndpointRes = await apiRequest(
+      'POST',
+      '/machines/CFX-MC-01/refill',
+      { ingredient: 'ALL' },
+      ownerAToken
+    );
+    assert.strictEqual(refillEndpointRes.status, 404);
+
     await apiRequest(
       'PUT',
       '/machines/CFX-MC-01/products/2',
       { price: 115, is_available: true },
       ownerAToken
     );
-    await getDB().run(
-      'UPDATE inventory SET milk_level = ?, coffee_level = ?, vanilla_level = ?, hazelnut_level = ?, irish_level = ?, mocha_level = ?, water_level = ?, updated_at = ? WHERE machine_id = ?',
-      [2, 100, 100, 100, 100, 100, 100, new Date().toISOString(), 'CFX-MC-01']
-    );
-    const lowMilkOrder = await apiRequest(
-      'POST',
-      '/orders/create',
-      { product_id: 2, amount: 115, machine_id: 'CFX-MC-01', extra_sugar: true, base: 'milk' },
-      kiosk1Token
-    );
-    assert.strictEqual(lowMilkOrder.status, 400);
-    assert.strictEqual(lowMilkOrder.data.message, 'Ingredients depleted: Milk refill required');
-
-    // Verify Vanilla syrup threshold (< 8) blocks Vanilla Velvet even when base ingredients are full
-    await getDB().run(
-      'UPDATE inventory SET milk_level = ?, coffee_level = ?, vanilla_level = ?, hazelnut_level = ?, irish_level = ?, mocha_level = ?, water_level = ?, updated_at = ? WHERE machine_id = ?',
-      [100, 100, 7, 100, 100, 100, 100, new Date().toISOString(), 'CFX-MC-01']
-    );
-    const lowVanillaOrder = await apiRequest(
+    const vanillaOrderRes = await apiRequest(
       'POST',
       '/orders/create',
       { product_id: 2, amount: 115, machine_id: 'CFX-MC-01', extra_sugar: true, base: 'water' },
       kiosk1Token
     );
-    assert.strictEqual(lowVanillaOrder.status, 400);
-    assert.strictEqual(lowVanillaOrder.data.message, 'Ingredients depleted: Vanilla syrup refill required');
-
-    // Classic Crest (product_id 1) does not use vanilla syrup and must still be allowed when only vanilla is low
-    const classicWhileVanillaLow = await apiRequest(
-      'POST',
-      '/orders/create',
-      { product_id: 1, amount: 100, machine_id: 'CFX-MC-01', extra_sugar: true, base: 'water' },
-      kiosk1Token
-    );
-    assert.strictEqual(classicWhileVanillaLow.status, 201);
-
-    // Refill Vanilla via owner endpoint and verify Vanilla Velvet order creation succeeds again
-    const refillVanilla = await apiRequest(
-      'POST',
-      '/machines/CFX-MC-01/refill',
-      { ingredient: 'vanilla' },
-      ownerAToken
-    );
-    assert.strictEqual(refillVanilla.status, 200);
-    const vanillaAfterRefill = await apiRequest(
-      'POST',
-      '/orders/create',
-      { product_id: 2, amount: 115, machine_id: 'CFX-MC-01', extra_sugar: true, base: 'water' },
-      kiosk1Token
-    );
-    assert.strictEqual(vanillaAfterRefill.status, 201);
-    console.log('  PASS: Depleted ingredients block checkout pre-payment and recover immediately on refill.');
+    assert.strictEqual(vanillaOrderRes.status, 201);
+    console.log('  PASS: Removed inventory endpoints return 404 and product availability drives checkout.');
 
     // Clean up test overrides/assignments after test completion
     await apiRequest('PATCH', '/machines/CFX-MC-01/owner', { owner_id: null }, adminToken);

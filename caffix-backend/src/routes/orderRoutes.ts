@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getOrders, getOrderById, createOrder, updateOrderStatus, cancelOrder, refundOrder } from '../controllers/orderController';
+import { getOrders, getOrderById, createOrder, updateOrderStatus, cancelOrder, refundOrder, reportOrderDispenseOutcome } from '../controllers/orderController';
 import { authenticateJWT, requireRole } from '../middleware/auth';
 import { validateRequest } from '../middleware/validate';
 import { z } from 'zod';
@@ -55,11 +55,24 @@ const refundOrderSchema = z.object({
     .default({})
 });
 
+const dispenseResultSchema = z.object({
+  params: z.object({
+    id: z.string().min(1, 'Order ID is required')
+  }),
+  body: z.object({
+    dispense_status: z.enum(['DISPENSING', 'DISPENSED', 'FAILED', 'EXPIRED']),
+    failure_stage: z.enum(['PRE_DISPENSE', 'DURING_DISPENSE']).optional(),
+    failure_reason: z.string().trim().max(500).optional().nullable(),
+    machine_id: z.string().optional()
+  })
+});
+
 router.post('/create', authenticateJWT, validateRequest(createOrderSchema), createOrder);
 router.get('/', authenticateJWT, requireRole(['admin', 'owner', 'kiosk']), getOrders);
 router.get('/:id', authenticateJWT, getOrderById);
 router.post('/:id/cancel', authenticateJWT, validateRequest(cancelOrderSchema), cancelOrder);
 router.post('/:id/refund', authenticateJWT, requireRole(['admin']), validateRequest(refundOrderSchema), refundOrder);
+router.post('/:id/dispense-result', authenticateJWT, requireRole(['admin', 'kiosk']), validateRequest(dispenseResultSchema), reportOrderDispenseOutcome);
 router.put('/:id/status', authenticateJWT, validateRequest(updateStatusSchema), updateOrderStatus);
 
 export default router;

@@ -1,6 +1,5 @@
 import path from 'path';
 import bcrypt from 'bcryptjs';
-import { initializeInventoryLedgerSchema } from '../utils/inventoryLedger';
 
 // Dynamically load native sqlite3 package only when NOT running on Vercel
 let sqlite3: any = null;
@@ -137,18 +136,6 @@ function createInitialMockStore() {
       is_available: number;
       updated_at: string;
     }>,
-    inventory: initialMachineSeeds.map((m, idx) => ({
-      id: idx + 1,
-      machine_id: m.id,
-      milk_level: idx === 0 ? 92 : 100,
-      coffee_level: idx === 0 ? 78 : 100,
-      vanilla_level: idx === 0 ? 65 : 100,
-      hazelnut_level: idx === 0 ? 55 : 100,
-      irish_level: idx === 0 ? 60 : 100,
-      mocha_level: idx === 0 ? 50 : 100,
-      water_level: idx === 0 ? 85 : 100,
-      updated_at: '2026-01-01T00:00:00.000Z'
-    })),
     orders: [
       { id: 'CFX-4912', product_id: 1, amount: 100, status: 'COMPLETED', machine_id: 'CFX-MC-01', created_at: new Date().toISOString(), razorpay_order_id: null, razorpay_payment_id: null, razorpay_signature: null, refund_status: 'NONE', total_refunded_amount_paise: 0, pending_refund_amount_paise: 0, last_refunded_at: null, captured_amount_paise: null },
       { id: 'CFX-7104', product_id: 3, amount: 100, status: 'COMPLETED', machine_id: 'CFX-MC-01', created_at: new Date().toISOString(), razorpay_order_id: null, razorpay_payment_id: null, razorpay_signature: null, refund_status: 'NONE', total_refunded_amount_paise: 0, pending_refund_amount_paise: 0, last_refunded_at: null, captured_amount_paise: null },
@@ -186,7 +173,6 @@ class MockDatabase {
       if (query.includes('from products')) return { count: mockStore.products.length };
       if (query.includes('from machines')) return { count: mockStore.machines.length };
       if (query.includes('from machine_products')) return { count: mockStore.machine_products.length };
-      if (query.includes('from inventory')) return { count: mockStore.inventory.length };
       if (query.includes('from orders')) return { count: mockStore.orders.length };
       if (query.includes('from refunds')) return { count: mockStore.refunds.length };
     }
@@ -220,11 +206,6 @@ class MockDatabase {
         return mockStore.machines.find(m => m.kiosk_token && m.kiosk_token === param);
       }
       return mockStore.machines.find(m => m.id === param);
-    }
-    
-    if (query.includes('from inventory')) {
-      const machineId = params[0];
-      return mockStore.inventory.find(i => i.machine_id === machineId);
     }
     
     if (query.includes('from orders')) {
@@ -908,64 +889,6 @@ class MockDatabase {
       return { changes: 0 };
     }
     
-    if (query.includes('update inventory set')) {
-      if (query.includes('milk_level = ?') && query.includes('coffee_level = ?') && query.includes('vanilla_level = ?')) {
-        const [milk, coffee, vanilla, hazelnut, irish, mocha, water, updatedAt, machineId] = params;
-        const inv = mockStore.inventory.find(i => i.machine_id === machineId);
-        if (inv) {
-          inv.milk_level = Number(milk);
-          inv.coffee_level = Number(coffee);
-          inv.vanilla_level = Number(vanilla);
-          inv.hazelnut_level = Number(hazelnut);
-          inv.irish_level = Number(irish);
-          inv.mocha_level = Number(mocha);
-          inv.water_level = Number(water);
-          inv.updated_at = updatedAt || new Date().toISOString();
-        }
-      } else if (query.includes('milk_level = 100') && query.includes('coffee_level = 100')) {
-        const machineId = params[params.length - 1];
-        const inv = mockStore.inventory.find(i => i.machine_id === machineId);
-        if (inv) {
-          inv.milk_level = 100;
-          inv.coffee_level = 100;
-          inv.vanilla_level = 100;
-          inv.hazelnut_level = 100;
-          inv.irish_level = 100;
-          inv.mocha_level = 100;
-          inv.water_level = 100;
-          inv.updated_at = new Date().toISOString();
-        }
-      } else if (query.includes('water_level = water_level - ?')) {
-        const [water, coffee, milk, vanilla, hazelnut, irish, mocha] = params;
-        const machineId = params[params.length - 1];
-        const passedUpdatedAt = params.length >= 9 ? params[7] : null;
-        const inv = mockStore.inventory.find(i => i.machine_id === machineId);
-        if (inv) {
-          inv.water_level -= water;
-          inv.coffee_level -= coffee;
-          inv.milk_level -= milk;
-          inv.vanilla_level -= vanilla;
-          inv.hazelnut_level -= hazelnut;
-          inv.irish_level -= irish;
-          inv.mocha_level -= mocha;
-          inv.updated_at = passedUpdatedAt || new Date().toISOString();
-        }
-      } else {
-        const machineId = params[params.length - 1];
-        const passedUpdatedAt = params.length >= 2 ? params[0] : null;
-        const inv = mockStore.inventory.find(i => i.machine_id === machineId);
-        if (inv) {
-          const match = query.match(/update inventory set (\w+_level) = 100/);
-          if (match) {
-            const field = match[1];
-            (inv as any)[field] = 100;
-            inv.updated_at = passedUpdatedAt || new Date().toISOString();
-          }
-        }
-      }
-      return { changes: 1 };
-    }
-
     if (query.includes('delete from machine_products')) {
       if (query.includes('where machine_id = ? and product_id = ?')) {
         const [machineId, productId] = params;
@@ -1068,17 +991,6 @@ class MockDatabase {
       return { changes: deleted };
     }
 
-    if (query.includes('delete from inventory')) {
-      if (query.includes('where machine_id = ?')) {
-        const before = mockStore.inventory.length;
-        mockStore.inventory = mockStore.inventory.filter(i => i.machine_id !== params[0]);
-        return { changes: before - mockStore.inventory.length };
-      }
-      const deleted = mockStore.inventory.length;
-      mockStore.inventory = [];
-      return { changes: deleted };
-    }
-
     if (query.includes('insert into machines') || query.includes('insert or ignore into machines')) {
       const [id, machine_name, location, status, last_seen, kiosk_token, desired_mode, owner_id, updated_at] = params;
       if (mockStore.machines.some(m => m.id === id)) {
@@ -1101,25 +1013,6 @@ class MockDatabase {
         updated_at: updated_at || new Date().toISOString()
       });
       return { lastID: id };
-    }
-
-    if (query.includes('insert into inventory') || query.includes('insert or ignore into inventory')) {
-      const [machine_id, updated_at] = params;
-      if (!mockStore.inventory.some(i => i.machine_id === machine_id)) {
-        mockStore.inventory.push({
-          id: mockStore.inventory.length + 1,
-          machine_id,
-          milk_level: 100,
-          coffee_level: 100,
-          vanilla_level: 100,
-          hazelnut_level: 100,
-          irish_level: 100,
-          mocha_level: 100,
-          water_level: 100,
-          updated_at: updated_at || '2026-01-01T00:00:00.000Z'
-        });
-      }
-      return { lastID: mockStore.inventory.length };
     }
     
     return { lastID: null, changes: 0 };
@@ -1283,23 +1176,6 @@ export async function initDB(): Promise<any> {
       PRIMARY KEY (machine_id, product_id),
       FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE,
       FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
-    )
-  `);
-
-  // Create Inventory table
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS inventory (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      machine_id TEXT UNIQUE NOT NULL,
-      milk_level INTEGER NOT NULL DEFAULT 100,
-      coffee_level INTEGER NOT NULL DEFAULT 100,
-      vanilla_level INTEGER NOT NULL DEFAULT 100,
-      hazelnut_level INTEGER NOT NULL DEFAULT 100,
-      irish_level INTEGER NOT NULL DEFAULT 100,
-      mocha_level INTEGER NOT NULL DEFAULT 100,
-      water_level INTEGER NOT NULL DEFAULT 100,
-      updated_at TEXT,
-      FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE
     )
   `);
 
@@ -1494,30 +1370,7 @@ export async function initDB(): Promise<any> {
     console.error('Database migration check for webhook_events failed:', err);
   }
 
-  // Run dynamic schema migration check for inventory table
-  try {
-    const invTableInfo = await db.all("PRAGMA table_info(inventory)");
-    if (!invTableInfo.some((col: any) => col.name === 'irish_level')) {
-      await db.exec('ALTER TABLE inventory ADD COLUMN irish_level INTEGER NOT NULL DEFAULT 100;');
-    }
-    if (!invTableInfo.some((col: any) => col.name === 'mocha_level')) {
-      await db.exec('ALTER TABLE inventory ADD COLUMN mocha_level INTEGER NOT NULL DEFAULT 100;');
-    }
-    if (!invTableInfo.some((col: any) => col.name === 'updated_at')) {
-      await db.exec('ALTER TABLE inventory ADD COLUMN updated_at TEXT;');
-    }
-  } catch (err) {
-    console.error('Database migration check for inventory failed:', err);
-  }
-
-  // Auditable Inventory Ledger Schema (Phase 2.8)
-  try {
-    await initializeInventoryLedgerSchema(db);
-  } catch (err) {
-    console.error('Database migration check for inventory_ledger failed:', err);
-  }
-
-    // Seed default data if empty
+  // Seed default data if empty
     await seedData();
 
     // Ensure default products are set to 100
@@ -1605,7 +1458,7 @@ async function seedData() {
     );
   }
 
-  // 3. Seed Machines & 4. Seed Inventory (for all default and env-configured machines)
+  // 3. Seed Machines (for all default and env-configured machines)
   // Note: last_seen is initialized as empty string '' (null in API responses) so machines do not falsely appear ONLINE before a real RPi heartbeat
   const seeds = getConfiguredMachineSeeds();
   for (let i = 0; i < seeds.length; i++) {
@@ -1618,15 +1471,6 @@ async function seedData() {
       );
     } else if (m.kiosk_token && existingMachine.kiosk_token !== m.kiosk_token) {
       await db.run('UPDATE machines SET kiosk_token = ? WHERE id = ?', [m.kiosk_token, m.id]);
-    }
-
-    const existingInv = await db.get('SELECT id FROM inventory WHERE machine_id = ?', [m.id]);
-    if (!existingInv) {
-      const levels = i === 0 ? [92, 78, 65, 55, 60, 50, 85] : [100, 100, 100, 100, 100, 100, 100];
-      await db.run(
-        'INSERT INTO inventory (machine_id, milk_level, coffee_level, vanilla_level, hazelnut_level, irish_level, mocha_level, water_level, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [m.id, ...levels, '2026-01-01T00:00:00.000Z']
-      );
     }
   }
 

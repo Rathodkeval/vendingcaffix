@@ -1,6 +1,5 @@
 import { getAuthoritativeOrderById, getAuthoritativeOrders, isFirestoreActive, getFirestoreInstance } from '../utils/firebase';
 import { getRefundsByOrderId } from '../utils/refunds';
-import { getInventoryLedgerForOrder, InventoryMovementRecord } from '../utils/inventoryLedger';
 import logger from '../utils/logger';
 
 export type ReconciliationResult = 'MATCH' | 'DISCREPANCY' | 'PENDING_ACTION';
@@ -16,8 +15,6 @@ export type DiscrepancyReason =
   | 'DISPENSING_IN_PROGRESS_TIMEOUT'
   | 'DISPENSE_FAILED_UNREFUNDED'
   | 'UNCERTAIN_DISPENSE_OUTCOME'
-  | 'INVENTORY_DEDUCTION_MISSING'
-  | 'INVENTORY_DEDUCTION_DUPLICATED'
   | 'REFUND_EXCEEDS_CAPTURE'
   | 'REFUND_LEDGER_MISMATCH'
   | 'REFUND_PENDING_STALE'
@@ -31,7 +28,6 @@ export type RecommendedAction =
   | 'INITIATE_REFUND'
   | 'CHECK_MACHINE_CONNECTIVITY'
   | 'INVESTIGATE_HARDWARE_DISPENSE'
-  | 'RECORD_INVENTORY_LEDGER'
   | 'RELEASE_STALE_PENDING_REFUND'
   | 'FLAG_DATA_CORRUPTION';
 
@@ -91,13 +87,13 @@ export interface ReconcileOrderOptions {
 }
 
 /**
- * Reconciles a single order across payment, dispensing, inventory, and refund records.
+ * Reconciles a single order across payment, dispensing, and refund records.
  */
 export function reconcileOrderRecord(
   order: any,
   context: {
     refunds: any[];
-    inventoryMovements: InventoryMovementRecord[];
+    inventoryMovements?: any[];
     webhookEvents?: any[];
     options?: ReconcileOrderOptions;
   }
@@ -120,32 +116,11 @@ export function reconcileOrderRecord(
   const totalRefundedPaise = Number(order.total_refunded_amount_paise || 0);
   const pendingRefundPaise = Number(order.pending_refund_amount_paise || 0);
   const refunds = context.refunds || [];
-  const invMovements = context.inventoryMovements || [];
   const createdAtMs = order.created_at ? new Date(order.created_at).getTime() : now.getTime();
   const updatedAtMs = order.updated_at ? new Date(order.updated_at).getTime() : createdAtMs;
   const dispenseStartedAtMs = order.dispense_started_at ? new Date(order.dispense_started_at).getTime() : updatedAtMs;
 
-  // Inventory movement status determination
-  let inventoryStatus: 'RECORDED' | 'MISSING' | 'DUPLICATED' | 'NOT_APPLICABLE' = 'NOT_APPLICABLE';
-  if (['PAID', 'PREPARING', 'COMPLETED'].includes(orderStatus)) {
-    if (invMovements.length === 0) {
-      inventoryStatus = 'MISSING';
-    } else {
-      // Check for duplicate deductions for the same ingredient
-      const seenIngredients = new Set<string>();
-      let hasDuplicates = false;
-      for (const m of invMovements) {
-        if (m.movement_type === 'DEDUCTION') {
-          if (seenIngredients.has(m.ingredient)) {
-            hasDuplicates = true;
-            break;
-          }
-          seenIngredients.add(m.ingredient);
-        }
-      }
-      inventoryStatus = hasDuplicates ? 'DUPLICATED' : 'RECORDED';
-    }
-  }
+  const inventoryStatus: 'RECORDED' | 'MISSING' | 'DUPLICATED' | 'NOT_APPLICABLE' = 'NOT_APPLICABLE';
 
   // 1. Payment Reconciliation
   // A. PENDING order with confirmed successful payment at gateway
@@ -281,8 +256,9 @@ export function reconcileOrderRecord(
     }
   }
 
-  // C. Dispense FAILED but unrefunded
-  const isDispenseFailed = dispenseStatus === 'FAILED' || orderStatus === 'FAILED';
+  // C. Dispense FAILED or EXPIRED but unrefunded
+  const isDispenseFailed =
+    dispenseStatus === 'FAILED' || dispenseStatus === 'EXPIRED' || orderStatus === 'FAILED';
   const hasCapturedPayment = (capturedPaise !== null && capturedPaise > 0) || Boolean(order.razorpay_payment_id);
   if (isDispenseFailed && hasCapturedPayment && totalRefundedPaise === 0 && pendingRefundPaise === 0) {
     return {
@@ -395,48 +371,7 @@ export function reconcileOrderRecord(
     }
   }
 
-  // 4. Inventory Ledger Reconciliation
-  if (inventoryStatus === 'DUPLICATED') {
-    return {
-      order_id: orderId,
-      machine_id: machineId,
-      payment_status: orderStatus,
-      dispense_status: dispenseStatus,
-      order_amount_inr: orderAmountInr,
-      captured_amount_paise: capturedPaise,
-      total_refunded_paise: totalRefundedPaise,
-      pending_refund_paise: pendingRefundPaise,
-      inventory_movement_status: inventoryStatus,
-      reconciliation_result: 'DISCREPANCY',
-      discrepancy_reason: 'INVENTORY_DEDUCTION_DUPLICATED',
-      recommended_action: 'FLAG_DATA_CORRUPTION',
-      details: 'Multiple inventory deductions found for the same order and ingredient.',
-      created_at: order.created_at,
-      updated_at: order.updated_at
-    };
-  }
-
-  if (inventoryStatus === 'MISSING') {
-    return {
-      order_id: orderId,
-      machine_id: machineId,
-      payment_status: orderStatus,
-      dispense_status: dispenseStatus,
-      order_amount_inr: orderAmountInr,
-      captured_amount_paise: capturedPaise,
-      total_refunded_paise: totalRefundedPaise,
-      pending_refund_paise: pendingRefundPaise,
-      inventory_movement_status: inventoryStatus,
-      reconciliation_result: 'PENDING_ACTION',
-      discrepancy_reason: 'INVENTORY_DEDUCTION_MISSING',
-      recommended_action: 'RECORD_INVENTORY_LEDGER',
-      details: 'Active paid order has no corresponding inventory ledger deduction records.',
-      created_at: order.created_at,
-      updated_at: order.updated_at
-    };
-  }
-
-  // 5. Perfect Match
+  // 4. Perfect Match
   return {
     order_id: orderId,
     machine_id: machineId,
@@ -450,7 +385,7 @@ export function reconcileOrderRecord(
     reconciliation_result: 'MATCH',
     discrepancy_reason: 'NONE',
     recommended_action: 'NO_ACTION',
-    details: 'Order matches all financial, dispensing, inventory and refund invariants.',
+    details: 'Order matches all financial, dispensing, and refund invariants.',
     created_at: order.created_at,
     updated_at: order.updated_at
   };
@@ -504,14 +439,10 @@ export async function generateReconciliationReport(
   let pendingActionCount = 0;
 
   for (const order of orders) {
-    const [refunds, inventoryMovements] = await Promise.all([
-      getRefundsByOrderId(db, order.id).catch(() => []),
-      getInventoryLedgerForOrder(db, order.id).catch(() => [])
-    ]);
+    const refunds = await getRefundsByOrderId(db, order.id).catch(() => []);
 
     const item = reconcileOrderRecord(order, {
       refunds,
-      inventoryMovements,
       options: options?.options
     });
 
@@ -574,14 +505,10 @@ export async function reconcileSingleOrderById(
   const order = await getAuthoritativeOrderById(orderId, db);
   if (!order) return null;
 
-  const [refunds, inventoryMovements] = await Promise.all([
-    getRefundsByOrderId(db, order.id).catch(() => []),
-    getInventoryLedgerForOrder(db, order.id).catch(() => [])
-  ]);
+  const refunds = await getRefundsByOrderId(db, order.id).catch(() => []);
 
   return reconcileOrderRecord(order, {
     refunds,
-    inventoryMovements,
     options
   });
 }

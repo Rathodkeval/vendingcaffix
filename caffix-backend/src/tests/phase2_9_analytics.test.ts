@@ -9,7 +9,6 @@ import {
   setFirestoreForTesting,
   isFirestoreActive
 } from '../utils/firebase';
-import { initializeInventoryLedgerSchema } from '../utils/inventoryLedger';
 import {
   paiseToInr,
   inrToPaise,
@@ -26,10 +25,6 @@ import {
   getAnalyticsOverview,
   getMachineRevenueAnalytics,
   getProductSalesAnalytics,
-  getIngredientConsumption,
-  getInventoryRefillQuantities,
-  getWasteAndAdjustments,
-  getInventoryAnalytics,
   getTimeSeriesAnalytics
 } from '../services/analyticsService';
 
@@ -124,22 +119,7 @@ async function createIsolatedSqliteDb(): Promise<Database> {
       updated_at TEXT NOT NULL,
       processed_at TEXT
     );
-
-    CREATE TABLE IF NOT EXISTS inventory (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      machine_id TEXT UNIQUE NOT NULL,
-      milk_level INTEGER NOT NULL DEFAULT 100,
-      coffee_level INTEGER NOT NULL DEFAULT 100,
-      vanilla_level INTEGER NOT NULL DEFAULT 100,
-      hazelnut_level INTEGER NOT NULL DEFAULT 100,
-      irish_level INTEGER NOT NULL DEFAULT 100,
-      mocha_level INTEGER NOT NULL DEFAULT 100,
-      water_level INTEGER NOT NULL DEFAULT 100,
-      updated_at TEXT
-    );
   `);
-
-  await initializeInventoryLedgerSchema(db);
 
   // Apply Phase 2.9 Analytics Indexes to SQLite
   await db.exec(`
@@ -181,13 +161,6 @@ async function runAllAnalyticsTests() {
      ('CFX-MC-01', 'Kiosk-One', 'usr_owner_alpha', 'Delhi Airport T3', 'RUNNING', 'online'),
      ('CFX-MC-02', 'Kiosk-Two', 'usr_owner_beta', 'CyberHub Gurgaon', 'RUNNING', 'online'),
      ('CFX-MC-03', 'Kiosk-Three', 'usr_owner_alpha', 'Noida Sec 62', 'MAINTENANCE', 'offline')`
-  );
-
-  await db.run(
-    `INSERT INTO inventory (machine_id, milk_level, coffee_level, vanilla_level, hazelnut_level, irish_level, mocha_level, water_level) VALUES
-     ('CFX-MC-01', 85, 70, 90, 80, 75, 60, 95),
-     ('CFX-MC-02', 60, 50, 40, 30, 20, 10, 80),
-     ('CFX-MC-03', 100, 100, 100, 100, 100, 100, 100)`
   );
 
   // -------------------------------------------------------------------------
@@ -391,53 +364,6 @@ async function runAllAnalyticsTests() {
   const eveningFormatted = formatInTimeZone(eveningUtcOrder, 'Asia/Kolkata');
   assert.strictEqual(eveningFormatted.dateKey, '2026-11-13', '18:00 UTC must map to Nov 13 in Asia/Kolkata');
   console.log('   PASS: Asia/Kolkata timezone math correctly partitions UTC records across midnight boundaries.');
-
-  // -------------------------------------------------------------------------
-  // Test 10: Inventory Movements Accounting (DEDUCTION, REFILL, WASTE, ADJUSTMENT)
-  // -------------------------------------------------------------------------
-  console.log('10. Testing inventory ledger analytics (DEDUCTION, REFILL, WASTE, ADJUSTMENT)...');
-  await db.run(`
-    INSERT INTO inventory_ledger (id, machine_id, ingredient, quantity, movement_type, balance_after, reason, idempotency_key, created_at)
-    VALUES
-    ('mov_1', 'CFX-MC-01', 'coffee', 20, 'DEDUCTION', 80, 'Classic Crest dispense', 'idem_mov_1', '2026-11-14T03:00:00.000Z'),
-    ('mov_2', 'CFX-MC-01', 'coffee', 20, 'DEDUCTION', 60, 'Vanilla Velvet dispense', 'idem_mov_2', '2026-11-14T03:30:00.000Z'),
-    ('mov_3', 'CFX-MC-01', 'coffee', 100, 'REFILL', 160, 'Morning restock', 'idem_mov_3', '2026-11-14T01:00:00.000Z'),
-    ('mov_4', 'CFX-MC-01', 'milk', 50, 'DEDUCTION', 50, 'Vanilla Velvet dispense', 'idem_mov_4', '2026-11-14T03:30:00.000Z'),
-    ('mov_5', 'CFX-MC-01', 'milk', 10, 'WASTE', 40, 'Spill during nozzle check', 'idem_mov_5', '2026-11-14T06:00:00.000Z'),
-    ('mov_6', 'CFX-MC-01', 'water', 5, 'ADJUSTMENT', 95, 'Sensor scale calibration', 'idem_mov_6', '2026-11-14T06:30:00.000Z')
-  `);
-
-  const consumption = await getIngredientConsumption(db, { machineId: 'CFX-MC-01' });
-  const refills = await getInventoryRefillQuantities(db, { machineId: 'CFX-MC-01' });
-  const { waste, adjustments } = await getWasteAndAdjustments(db, { machineId: 'CFX-MC-01' });
-
-  assert.strictEqual(consumption['coffee'], 40, 'Coffee deduction should be 40 units');
-  assert.strictEqual(consumption['milk'], 50, 'Milk deduction should be 50 units');
-  assert.strictEqual(refills['coffee'], 100, 'Coffee refill should be 100 units');
-  assert.strictEqual(waste['milk'], 10, 'Milk waste should be 10 units');
-  assert.strictEqual(adjustments['water'], 5, 'Water adjustment should be 5 units');
-  console.log('   PASS: Inventory movements accurately categorized across DEDUCTION, REFILL, WASTE, and ADJUSTMENT.');
-
-  // -------------------------------------------------------------------------
-  // Test 11: Warning B-1 (SHA-256 Hashed Doc ID in Firestore)
-  // -------------------------------------------------------------------------
-  console.log('11. Testing Warning B-1: SHA-256 Hashing of Refill Idempotency Key in Firestore...');
-  const trickyKeyWithSlashes = 'client/pos/terminal-01/refill-20261114';
-  const hashedDocId = `idem_${crypto.createHash('sha256').update(trickyKeyWithSlashes).digest('hex')}`;
-
-  // Direct Firestore write using the hashed document ID
-  await firestore.collection('refill_idempotency').doc(hashedDocId).set({
-    idempotency_key: trickyKeyWithSlashes,
-    machine_id: 'CFX-MC-01',
-    ingredient: 'coffee',
-    quantity: 50,
-    created_at: new Date().toISOString()
-  });
-
-  const snap = await firestore.collection('refill_idempotency').doc(hashedDocId).get();
-  assert.strictEqual(snap.exists, true, 'Document with SHA-256 hashed ID must exist in Firestore');
-  assert.strictEqual(snap.data()?.idempotency_key, trickyKeyWithSlashes, 'Original raw key preserved inside document payload');
-  console.log('   PASS: Raw key containing slashes stored safely using SHA-256 document ID without path errors.');
 
   // -------------------------------------------------------------------------
   // Test 12: Time Series Aggregation

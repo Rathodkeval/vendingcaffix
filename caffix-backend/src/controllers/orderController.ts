@@ -23,21 +23,22 @@ import {
   getAuthoritativeMachineProduct,
   getAuthoritativeOrderById,
   getAuthoritativeOrders,
-  updateMachineInventoryInFirebase,
+  getAuthoritativeOrdersPaginated,
+  AuthoritativeOrdersQueryOptions,
   isFirestoreActive,
   getFirestoreInstance,
   updateSyncedFirebaseOrder
 } from '../utils/firebase';
 import { ensureMachineRegisteredInLocalDB } from './kioskController';
-import { assertSufficientInventory } from '../utils/inventory';
-import { recordOrderDeductionsToLedger } from '../utils/inventoryLedger';
 import {
-  calculateRemainingRefundableBalance,
-  createPendingRefundReservation,
-  markRefundProcessed,
-  markRefundFailed
+  calculateRemainingRefundableBalance
 } from '../utils/refunds';
-import { executeGatewayRefund } from '../utils/razorpayRefundClient';
+import {
+  assertMachineOnlineIfGuardEnabled,
+  computeOrderExpiresAtIso,
+  executeOrderRefundTransaction,
+  reportMachineDispenseOutcome
+} from '../services/autoRefundService';
 const Razorpay = require('razorpay');
 
 let cachedRazorpayClient: any = null;
@@ -147,15 +148,46 @@ export const getOrders = async (
   const db = getDB();
   try {
     const queryMachineId = typeof req.query.machine_id === 'string' ? req.query.machine_id.trim() : '';
+    const rawLimit = req.query.limit !== undefined ? Number(req.query.limit) : undefined;
+    const parsedLimit =
+      rawLimit !== undefined && Number.isFinite(rawLimit) && rawLimit > 0
+        ? Math.min(500, Math.max(1, Math.floor(rawLimit)))
+        : undefined;
+    const queryOptions: AuthoritativeOrdersQueryOptions | undefined =
+      parsedLimit !== undefined ||
+      typeof req.query.start_date === 'string' ||
+      typeof req.query.end_date === 'string' ||
+      typeof req.query.cursor === 'string'
+        ? {
+            limit: parsedLimit,
+            startDate: typeof req.query.start_date === 'string' ? req.query.start_date : undefined,
+            endDate: typeof req.query.end_date === 'string' ? req.query.end_date : undefined,
+            cursor: typeof req.query.cursor === 'string' ? req.query.cursor : undefined
+          }
+        : undefined;
+
+    const sendPaginatedResponse = (result: {
+      orders: any[];
+      hasMore: boolean;
+      nextCursor: string | null;
+    }) => {
+      res.status(200).json({
+        status: 'success',
+        data: result.orders,
+        pagination: {
+          limit: parsedLimit ?? null,
+          has_more: result.hasMore,
+          next_cursor: result.nextCursor,
+          returned: result.orders.length
+        }
+      });
+    };
 
     if (req.user?.role === 'owner') {
       if (queryMachineId) {
         const machine = await assertMachineOwnershipOrAdmin(req.user, queryMachineId);
-        const orders = await getAuthoritativeOrders(db, [machine.id]);
-        res.status(200).json({
-          status: 'success',
-          data: orders
-        });
+        const result = await getAuthoritativeOrdersPaginated(db, [machine.id], queryOptions);
+        sendPaginatedResponse(result);
         return;
       }
 
@@ -163,11 +195,8 @@ export const getOrders = async (
       const ownedMachineIds = machines
         .filter((m) => m.owner_id && String(m.owner_id).trim() === String(req.user!.id).trim())
         .map((m) => String(m.id));
-      const orders = await getAuthoritativeOrders(db, ownedMachineIds);
-      res.status(200).json({
-        status: 'success',
-        data: orders
-      });
+      const result = await getAuthoritativeOrdersPaginated(db, ownedMachineIds, queryOptions);
+      sendPaginatedResponse(result);
       return;
     }
 
@@ -184,26 +213,21 @@ export const getOrders = async (
         );
       }
       const targetMachineId = queryMachineId || req.user?.machine_id || '';
-      const orders = await getAuthoritativeOrders(
+      const result = await getAuthoritativeOrdersPaginated(
         db,
-        targetMachineId ? [targetMachineId] : []
+        targetMachineId ? [targetMachineId] : [],
+        queryOptions
       );
-      res.status(200).json({
-        status: 'success',
-        data: orders
-      });
+      sendPaginatedResponse(result);
       return;
     }
 
     // Admin role
-    const orders = queryMachineId
-      ? await getAuthoritativeOrders(db, [queryMachineId])
-      : await getAuthoritativeOrders(db);
+    const result = queryMachineId
+      ? await getAuthoritativeOrdersPaginated(db, [queryMachineId], queryOptions)
+      : await getAuthoritativeOrdersPaginated(db, undefined, queryOptions);
 
-    res.status(200).json({
-      status: 'success',
-      data: orders
-    });
+    sendPaginatedResponse(result);
   } catch (error) {
     next(error);
   }
@@ -284,20 +308,21 @@ export const createOrder = async (
     }
 
     // 2. Verify Machine registration & authoritative desired_mode / status
-    const registered = await ensureMachineRegisteredInLocalDB(resolvedMachineId);
-    if (!registered) {
+    const machine = await ensureMachineRegisteredInLocalDB(resolvedMachineId);
+    if (!machine) {
       return next(new NotFoundError(`Vending machine ID ${resolvedMachineId} not registered`));
     }
-    const machine = (await getAuthoritativeMachineState(resolvedMachineId, db)) || registered;
     if (machine.desired_mode === 'MAINTENANCE' || machine.status === 'maintenance') {
       return next(new BadRequestError('Machine is currently under maintenance mode'));
     }
+    await assertMachineOnlineIfGuardEnabled(resolvedMachineId, db, machine);
 
-    // 3. Resolve authoritative machine-specific product pricing and availability
+    // 3. Resolve authoritative machine-specific product pricing and availability (reusing preloaded remote machine)
     const machineProduct = await getAuthoritativeMachineProduct(
       resolvedMachineId,
       Number(product_id),
-      db
+      db,
+      (machine as any)._remoteMachine
     );
     if (!machineProduct) {
       return next(new NotFoundError(`Product ID ${product_id} not found for machine ${resolvedMachineId}`));
@@ -322,14 +347,6 @@ export const createOrder = async (
         )
       );
     }
-
-    // 3b. Validate authoritative machine inventory BEFORE creating Razorpay order
-    const machineInventory = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [resolvedMachineId]);
-    assertSufficientInventory(
-      machineInventory,
-      machineProduct.name || product.name,
-      resolvedMachineId
-    );
 
     const { isMockMode, razorpayKeyId, razorpayClient } = resolveRazorpayOrderConfig();
 
@@ -410,6 +427,7 @@ export const createOrder = async (
         status: 'PENDING',
         machine_id: resolvedMachineId,
         created_at: todayStr,
+        expires_at: computeOrderExpiresAtIso(todayStr),
         razorpay_order_id: rpOrderId,
         extra_sugar: 1,
         base: base || 'water'
@@ -506,33 +524,6 @@ async function fetchFormattedOrder(db: any, id: string): Promise<any> {
   return row;
 }
 
-async function syncLocalInventoryFromLevels(db: any, machineId: string, levels: any): Promise<void> {
-  if (!levels) return;
-  await db.run(
-    `UPDATE inventory SET
-      milk_level = ?,
-      coffee_level = ?,
-      vanilla_level = ?,
-      hazelnut_level = ?,
-      irish_level = ?,
-      mocha_level = ?,
-      water_level = ?,
-      updated_at = ?
-     WHERE machine_id = ?`,
-    [
-      Number(levels.milk_level ?? 100),
-      Number(levels.coffee_level ?? 100),
-      Number(levels.vanilla_level ?? 100),
-      Number(levels.hazelnut_level ?? 100),
-      Number(levels.irish_level ?? 100),
-      Number(levels.mocha_level ?? 100),
-      Number(levels.water_level ?? 100),
-      new Date().toISOString(),
-      machineId
-    ]
-  );
-}
-
 async function performOrderStatusUpdateInternal(
   id: string,
   status: string,
@@ -593,7 +584,7 @@ async function performOrderStatusUpdateInternal(
   }
 
   // Idempotency guard: if already in the requested status, or already PAID/PREPARING/COMPLETED when a late PAID arrives,
-  // return current order without re-deducting ingredients or re-triggering Firestore writes
+  // return current order without re-triggering Firestore writes
   if (
     currentStatus === newStatus ||
     (currentStatus === 'COMPLETED' && (newStatus === 'PAID' || newStatus === 'PREPARING')) ||
@@ -643,11 +634,9 @@ async function performOrderStatusUpdateInternal(
     throw new ConflictError(`Cannot transition order ${id} from ${currentStatus} to ${newStatus}`);
   }
 
-  // 2. Prepare inventory deduction context ONLY when transitioning an eligible unpaid order -> active paid status
-  let inventory: any = null;
+  // 2. Prepare order product metadata ONLY when transitioning an eligible unpaid order -> active paid status
   let product: any = null;
-  let requirements: ReturnType<typeof assertSufficientInventory> | null = null;
-  const eligibleForInventoryDeduction =
+  const eligibleForActivePromotion =
     (currentStatus === 'PENDING' ||
       (Boolean(paymentMetadata?.allowPaidOrderRecovery) && isClosedUnpaidOrigin && newStatus === 'PAID')) &&
     transitionToActive &&
@@ -655,20 +644,12 @@ async function performOrderStatusUpdateInternal(
     currentDispense !== 'DISPENSED' &&
     order.dispensed !== true;
 
-  if (eligibleForInventoryDeduction) {
+  if (eligibleForActivePromotion) {
     await ensureMachineRegisteredInLocalDB(order.machine_id);
-    await getAuthoritativeMachineState(order.machine_id, db);
-    inventory = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [order.machine_id]);
-    if (!inventory) {
-      throw new BadRequestError(`Inventory record not found for machine ${order.machine_id}`);
-    }
-
     product = await db.get('SELECT * FROM products WHERE id = ?', [order.product_id]);
     if (!product) {
       throw new NotFoundError(`Product ID ${order.product_id} not found`);
     }
-
-    requirements = assertSufficientInventory(inventory, product.name, order.machine_id);
   }
 
   // 3. Execute atomic Firestore transaction first (authoritative cross-instance guard)
@@ -683,8 +664,6 @@ async function performOrderStatusUpdateInternal(
     razorpayPaymentId: paymentMetadata?.razorpayPaymentId,
     razorpaySignature: paymentMetadata?.razorpaySignature,
     capturedAmountPaise: paymentMetadata?.capturedAmountPaise,
-    requirements,
-    fallbackInventory: inventory,
     allowPaidOrderRecovery: paymentMetadata?.allowPaidOrderRecovery,
     webhookFencing: paymentMetadata?.webhookFencing
   });
@@ -716,13 +695,6 @@ async function performOrderStatusUpdateInternal(
           id
         ]);
       }
-      if (firebaseTransition.updatedEstimatedInventory) {
-        await syncLocalInventoryFromLevels(
-          db,
-          order.machine_id,
-          firebaseTransition.updatedEstimatedInventory
-        );
-      }
       if (firebaseTransition.rejectedByStateGuard && !paymentMetadata?.allowPaidOrderNoop) {
         throw new ConflictError(
           (firebaseTransition as any).conflictReason ||
@@ -738,25 +710,6 @@ async function performOrderStatusUpdateInternal(
         finalStatus: String(latestOrder?.status || authOrder?.status || currentStatus).toUpperCase()
       });
       return latestOrder;
-    }
-
-    if (firebaseTransition.didDeductInventory && firebaseTransition.updatedEstimatedInventory) {
-      await syncLocalInventoryFromLevels(
-        db,
-        order.machine_id,
-        firebaseTransition.updatedEstimatedInventory
-      );
-      if (requirements) {
-        await recordOrderDeductionsToLedger(db, {
-          orderId: id,
-          machineId: order.machine_id,
-          requirements,
-          remainingLevels: firebaseTransition.updatedEstimatedInventory as any
-        }).catch((err) => logger.warn(`Failed to record local inventory ledger for order ${id}:`, err));
-      }
-      logger.info(
-        `Deducted ingredients atomically for order ID ${id} (machine ${order.machine_id}) on transition from ${currentStatus} to ${newStatus}`
-      );
     }
 
     if (
@@ -793,7 +746,7 @@ async function performOrderStatusUpdateInternal(
   }
 
   // 4. Local SQLite / MockDatabase atomic fallback when Firestore is not configured
-  if (eligibleForInventoryDeduction && requirements) {
+  if (eligibleForActivePromotion) {
     const claimCapPaise = paymentMetadata?.capturedAmountPaise !== undefined && paymentMetadata?.capturedAmountPaise !== null
       ? Number(paymentMetadata.capturedAmountPaise)
       : null;
@@ -801,100 +754,31 @@ async function performOrderStatusUpdateInternal(
       ? `UPDATE orders SET status = ?, razorpay_payment_id = COALESCE(razorpay_payment_id, ?), razorpay_signature = COALESCE(razorpay_signature, ?), captured_amount_paise = COALESCE(?, captured_amount_paise) WHERE id = ? AND status IN ('PENDING', 'CANCELLED', 'FAILED')`
       : `UPDATE orders SET status = ?, razorpay_payment_id = COALESCE(razorpay_payment_id, ?), razorpay_signature = COALESCE(razorpay_signature, ?), captured_amount_paise = COALESCE(?, captured_amount_paise) WHERE id = ? AND status = 'PENDING'`;
 
-    let hasLocalTx = false;
-    let updatedInventory: any = null;
+    const claimResult = await db.run(claimSql, [
+      newStatus,
+      paymentMetadata?.razorpayPaymentId || null,
+      paymentMetadata?.razorpaySignature || null,
+      claimCapPaise,
+      id
+    ]);
 
-    try {
-      if (db && db.run) {
-        await db.run('BEGIN IMMEDIATE TRANSACTION');
-        hasLocalTx = true;
+    if (!claimResult || Number(claimResult.changes ?? 0) === 0) {
+      if (claimCapPaise !== null) {
+        await db.run(
+          'UPDATE orders SET captured_amount_paise = COALESCE(captured_amount_paise, ?), razorpay_payment_id = COALESCE(razorpay_payment_id, ?), razorpay_signature = COALESCE(razorpay_signature, ?) WHERE id = ?',
+          [claimCapPaise, paymentMetadata?.razorpayPaymentId || null, paymentMetadata?.razorpaySignature || null, id]
+        );
       }
-
-      const claimResult = await db.run(claimSql, [
-        newStatus,
-        paymentMetadata?.razorpayPaymentId || null,
-        paymentMetadata?.razorpaySignature || null,
-        claimCapPaise,
-        id
-      ]);
-
-      if (!claimResult || Number(claimResult.changes ?? 0) === 0) {
-        if (claimCapPaise !== null) {
-          await db.run(
-            'UPDATE orders SET captured_amount_paise = COALESCE(captured_amount_paise, ?), razorpay_payment_id = COALESCE(razorpay_payment_id, ?), razorpay_signature = COALESCE(razorpay_signature, ?) WHERE id = ?',
-            [claimCapPaise, paymentMetadata?.razorpayPaymentId || null, paymentMetadata?.razorpaySignature || null, id]
-          );
-        }
-        if (hasLocalTx) {
-          await db.run('COMMIT');
-          hasLocalTx = false;
-        }
-        logger.info(`Concurrent local status claim skipped for order ${id}; order is no longer eligible`);
-        const latestOrder = await fetchFormattedOrder(db, id);
-        paymentMetadata?.onTransitionOutcome?.({
-          didTransition: false,
-          finalStatus: String(latestOrder?.status || currentStatus).toUpperCase()
-        });
-        return latestOrder;
-      }
-
-      await db.run(
-        `UPDATE inventory SET 
-          water_level = water_level - ?,
-          coffee_level = coffee_level - ?,
-          milk_level = milk_level - ?,
-          vanilla_level = vanilla_level - ?,
-          hazelnut_level = hazelnut_level - ?,
-          irish_level = irish_level - ?,
-          mocha_level = mocha_level - ?,
-          updated_at = ?
-         WHERE machine_id = ?`,
-        [
-          requirements.water,
-          requirements.coffee,
-          requirements.milk,
-          requirements.vanilla,
-          requirements.hazelnut,
-          requirements.irish,
-          requirements.mocha,
-          new Date().toISOString(),
-          order.machine_id
-        ]
-      );
-
-      updatedInventory = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [order.machine_id]);
-
-      // Record inventory deductions to ledger INSIDE the atomic transaction.
-      // If ledger insertion fails, it throws and rolls back the status claim and inventory deduction.
-      await recordOrderDeductionsToLedger(db, {
-        orderId: id,
-        machineId: order.machine_id,
-        requirements,
-        remainingLevels: updatedInventory || {}
+      logger.info(`Concurrent local status claim skipped for order ${id}; order is no longer eligible`);
+      const latestOrder = await fetchFormattedOrder(db, id);
+      paymentMetadata?.onTransitionOutcome?.({
+        didTransition: false,
+        finalStatus: String(latestOrder?.status || currentStatus).toUpperCase()
       });
-
-      // Commit only after every operation succeeds
-      if (hasLocalTx) {
-        await db.run('COMMIT');
-        hasLocalTx = false;
-      }
-    } catch (txErr) {
-      if (hasLocalTx) {
-        try {
-          await db.run('ROLLBACK');
-        } catch (rbErr) {
-          logger.warn('Failed to rollback SQLite offline transaction:', rbErr);
-        }
-      }
-      logger.error(`Offline SQLite transaction failed for order ${id}:`, txErr);
-      throw txErr;
+      return latestOrder;
     }
 
-    if (updatedInventory) {
-      await updateMachineInventoryInFirebase(order.machine_id, updatedInventory);
-    }
-
-    logger.info(`Deducted ingredients for order ID ${id} (machine ${order.machine_id}) on transition from ${currentStatus} to ${newStatus}`);
+    logger.info(`Updated order ${id} status from ${currentStatus} to ${newStatus} (local fallback)`);
   } else if (isNonPaidTarget && (newStatus === 'FAILED' || newStatus === 'CANCELLED')) {
     const cancelResult = await db.run(
       `UPDATE orders SET status = ? WHERE id = ? AND status = 'PENDING'`,
@@ -1352,182 +1236,178 @@ export const refundOrder = async (
     const reason = String(req.body?.reason || 'admin_manual_refund').trim();
     const notes = req.body?.notes ? String(req.body.notes).trim() : null;
 
-    // 7. STEP 1: Reserve balance BEFORE contacting Razorpay
-    const reservation = await createPendingRefundReservation(db, {
-      orderId: order.id,
-      amount_paise: requestedPaise,
+    const txOutcome = await executeOrderRefundTransaction(db, {
+      order,
+      requestedPaise,
       reason,
       notes,
-      initiated_by: String(req.user.email || 'admin').trim(),
+      initiatedBy: String(req.user.email || 'admin').trim(),
       source: 'SUPER_ADMIN_PORTAL',
-      idempotency_key: idempotencyKey
+      idempotencyKey
     });
 
-    // Handle duplicate idempotent replay
-    if (reservation.isReplay) {
+    if (txOutcome.outcome === 'replay') {
       logger.info(
-        `Duplicate refund request replayed for order ${orderId} (refund: ${reservation.refund.id}, status: ${reservation.refund.status})`
+        `Duplicate refund request replayed for order ${orderId} (refund: ${txOutcome.refund.id}, status: ${txOutcome.refund.status})`
       );
-      const latestOrder = (await getAuthoritativeOrderById(orderId, db)) || reservation.order;
       res.status(200).json({
         status: 'success',
         message: 'Duplicate refund request replayed from existing idempotency record',
         data: {
-          refund: reservation.refund,
-          order: latestOrder,
+          refund: txOutcome.refund,
+          order: txOutcome.order,
           is_replay: true
         }
       });
       return;
     }
 
-    // 8. STEP 2: Call Razorpay API via Refund Client Wrapper
-    const gatewayResult = await executeGatewayRefund({
-      orderId: order.id,
-      paymentId: String(order.razorpay_payment_id),
-      amountPaise: requestedPaise,
-      receipt: reservation.refund.id,
-      notes: {
-        order_id: order.id,
-        refund_id: reservation.refund.id,
-        initiated_by: String(req.user.email || 'admin')
-      }
-    });
-
-    // 9. STEP 3: Validate Gateway Amount & Currency Consistency
-    const isGatewayAmountValid =
-      Number.isInteger(gatewayResult.amountPaise) &&
-      Number.isSafeInteger(gatewayResult.amountPaise) &&
-      gatewayResult.amountPaise > 0 &&
-      gatewayResult.amountPaise === requestedPaise;
-    const isGatewayCurrencyValid = String(gatewayResult.currency || '').toUpperCase() === 'INR';
-
-    if (
-      gatewayResult.amountMismatch ||
-      gatewayResult.currencyMismatch ||
-      !isGatewayAmountValid ||
-      !isGatewayCurrencyValid
-    ) {
-      logger.error(
-        `[CRITICAL FINANCIAL EXCEPTION] Gateway refund discrepancy for order ${orderId} (refund: ${reservation.refund.id}): requested=${requestedPaise} INR, reportedAmount=${gatewayResult.amountPaise}, reportedCurrency=${gatewayResult.currency}, rpRefundId=${gatewayResult.razorpayRefundId || 'none'}`
-      );
-
-      // CRITICAL SAFETY POLICY (A-1 Audit Fix):
-      // Retain reservation in safe PENDING state.
-      // NEVER mark PROCESSED with requested amount if gateway reported different amount!
-      // NEVER mark FAILED (which would release reservation hold if gateway actually debited funds)!
+    if (txOutcome.outcome === 'mismatch') {
       res.status(502).json({
         status: 'error',
-        code: gatewayResult.errorCode || 'GATEWAY_AMOUNT_MISMATCH',
+        code: txOutcome.gateway.errorCode || 'GATEWAY_AMOUNT_MISMATCH',
         message:
-          gatewayResult.errorDescription ||
+          txOutcome.gateway.errorDescription ||
           'Gateway reported inconsistent refund amount or currency. Reservation held pending reconciliation.',
         data: {
-          refund: reservation.refund,
-          order: reservation.order,
+          refund: txOutcome.refund,
+          order: txOutcome.order,
           discrepancy: {
             requested_paise: requestedPaise,
-            reported_paise: gatewayResult.amountPaise,
-            reported_currency: gatewayResult.currency,
-            razorpay_refund_id: gatewayResult.razorpayRefundId || null
+            reported_paise: txOutcome.gateway.amountPaise,
+            reported_currency: txOutcome.gateway.currency,
+            razorpay_refund_id: txOutcome.gateway.razorpayRefundId || null
           }
         }
       });
       return;
     }
 
-    // 10. STEP 4: Settle the pending reservation based on Gateway Outcome
-    if (gatewayResult.success && gatewayResult.status === 'PROCESSED') {
-      const settlement = await markRefundProcessed(db, {
-        refundId: reservation.refund.id,
-        razorpay_refund_id: gatewayResult.razorpayRefundId,
-        processed_at: gatewayResult.processedAt
-      });
-
+    if (txOutcome.outcome === 'processed') {
       logger.info(
-        `Refund ${reservation.refund.id} successfully processed for order ${orderId} (rp_refund_id: ${gatewayResult.razorpayRefundId}, amount: ${requestedPaise} paise)`
+        `Refund ${txOutcome.refund.id} successfully processed for order ${orderId} (rp_refund_id: ${txOutcome.gateway.razorpayRefundId}, amount: ${requestedPaise} paise)`
       );
-
       res.status(200).json({
         status: 'success',
         message: 'Refund successfully processed',
         data: {
-          refund: settlement.refund,
-          order: settlement.order,
+          refund: txOutcome.refund,
+          order: txOutcome.order,
           gateway: {
-            id: gatewayResult.razorpayRefundId,
+            id: txOutcome.gateway.razorpayRefundId,
             status: 'processed',
-            is_mock: gatewayResult.isMock
+            is_mock: txOutcome.gateway.isMock
           }
         }
       });
       return;
     }
 
-    if (gatewayResult.success && gatewayResult.status === 'PENDING') {
+    if (txOutcome.outcome === 'pending') {
       logger.info(
-        `Refund ${reservation.refund.id} submitted to Razorpay and is pending settlement for order ${orderId} (rp_refund_id: ${gatewayResult.razorpayRefundId})`
+        `Refund ${txOutcome.refund.id} submitted to Razorpay and is pending settlement for order ${orderId} (rp_refund_id: ${txOutcome.gateway.razorpayRefundId})`
       );
-
       res.status(202).json({
         status: 'accepted',
         message: 'Refund request submitted to payment gateway and is currently pending settlement',
         data: {
-          refund: reservation.refund,
-          order: reservation.order,
+          refund: txOutcome.refund,
+          order: txOutcome.order,
           gateway: {
-            id: gatewayResult.razorpayRefundId,
+            id: txOutcome.gateway.razorpayRefundId,
             status: 'pending',
-            is_mock: gatewayResult.isMock
+            is_mock: txOutcome.gateway.isMock
           }
         }
       });
       return;
     }
 
-    if (gatewayResult.isTimeout) {
-      // Gateway timed out: Keep reservation in PENDING so balance remains locked against over-refund!
+    if (txOutcome.outcome === 'timeout') {
       logger.warn(
-        `Gateway timed out for refund ${reservation.refund.id} on order ${orderId}. Reservation held in PENDING status pending webhook/reconciliation.`
+        `Gateway timed out for refund ${txOutcome.refund.id} on order ${orderId}. Reservation held in PENDING status pending webhook/reconciliation.`
       );
-
       res.status(504).json({
         status: 'timeout',
         message: 'Payment gateway request timed out. Refund reservation held in PENDING status pending reconciliation.',
         data: {
-          refund: reservation.refund,
-          order: reservation.order,
+          refund: txOutcome.refund,
+          order: txOutcome.order,
           error: {
-            code: gatewayResult.errorCode,
-            description: gatewayResult.errorDescription
+            code: txOutcome.gateway.errorCode,
+            description: txOutcome.gateway.errorDescription
           }
         }
       });
       return;
     }
 
-    // Definite gateway rejection: Settle reservation to FAILED to release pending hold safely
-    const failedSettlement = await markRefundFailed(db, {
-      refundId: reservation.refund.id,
-      error_code: gatewayResult.errorCode || 'GATEWAY_REJECTED',
-      error_description: gatewayResult.errorDescription || 'Gateway rejected refund'
-    });
-
     logger.warn(
-      `Gateway rejected refund ${reservation.refund.id} for order ${orderId}: [${gatewayResult.errorCode}] ${gatewayResult.errorDescription}`
+      `Gateway rejected refund ${txOutcome.refund.id} for order ${orderId}: [${txOutcome.gateway.errorCode}] ${txOutcome.gateway.errorDescription}`
     );
-
     res.status(422).json({
       status: 'error',
-      message: `Payment gateway rejected refund: ${gatewayResult.errorDescription || 'Unknown error'}`,
+      message: `Payment gateway rejected refund: ${txOutcome.gateway.errorDescription || 'Unknown error'}`,
       data: {
-        refund: failedSettlement.refund,
-        order: failedSettlement.order,
+        refund: txOutcome.refund,
+        order: txOutcome.order,
         error: {
-          code: gatewayResult.errorCode,
-          description: gatewayResult.errorDescription
+          code: txOutcome.gateway.errorCode,
+          description: txOutcome.gateway.errorDescription
         }
       }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const reportOrderDispenseOutcome = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  const orderId = String(req.params.id || '').trim();
+  const db = getDB();
+
+  try {
+    if (!req.user || (req.user.role !== 'kiosk' && req.user.role !== 'admin')) {
+      return next(new ForbiddenError('Only machine kiosk sessions or admins can report dispense results'));
+    }
+
+    const existing = await getAuthoritativeOrderById(orderId, db);
+    if (!existing) {
+      return next(new NotFoundError(`Order with ID ${orderId} not found`));
+    }
+
+    const targetMachineId =
+      req.user.role === 'kiosk' || req.user.scope === 'kiosk_admin'
+        ? String(req.user.machine_id || '').trim()
+        : String(req.body?.machine_id || existing.machine_id || '').trim();
+
+    if (!targetMachineId) {
+      return next(new ForbiddenError('Missing machine identity for dispense report'));
+    }
+
+    if (String(existing.machine_id || '').trim() !== targetMachineId) {
+      return next(
+        new ForbiddenError(
+          `Machine ${targetMachineId} cannot report dispense result for order ${orderId} belonging to ${existing.machine_id}`
+        )
+      );
+    }
+
+    const result = await reportMachineDispenseOutcome(db, {
+      orderId,
+      machineId: targetMachineId,
+      dispenseStatus: req.body.dispense_status,
+      failureStage: req.body.failure_stage,
+      failureReason: req.body.failure_reason
+    });
+
+    res.status(200).json({
+      status: 'success',
+      data: result
     });
   } catch (error) {
     next(error);

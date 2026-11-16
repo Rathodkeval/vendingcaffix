@@ -287,11 +287,10 @@ async function runWave38Tests() {
     const ordersCol = fs.collections.get('orders')!;
 
     // -------------------------------------------------------------------------
-    // 1. payment.failed webhook + raw-body HMAC + single target + 0 inventory deduction
+    // 1. payment.failed webhook + raw-body HMAC + single target + 0 writes on duplicates
     // -------------------------------------------------------------------------
-    console.log('1. Testing payment.failed webhook marks only matching eligible order FAILED with 0 inventory deduction...');
+    console.log('1. Testing payment.failed webhook marks only matching eligible order FAILED...');
     {
-      const waterBefore = machineCol.get('CFX-MC-01').estimated_inventory.water_level;
       const targetOrder = await createPendingOrder(kiosk1Token, 'CFX-MC-01', 'order_live_fail_01');
       const siblingPending = await createPendingOrder(kiosk1Token, 'CFX-MC-01', 'order_live_pending_02');
 
@@ -330,15 +329,8 @@ async function runWave38Tests() {
       assert.strictEqual(ordersCol.get(siblingPending.orderId).status, 'PENDING');
       assert.strictEqual(ordersCol.get(siblingPending.orderId).dispense_status, 'PENDING');
 
-      // Zero inventory deduction
-      assert.strictEqual(
-        machineCol.get('CFX-MC-01').estimated_inventory.water_level,
-        waterBefore,
-        'payment.failed must NEVER deduct inventory'
-      );
-
       // -----------------------------------------------------------------------
-      // 2. Duplicate payment.failed deliveries are idempotent (0 writes, 0 deduction)
+      // 2. Duplicate payment.failed deliveries are idempotent (0 writes)
       // -----------------------------------------------------------------------
       console.log('2. Testing duplicate & concurrent payment.failed webhook deliveries are idempotent...');
       const writesBefore = fs.writeCount;
@@ -352,9 +344,8 @@ async function runWave38Tests() {
       assert.strictEqual(dup3.status, 200);
       assert.strictEqual(fs.writeCount, writesBefore, 'Duplicate payment.failed deliveries must execute 0 Firestore writes');
       assert.strictEqual(ordersCol.get(targetOrder.orderId).status, 'FAILED');
-      assert.strictEqual(machineCol.get('CFX-MC-01').estimated_inventory.water_level, waterBefore);
     }
-    console.log('   PASS: payment.failed webhook + duplicates idempotent + 0 inventory deduction.');
+    console.log('   PASS: payment.failed webhook + duplicates idempotent.');
 
     // -------------------------------------------------------------------------
     // 3. Late payment.failed arriving after PAID, PREPARING, COMPLETED, DISPENSING, DISPENSED
@@ -428,7 +419,6 @@ async function runWave38Tests() {
         assert.strictEqual(vRes.status, 200);
         await sc.setup(ord.orderId, ord.razorpayOrderId);
 
-        const waterBefore = machineCol.get('CFX-MC-01').estimated_inventory.water_level;
         const bizWritesBefore = fs.businessWriteCount;
         const failPayload = {
           event: 'payment.failed',
@@ -454,17 +444,15 @@ async function runWave38Tests() {
         assert.strictEqual(afterDoc.status, sc.expectedStatus, `Late payment.failed must not overwrite ${sc.label}`);
         assert.strictEqual(afterDoc.dispense_status, sc.expectedDispense, `Late payment.failed must preserve dispense_status on ${sc.label}`);
         assert.strictEqual(afterDoc.razorpay_payment_id, payId, `razorpay_payment_id must stay intact on ${sc.label}`);
-        assert.strictEqual(machineCol.get('CFX-MC-01').estimated_inventory.water_level, waterBefore);
       }
     }
     console.log('   PASS: Late payment.failed cannot overwrite any PAID/PREPARING/COMPLETED/DISPENSING/DISPENSED order.');
 
     // -------------------------------------------------------------------------
-    // 4. Checkout dismissal (CANCELLED) + idempotency + 0 inventory deduction + unauthorized cancel checks
+    // 4. Checkout dismissal (CANCELLED) + idempotency + unauthorized cancel checks
     // -------------------------------------------------------------------------
     console.log('4. Testing checkout dismissal & unauthorized cancellation protection...');
     {
-      const waterBefore = machineCol.get('CFX-MC-01').estimated_inventory.water_level;
       const cancelOrd = await createPendingOrder(kiosk1Token, 'CFX-MC-01', 'order_live_cancel_01');
 
       // Unauthenticated -> 401
@@ -539,7 +527,6 @@ async function runWave38Tests() {
       assert.strictEqual(okCancel.data.data.status, 'CANCELLED');
       assert.strictEqual(ordersCol.get(cancelOrd.orderId).status, 'CANCELLED');
       assert.strictEqual(ordersCol.get(cancelOrd.orderId).dispense_status, 'CANCELLED');
-      assert.strictEqual(machineCol.get('CFX-MC-01').estimated_inventory.water_level, waterBefore);
 
       // Duplicate dismissal call is idempotent -> 200, 0 writes
       const writesBefore = fs.writeCount;
@@ -552,17 +539,15 @@ async function runWave38Tests() {
       assert.strictEqual(dupCancel.status, 200);
       assert.strictEqual(dupCancel.data.data.status, 'CANCELLED');
       assert.strictEqual(fs.writeCount, writesBefore);
-      assert.strictEqual(machineCol.get('CFX-MC-01').estimated_inventory.water_level, waterBefore);
     }
-    console.log('   PASS: Authorized checkout dismissal marks CANCELLED with 0 deduction; unauthorized attempts blocked.');
+    console.log('   PASS: Authorized checkout dismissal marks CANCELLED; unauthorized attempts blocked.');
 
     // -------------------------------------------------------------------------
     // 5. Dismissal racing with successful payment + cancel-after-pay rejection (409)
     // -------------------------------------------------------------------------
     console.log('5. Testing checkout dismissal racing with successful payment confirmation...');
     {
-      // 5A. Payment verified BEFORE dismissal arrives -> 409 ORDER_ALREADY_PAID, status stays PAID, 1 deduction
-      const waterStart = machineCol.get('CFX-MC-01').estimated_inventory.water_level;
+      // 5A. Payment verified BEFORE dismissal arrives -> 409 ORDER_ALREADY_PAID, status stays PAID
       const raceOrdA = await createPendingOrder(kiosk1Token, 'CFX-MC-01', 'order_live_race_seq');
       const payResA = await api(
         'POST',
@@ -589,7 +574,6 @@ async function runWave38Tests() {
       assert.strictEqual(cancelAfterPay.data.data.status, 'PAID');
       assert.strictEqual(ordersCol.get(raceOrdA.orderId).status, 'PAID');
       assert.strictEqual(ordersCol.get(raceOrdA.orderId).dispense_status, 'QUEUED');
-      assert.strictEqual(machineCol.get('CFX-MC-01').estimated_inventory.water_level, waterStart - 5);
 
       // 5B. Concurrent race: Promise.all([POST /cancel, webhook payment.captured]) & Promise.all([POST /cancel, POST /payments/verify])
       const raceOrdB = await createPendingOrder(kiosk1Token, 'CFX-MC-01', 'order_live_race_conc1');
@@ -617,11 +601,6 @@ async function runWave38Tests() {
       assert.ok([200, 409].includes(cancelConcB.status));
       assert.strictEqual(ordersCol.get(raceOrdB.orderId).status, 'PAID', 'Captured payment must settle PAID');
       assert.strictEqual(ordersCol.get(raceOrdB.orderId).dispense_status, 'QUEUED');
-      assert.strictEqual(
-        machineCol.get('CFX-MC-01').estimated_inventory.water_level,
-        waterStart - 10,
-        'Concurrent cancel + webhook capture must deduct inventory exactly ONCE'
-      );
 
       // 5C. Concurrent race: Promise.all([POST /cancel, POST /payments/verify])
       const raceOrdC = await createPendingOrder(kiosk1Token, 'CFX-MC-01', 'order_live_race_conc2');
@@ -648,20 +627,14 @@ async function runWave38Tests() {
       assert.ok([200, 409].includes(cancelConcC.status));
       assert.strictEqual(ordersCol.get(raceOrdC.orderId).status, 'PAID');
       assert.strictEqual(ordersCol.get(raceOrdC.orderId).dispense_status, 'QUEUED');
-      assert.strictEqual(
-        machineCol.get('CFX-MC-01').estimated_inventory.water_level,
-        waterStart - 15,
-        'Concurrent cancel + verify must deduct inventory exactly ONCE'
-      );
     }
-    console.log('   PASS: Dismissal & payment confirmation races preserve PAID status & single inventory deduction.');
+    console.log('   PASS: Dismissal & payment confirmation races preserve PAID status.');
 
     // -------------------------------------------------------------------------
     // 6. Prevent customers from changing paid/completed order status OR bypassing payment
     // -------------------------------------------------------------------------
     console.log('6. Testing customer status tampering restrictions & existing payment success flow...');
     {
-      const waterStart = machineCol.get('CFX-MC-02').estimated_inventory.water_level;
       const unpaidOrd = await createPendingOrder(kiosk2Token, 'CFX-MC-02', 'order_live_cust_guard');
 
       // Customer CANNOT bypass payment via PUT /orders/:id/status { status: 'PAID' | 'PREPARING' | 'COMPLETED' | 'FAILED' }
@@ -675,7 +648,6 @@ async function runWave38Tests() {
         assert.strictEqual(res.status, 403, `Kiosk must get 403 when setting unpaid order to ${forbiddenTarget}`);
       }
       assert.strictEqual(ordersCol.get(unpaidOrd.orderId).status, 'PENDING');
-      assert.strictEqual(machineCol.get('CFX-MC-02').estimated_inventory.water_level, waterStart);
 
       // Existing successful payment flow: /payments/verify -> PAID -> PREPARING -> COMPLETED
       const payId = 'pay_legit_flow_1';
@@ -692,7 +664,6 @@ async function runWave38Tests() {
       );
       assert.strictEqual(verifyOk.status, 200);
       assert.strictEqual(verifyOk.data.data.status, 'PAID');
-      assert.strictEqual(machineCol.get('CFX-MC-02').estimated_inventory.water_level, waterStart - 5);
 
       // Customer CANNOT downgrade PAID -> CANCELLED / FAILED / PENDING
       for (const badStatus of ['CANCELLED', 'FAILED', 'PENDING']) {
@@ -716,7 +687,6 @@ async function runWave38Tests() {
         200
       );
       assert.strictEqual(ordersCol.get(unpaidOrd.orderId).status, 'COMPLETED');
-      assert.strictEqual(machineCol.get('CFX-MC-02').estimated_inventory.water_level, waterStart - 5);
 
       // Customer CANNOT change COMPLETED order status to ANYTHING
       for (const tampered of ['PENDING', 'PAID', 'PREPARING', 'FAILED', 'CANCELLED']) {
@@ -733,7 +703,6 @@ async function runWave38Tests() {
         409
       );
       assert.strictEqual(ordersCol.get(unpaidOrd.orderId).status, 'COMPLETED');
-      assert.strictEqual(machineCol.get('CFX-MC-02').estimated_inventory.water_level, waterStart - 5);
     }
     console.log('   PASS: Customer status tampering blocked; existing payment & dispense flow preserved.');
 

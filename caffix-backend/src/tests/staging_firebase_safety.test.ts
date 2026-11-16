@@ -452,7 +452,7 @@ async function runTests() {
           assert.strictEqual(mDoc.desired_mode, 'RUNNING');
           assert.strictEqual(mDoc.last_seen, null);
           assert.strictEqual(mDoc.owner_id, null);
-          assert.ok(mDoc.estimated_inventory, `Expected estimated_inventory on ${mId}`);
+          assert.strictEqual(mDoc.estimated_inventory, undefined, `Inventory module removed: no estimated_inventory on ${mId}`);
         }
 
         // Verify global catalog products & per-machine products work via getAuthoritativeMachineProducts
@@ -482,7 +482,7 @@ async function runTests() {
     // TEST 6: Repeated & Concurrent Cold Starts NEVER Overwrite Existing Data
     // -------------------------------------------------------------------------
     await step(
-      '6. Repeated and concurrent cold-start initializations never overwrite modified admin password, owner_id, desired_mode, last_seen, estimated_inventory, or per-machine product overrides',
+      '6. Repeated and concurrent cold-start initializations never overwrite modified admin password, owner_id, desired_mode, last_seen, or per-machine product overrides',
       async () => {
         // 1. Log in as Admin and modify state across users and machines
         const initialLogin = await request('POST', '/api/auth/login', {
@@ -540,13 +540,6 @@ async function runTests() {
         const recordedLastSeen = hbRes.data.data.last_seen;
         assert.ok(recordedLastSeen, 'Expected last_seen timestamp');
 
-        // Refill CFX-MC-01 milk to 100 (modifying estimated_inventory from initial 92 -> 100)
-        const refillRes = await request('POST', '/api/machines/CFX-MC-01/refill', {
-          headers: { Authorization: `Bearer ${ownerToken}` },
-          body: { ingredient: 'milk' }
-        });
-        assert.strictEqual(refillRes.status, 200);
-
         // Owner customizes CFX-MC-01 product 1 (Classic Crest -> ₹145) and product 2 (Vanilla Velvet -> unavailable)
         const p1Res = await request('PATCH', '/api/machines/CFX-MC-01/products/1', {
           headers: { Authorization: `Bearer ${ownerToken}` },
@@ -603,7 +596,7 @@ async function runTests() {
         assert.strictEqual(ownerLoginAfterColdStart.status, 200);
         assert.deepStrictEqual(ownerLoginAfterColdStart.data.data.assigned_machines, ['CFX-MC-01']);
 
-        // 5. Verify CFX-MC-01 preserved owner_id, desired_mode, status, last_seen, and estimated_inventory
+        // 5. Verify CFX-MC-01 preserved owner_id, desired_mode, status, and last_seen
         const machRes = await request('GET', '/api/machines/CFX-MC-01', {
           headers: { Authorization: `Bearer ${ownerToken}` }
         });
@@ -613,16 +606,6 @@ async function runTests() {
         assert.strictEqual(mData.desired_mode, 'MAINTENANCE', 'desired_mode must not be overwritten');
         assert.strictEqual(mData.status, 'maintenance', 'status must not be overwritten');
         assert.strictEqual(mData.last_seen, recordedLastSeen, 'last_seen must not be overwritten');
-        assert.strictEqual(
-          mData.estimated_inventory.milk_level,
-          100,
-          'estimated_inventory.milk_level (100) must not be overwritten by initial seed (92)'
-        );
-        assert.strictEqual(
-          mData.estimated_inventory.coffee_level,
-          78,
-          'estimated_inventory.coffee_level (78) must be preserved'
-        );
 
         // 6. Verify CFX-MC-01 per-machine product prices and availability were NOT overwritten
         const prodsAfterRes = await request('GET', '/api/machines/CFX-MC-01/products', {
@@ -719,7 +702,7 @@ async function runTests() {
     // TEST 10: Firestore authoritative hydration without updated_at & override pruning
     // -------------------------------------------------------------------------
     await step(
-      '10. Firestore overrides and estimated_inventory hydrate cold/warm MockDatabase even when timestamps are omitted or overrides are removed',
+      '10. Firestore product overrides & maintenance mode hydrate cold/warm MockDatabase even when timestamps are omitted or overrides are removed',
       async () => {
         const syncFirestore = new FakeFirestore();
         process.env.VERCEL = '1';
@@ -750,22 +733,14 @@ async function runTests() {
         });
         assert.strictEqual(putProd.status, 200);
 
-        // Simulate out-of-band Firestore edit (missing inventory_updated_at & older/missing product updated_at)
+        // Simulate out-of-band Firestore edit (older/missing product updated_at & MAINTENANCE mode)
         const mc01Doc = syncFirestore.collections.get('machines')?.get('CFX-MC-01');
         assert.ok(mc01Doc, 'CFX-MC-01 must exist in FakeFirestore');
         await syncFirestore.collection('machines').doc('CFX-MC-01').set({
           ...mc01Doc,
           updated_at: '2026-01-01T00:00:00.000Z',
-          inventory_updated_at: '',
-          estimated_inventory: {
-            milk_level: 3,
-            coffee_level: 88,
-            vanilla_level: 4,
-            hazelnut_level: 90,
-            irish_level: 90,
-            mocha_level: 90,
-            water_level: 85
-          },
+          desired_mode: 'MAINTENANCE',
+          status: 'maintenance',
           products: {
             '1': { product_id: 1, price: 165, is_available: true, updated_at: '2026-01-01T00:00:00.000Z' }
             // Notice product '2' override was removed from Firestore!
@@ -781,14 +756,15 @@ async function runTests() {
         assert.strictEqual(vanilla.price, 100);
         assert.strictEqual(vanilla.is_available, true);
 
-        // Verify cold start against same Firestore picks up depleted milk_level=3 despite missing inventory_updated_at
+        // Verify cold start against same Firestore picks up desired_mode=MAINTENANCE & zero removed inventory field
         resetMockDatabaseForColdStartSimulation();
         const statusRes = await request('GET', '/api/machine-status?machine_id=CFX-MC-01', {
           headers: { Authorization: `Bearer ${adminTok}` }
         });
         assert.strictEqual(statusRes.status, 200);
-        assert.strictEqual(statusRes.data.data.inventory.milk, 3);
-        assert.strictEqual(statusRes.data.data.inventory.vanilla, 4);
+        assert.strictEqual(statusRes.data.data.desired_mode, 'MAINTENANCE');
+        assert.strictEqual(statusRes.data.data.maintenance, true);
+        assert.strictEqual(statusRes.data.data.inventory, undefined);
       }
     );
 

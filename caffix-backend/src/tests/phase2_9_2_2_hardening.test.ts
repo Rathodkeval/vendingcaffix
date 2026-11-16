@@ -18,7 +18,6 @@ import { getFirestore, Firestore } from 'firebase-admin/firestore';
 import {
   chunkMachineIds,
   getAnalyticsOverview,
-  getInventoryAnalytics,
   getGrossCapturedSalesPaise,
   getTimeSeriesAnalytics,
   getRefundsAnalytics
@@ -29,7 +28,6 @@ import {
   ensureFirebaseReady,
   setFirestoreForTesting
 } from '../utils/firebase';
-import { initializeInventoryLedgerSchema } from '../utils/inventoryLedger';
 
 const EMULATOR_HOST = '127.0.0.1:8088';
 const EMULATOR_PROJECT_ID = 'demo-caffix-emulator';
@@ -85,21 +83,7 @@ async function runHardeningTests() {
       updated_at TEXT NOT NULL,
       processed_at TEXT
     );
-
-    CREATE TABLE IF NOT EXISTS inventory (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      machine_id TEXT UNIQUE NOT NULL,
-      milk_level INTEGER NOT NULL DEFAULT 100,
-      coffee_level INTEGER NOT NULL DEFAULT 100,
-      vanilla_level INTEGER NOT NULL DEFAULT 100,
-      hazelnut_level INTEGER NOT NULL DEFAULT 100,
-      irish_level INTEGER NOT NULL DEFAULT 100,
-      mocha_level INTEGER NOT NULL DEFAULT 100,
-      water_level INTEGER NOT NULL DEFAULT 100,
-      updated_at TEXT
-    );
   `);
-  await initializeInventoryLedgerSchema(db);
 
   // Initialize Firebase Admin with Emulator
   let app;
@@ -432,99 +416,6 @@ async function runHardeningTests() {
   });
   assert.strictEqual(m2Overview.over_refund_detected, true, 'MC-02 must be flagged for its own over-refund');
   console.log('   PASS [SQLite]: Machine scope isolation prevents cross-machine over-refund contamination.');
-
-  // -------------------------------------------------------------------------
-  // 5. Finding A8-1: Fleet-Wide & Single-Machine Inventory Balances
-  // -------------------------------------------------------------------------
-  console.log('\n--- 5. Testing Finding A8-1: Fleet-Wide & Single-Machine Inventory Balances ---');
-
-  // Seed SQLite inventory table
-  await db.run(`DELETE FROM inventory;`);
-  await db.run(`
-    INSERT INTO inventory (machine_id, milk_level, coffee_level, vanilla_level, hazelnut_level, irish_level, mocha_level, water_level)
-    VALUES
-      ('CFX-MC-01', 85, 75, 95, 90, 80, 65, 100),
-      ('CFX-MC-02', 45, 35, 55, 50, 40, 25, 80)
-  `);
-
-  // Single Machine Query (CFX-MC-01)
-  const singleInv = await getInventoryAnalytics(db, {
-    machineId: 'CFX-MC-01',
-    forceSource: 'sqlite'
-  });
-  const milkSingle = singleInv.find((i) => i.ingredient === 'milk');
-  const coffeeSingle = singleInv.find((i) => i.ingredient === 'coffee');
-  assert.strictEqual(milkSingle?.current_balance, 85, 'Single machine CFX-MC-01 milk balance is 85');
-  assert.strictEqual(coffeeSingle?.current_balance, 75, 'Single machine CFX-MC-01 coffee balance is 75');
-  assert.strictEqual(milkSingle?.inventory_source, 'software_estimated');
-  console.log('   PASS [SQLite]: Single machine inventory returns actual recorded balance (85 milk, 75 coffee).');
-
-  // Fleet-wide Query across CFX-MC-01 and CFX-MC-02 (Super Admin fleet-wide)
-  const fleetInv = await getInventoryAnalytics(db, {
-    forceSource: 'sqlite'
-  });
-  const milkFleet = fleetInv.find((i) => i.ingredient === 'milk');
-  const coffeeFleet = fleetInv.find((i) => i.ingredient === 'coffee');
-  // 85 + 45 = 130 milk
-  // 75 + 35 = 110 coffee
-  assert.strictEqual(milkFleet?.current_balance, 130, 'Fleet-wide milk balance is 130 (85 + 45), NOT hardcoded 100!');
-  assert.strictEqual(coffeeFleet?.current_balance, 110, 'Fleet-wide coffee balance is 110 (75 + 35), NOT hardcoded 100!');
-  console.log('   PASS [SQLite]: Fleet-wide inventory sums actual recorded balances (130 milk, 110 coffee).');
-
-  // Owner Scoped Multi-Machine Query (assigned ['CFX-MC-01', 'CFX-MC-02'])
-  const ownerMultiInv = await getInventoryAnalytics(db, {
-    machineIds: ['CFX-MC-01', 'CFX-MC-02'],
-    forceSource: 'sqlite'
-  });
-  const milkOwner = ownerMultiInv.find((i) => i.ingredient === 'milk');
-  assert.strictEqual(milkOwner?.current_balance, 130, 'Owner multi-machine balance correctly sums assigned machines (130)');
-
-  // Owner with ZERO assigned machines
-  const emptyOwnerInv = await getInventoryAnalytics(db, {
-    machineIds: [],
-    forceSource: 'sqlite'
-  });
-  const milkEmpty = emptyOwnerInv.find((i) => i.ingredient === 'milk');
-  assert.strictEqual(milkEmpty?.current_balance, 0, 'Owner with 0 assigned machines has 0 balance, NOT hardcoded 100');
-  console.log('   PASS [SQLite]: Owner with 0 assigned machines returns 0 balance.');
-
-  // Unrecorded / Missing machine inventory in SQLite
-  const unrecordedInv = await getInventoryAnalytics(db, {
-    machineId: 'CFX-MC-UNRECORDED',
-    forceSource: 'sqlite'
-  });
-  const milkUnrecorded = unrecordedInv.find((i) => i.ingredient === 'milk');
-  assert.strictEqual(milkUnrecorded?.current_balance, null, 'Unrecorded machine returns null balance instead of invented number');
-  console.log('   PASS [SQLite]: Unrecorded machine returns null balance without inventing data.');
-
-  // Firestore Inventory Aggregation Verification
-  const fsInvBatch = firestore.batch();
-  fsInvBatch.set(firestore.collection('machines').doc('CFX-INV-01'), {
-    id: 'CFX-INV-01',
-    name: 'Inv Machine 1',
-    estimated_inventory: { milk_level: 60, coffee_level: 50 },
-    inventory_source: 'software_estimated'
-  });
-  fsInvBatch.set(firestore.collection('machines').doc('CFX-INV-02'), {
-    id: 'CFX-INV-02',
-    name: 'Inv Machine 2',
-    estimated_inventory: { milk_level: 40, coffee_level: 30 },
-    inventory_source: 'software_estimated'
-  });
-  await fsInvBatch.commit();
-
-  // Firestore Multi-Machine Aggregation
-  const fsInvScoped = await getInventoryAnalytics(db, {
-    machineIds: ['CFX-INV-01', 'CFX-INV-02'],
-    forceSource: 'firestore'
-  });
-  const fsMilkScoped = fsInvScoped.find((i) => i.ingredient === 'milk');
-  const fsCoffeeScoped = fsInvScoped.find((i) => i.ingredient === 'coffee');
-  assert.strictEqual(fsMilkScoped?.current_balance, 100, 'Firestore multi-machine milk sums 60 + 40 = 100');
-  assert.strictEqual(fsCoffeeScoped?.current_balance, 80, 'Firestore multi-machine coffee sums 50 + 30 = 80');
-  const fsVanillaScoped = fsInvScoped.find((i) => i.ingredient === 'vanilla');
-  assert.strictEqual(fsVanillaScoped?.current_balance, null, 'Unrecorded ingredient in Firestore returns null, never 100');
-  console.log('   PASS [Firestore]: Firestore multi-machine inventory aggregation verified (100 milk, 80 coffee, null unrecorded).');
 
   // -------------------------------------------------------------------------
   // 5. Phase 2.9.4.1 Analytics Regressions: M-3, L-1 (weekly), L-4 (over-refund)

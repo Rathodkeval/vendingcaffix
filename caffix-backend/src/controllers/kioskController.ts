@@ -1,8 +1,14 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { getDB } from '../config/db';
-import { getAuthoritativeMachineState, getAuthoritativeMachinesList } from '../utils/firebase';
-import { ServiceUnavailableError } from '../utils/errors';
+import {
+  getAuthoritativeMachineState,
+  getAuthoritativeMachinesList,
+  getAuthoritativeMachineProducts
+} from '../utils/firebase';
+import { AuthRequest, assertMachineOwnershipOrAdmin } from '../middleware/auth';
+import { ServiceUnavailableError, ForbiddenError } from '../utils/errors';
+import { setNoStoreHeaders } from '../utils/cache';
 import {
   getJwtSecret,
   constantTimeEqual,
@@ -191,6 +197,55 @@ export const verifyKiosk = async (req: Request, res: Response, next: NextFunctio
       machine_id: machine.id,
       machine_name: machine.machine_name,
       token
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Combined read-only kiosk synchronization endpoint (`GET /api/kiosk/sync`).
+ * Returns both machine products (with per-machine price/availability overrides) and
+ * machine status/maintenance from a single authoritative Firestore machine document read.
+ */
+export const getKioskSync = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  const db = getDB();
+  try {
+    const queryMachineId = typeof req.query.machine_id === 'string' ? req.query.machine_id.trim() : '';
+    const tokenMachineId = req.user?.machine_id || '';
+
+    if (req.user?.role === 'kiosk' && tokenMachineId && queryMachineId && queryMachineId !== tokenMachineId) {
+      return next(new ForbiddenError(`Kiosk session bound to ${tokenMachineId} cannot query status for ${queryMachineId}`));
+    }
+
+    const machineId = queryMachineId || tokenMachineId || 'CFX-MC-01';
+    const machine = await assertMachineOwnershipOrAdmin(req.user, machineId);
+    const products = await getAuthoritativeMachineProducts(
+      machine.id,
+      db,
+      (machine as any)._remoteMachine
+    );
+
+    setNoStoreHeaders(res);
+    res.status(200).json({
+      status: 'success',
+      data: {
+        products,
+        machine_status: {
+          machine_id: machine.id,
+          name: machine.machine_name,
+          location: machine.location,
+          desired_mode: machine.desired_mode,
+          connection_status: machine.connection_status,
+          status: machine.status,
+          maintenance: machine.desired_mode === 'MAINTENANCE',
+          last_seen: machine.last_seen
+        }
+      }
     });
   } catch (error) {
     next(error);

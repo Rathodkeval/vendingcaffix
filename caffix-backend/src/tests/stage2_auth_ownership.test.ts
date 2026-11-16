@@ -294,17 +294,6 @@ async function runStage2Tests() {
     );
     assert.strictEqual(forbiddenMode.status, 403, 'Customer A PATCH /machines/CFX-MC-03/status must return 403');
 
-    const forbiddenInv = await api('GET', '/machines/CFX-MC-03/inventory', undefined, tokenA);
-    assert.strictEqual(forbiddenInv.status, 403, 'Customer A GET /machines/CFX-MC-03/inventory must return 403');
-
-    const forbiddenRefill = await api(
-      'POST',
-      '/machines/CFX-MC-03/refill',
-      { ingredient: 'ALL' },
-      tokenA
-    );
-    assert.strictEqual(forbiddenRefill.status, 403, 'Customer A POST /machines/CFX-MC-03/refill must return 403');
-
     const forbiddenStatus = await api(
       'GET',
       '/machine-status?machine_id=CFX-MC-03',

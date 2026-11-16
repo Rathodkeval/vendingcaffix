@@ -19,6 +19,7 @@ import {
   getRequiredCronSecret,
   isVercelProduction
 } from '../utils/security';
+import { runAutoRefundSweep } from '../services/autoRefundService';
 import logger from '../utils/logger';
 
 export interface ReconciliationSummary {
@@ -457,6 +458,36 @@ export const reconcilePendingOrders = async (
   try {
     const summary = await runPendingOrderReconciliation({
       maxAgeMinutes: req.query?.maxAgeMinutes ? Number(req.query.maxAgeMinutes) : undefined,
+      limit: req.query?.limit ? Number(req.query.limit) : undefined
+    });
+
+    res.status(200).json({
+      status: 'success',
+      data: summary
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const reconcileAutoRefunds = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const expiryMinutes = req.query?.queuedExpiryMinutes
+      ? Number(req.query.queuedExpiryMinutes)
+      : undefined;
+    const summary = await runAutoRefundSweep({
+      queuedExpiryMs:
+        expiryMinutes && Number.isFinite(expiryMinutes) && expiryMinutes > 0
+          ? expiryMinutes * 60_000
+          : undefined,
+      machineId:
+        typeof req.query?.machine_id === 'string' && req.query.machine_id.trim()
+          ? req.query.machine_id.trim()
+          : undefined,
       limit: req.query?.limit ? Number(req.query.limit) : undefined
     });
 

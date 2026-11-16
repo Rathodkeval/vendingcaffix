@@ -336,7 +336,7 @@ async function runWave37Tests() {
     assert.strictEqual(existingListRes.data.data[0].location, 'Mumbai Terminal 2 Gate 44');
     assert.strictEqual(existingListRes.data.data[0].owner_id, 'usr_real_owner_99');
     assert.strictEqual(existingListRes.data.data[0].desired_mode, 'MAINTENANCE');
-    assert.deepStrictEqual(existingListRes.data.data[0].estimated_inventory, originalInventory);
+    assert.strictEqual(existingListRes.data.data[0].estimated_inventory, undefined);
 
     const existingProductsRes = await api('GET', '/products?machine_id=CFX-MC-01');
     assert.strictEqual(existingProductsRes.status, 200);
@@ -371,7 +371,7 @@ async function runWave37Tests() {
     const previewMachines = previewFs.collections.get('machines');
     assert.ok(previewMachines && previewMachines.size >= 4, 'Preview must still seed configured default machines');
     assert.strictEqual(previewMachines.get('CFX-MC-01')?.location, 'Delhi Airport T3');
-    assert.strictEqual(previewMachines.get('CFX-MC-01')?.estimated_inventory?.milk_level, 92);
+    assert.strictEqual(previewMachines.get('CFX-MC-01')?.estimated_inventory, undefined);
     assert.ok(previewMachines.has('CFX-MC-02'));
     assert.ok(previewMachines.has('CFX-MC-03'));
     assert.ok(previewMachines.has('CFX-MC-04'));

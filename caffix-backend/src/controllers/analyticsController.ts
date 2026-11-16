@@ -9,7 +9,6 @@ import {
   getTimeSeriesAnalytics,
   getMachineRevenueAnalytics,
   getProductSalesAnalytics,
-  getInventoryAnalytics,
   getRefundsAnalytics,
   AnalyticsScopeOptions,
   TimeSeriesInterval
@@ -182,27 +181,6 @@ export const getProducts = async (
   try {
     const { db, options } = await resolveAuthorizedScope(req);
     const data = await getProductSalesAnalytics(db, options);
-    res.status(200).json({
-      status: 'success',
-      data
-    });
-  } catch (err) {
-    next(err);
-  }
-};
-
-/**
- * GET /api/analytics/inventory
- * Ingredient consumption, refills, waste, adjustments, and current balance.
- */
-export const getInventory = async (
-  req: AuthRequest,
-  res: Response,
-  next: NextFunction
-): Promise<void> => {
-  try {
-    const { db, options } = await resolveAuthorizedScope(req);
-    const data = await getInventoryAnalytics(db, options);
     res.status(200).json({
       status: 'success',
       data

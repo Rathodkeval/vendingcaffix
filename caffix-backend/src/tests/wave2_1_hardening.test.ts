@@ -115,10 +115,9 @@ async function runWave21HardeningTests() {
     assert.strictEqual(adminLogin.status, 200);
     const adminToken = adminLogin.data.token;
 
-    // Ensure CFX-MC-01 and CFX-MC-02 are RUNNING and refilled
+    // Ensure CFX-MC-01 and CFX-MC-02 are RUNNING
     for (const mId of ['CFX-MC-01', 'CFX-MC-02']) {
       await api('PATCH', `/machines/${mId}/status`, { desired_mode: 'RUNNING' }, { Authorization: `Bearer ${adminToken}` });
-      await api('POST', `/machines/${mId}/refill`, { ingredient: 'ALL' }, { Authorization: `Bearer ${adminToken}` });
     }
 
     const mc1Row = await db.get('SELECT kiosk_token FROM machines WHERE id = ?', ['CFX-MC-01']);
@@ -310,7 +309,7 @@ async function runWave21HardeningTests() {
       api('GET', '/machines', undefined, { Authorization: `Bearer ${kioskAdminToken}` }),
       api('PUT', '/products/1/price', { price: 199, machine_id: 'CFX-MC-02' }, { Authorization: `Bearer ${kioskAdminToken}` }),
       api('PATCH', '/machines/CFX-MC-02/status', { desired_mode: 'MAINTENANCE' }, { Authorization: `Bearer ${kioskAdminToken}` }),
-      api('POST', '/machines/CFX-MC-02/refill', { ingredient: 'ALL' }, { Authorization: `Bearer ${kioskAdminToken}` }),
+      api('GET', '/machines/CFX-MC-02/products', undefined, { Authorization: `Bearer ${kioskAdminToken}` }),
       api('GET', '/orders?machine_id=CFX-MC-02', undefined, { Authorization: `Bearer ${kioskAdminToken}` }),
       api('GET', '/orders/CFX-90000002', undefined, { Authorization: `Bearer ${kioskAdminToken}` }),
       api('PUT', '/orders/CFX-90000002/status', { status: 'COMPLETED' }, { Authorization: `Bearer ${kioskAdminToken}` }),

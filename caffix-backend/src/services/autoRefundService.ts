@@ -1,0 +1,941 @@
+import crypto from 'crypto';
+import {
+  getDB
+} from '../config/db';
+import {
+  BadRequestError,
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  ServiceUnavailableError
+} from '../utils/errors';
+import {
+  acquireReconciliationLeaseInFirebase,
+  computeConnectionStatus,
+  ensureFirebaseReady,
+  getAuthoritativeMachineState,
+  getAuthoritativeOrderById,
+  getAuthoritativeOrders,
+  getFirestoreInstance,
+  isFirestoreActive,
+  releaseReconciliationLeaseInFirebase,
+  updateSyncedFirebaseOrder
+} from '../utils/firebase';
+import { executeGatewayRefund, GatewayRefundResponse } from '../utils/razorpayRefundClient';
+import {
+  RefundRecord,
+  RefundSource,
+  calculateRemainingRefundableBalance,
+  createPendingRefundReservation,
+  markRefundFailed,
+  markRefundProcessed
+} from '../utils/refunds';
+import logger from '../utils/logger';
+
+export const DEFAULT_AUTO_REFUND_QUEUED_EXPIRY_MINUTES = 15;
+export const MIN_AUTO_REFUND_QUEUED_EXPIRY_MINUTES = 1;
+export const MAX_AUTO_REFUND_QUEUED_EXPIRY_MINUTES = 1440; // 24 hours
+
+export type AutoRefundTriggerReason =
+  | 'CONFIRMED_PRE_DISPENSE_FAILURE'
+  | 'STALE_QUEUED_EXPIRED';
+
+export type AutoRefundSkipReason =
+  | 'NOT_PAID'
+  | 'MISSING_MACHINE_ID'
+  | 'UNVERIFIED_PAYMENT'
+  | 'ALREADY_DISPENSED'
+  | 'UNCERTAIN_DISPENSE_IN_PROGRESS'
+  | 'UNCERTAIN_DISPENSE_OUTCOME'
+  | 'ALREADY_REFUNDED_OR_PENDING'
+  | 'NOT_EXPIRED_YET'
+  | 'INVALID_TIMESTAMP'
+  | 'NO_REFUNDABLE_BALANCE';
+
+export interface AutoRefundEligibilityResult {
+  eligible: boolean;
+  triggerReason?: AutoRefundTriggerReason;
+  skipReason?: AutoRefundSkipReason;
+  needsExpiryTransition?: boolean;
+  details: string;
+}
+
+export interface RefundTransactionExecutionParams {
+  order: any;
+  requestedPaise: number;
+  reason: string;
+  notes?: string | null;
+  initiatedBy: string;
+  source: RefundSource;
+  idempotencyKey: string;
+}
+
+export type RefundTransactionOutcome =
+  | { outcome: 'replay'; refund: RefundRecord; order: any }
+  | { outcome: 'processed'; refund: RefundRecord; order: any; gateway: GatewayRefundResponse }
+  | { outcome: 'pending'; refund: RefundRecord; order: any; gateway: GatewayRefundResponse }
+  | { outcome: 'timeout'; refund: RefundRecord; order: any; gateway: GatewayRefundResponse }
+  | { outcome: 'mismatch'; refund: RefundRecord; order: any; gateway: GatewayRefundResponse }
+  | { outcome: 'failed'; refund: RefundRecord; order: any; gateway: GatewayRefundResponse };
+
+export interface AutoRefundSweepOptions {
+  queuedExpiryMs?: number;
+  nowMs?: number;
+  machineId?: string;
+  limit?: number;
+}
+
+export interface AutoRefundSweepSummary {
+  scanned: number;
+  eligible: number;
+  expired_queued: number;
+  refunded_processed: number;
+  refund_pending: number;
+  refund_failed: number;
+  replayed: number;
+  skipped_dispensing: number;
+  skipped_uncertain: number;
+  skipped_dispensed: number;
+  skipped_unverified: number;
+  skipped_already_refunded: number;
+  skipped_not_expired: number;
+  skipped_other: number;
+  errors: number;
+  skipped_due_to_active_run?: boolean;
+  expiry_ms: number;
+  cutoff_iso: string;
+}
+
+export function buildAutoRefundIdempotencyKey(orderId: string): string {
+  return `auto_refund_${String(orderId).trim()}`;
+}
+
+export function resolveAutoRefundQueuedExpiryMs(overrideMs?: number): number {
+  if (overrideMs !== undefined && Number.isFinite(overrideMs) && overrideMs >= 1000) {
+    return Math.floor(overrideMs);
+  }
+  const rawMinutes = Number(process.env.AUTO_REFUND_QUEUED_EXPIRY_MINUTES);
+  const minutes =
+    Number.isFinite(rawMinutes) && rawMinutes > 0
+      ? Math.min(
+          MAX_AUTO_REFUND_QUEUED_EXPIRY_MINUTES,
+          Math.max(MIN_AUTO_REFUND_QUEUED_EXPIRY_MINUTES, Math.floor(rawMinutes))
+        )
+      : DEFAULT_AUTO_REFUND_QUEUED_EXPIRY_MINUTES;
+  return minutes * 60_000;
+}
+
+export function computeOrderExpiresAtIso(
+  createdAtIso: string,
+  expiryMs: number = resolveAutoRefundQueuedExpiryMs()
+): string {
+  const baseMs = Date.parse(createdAtIso);
+  const resolvedBase = Number.isNaN(baseMs) ? Date.now() : baseMs;
+  return new Date(resolvedBase + expiryMs).toISOString();
+}
+
+export function isOfflineMachineOrderBlockingEnabled(): boolean {
+  return String(process.env.BLOCK_OFFLINE_MACHINE_ORDERS || '').trim().toLowerCase() === 'true';
+}
+
+/**
+ * Core 4-step transactional refund runner shared by both manual Admin refunds
+ * (`POST /api/orders/:id/refund`) and safe automated dispense-failure refunds.
+ */
+export async function executeOrderRefundTransaction(
+  db: any,
+  params: RefundTransactionExecutionParams
+): Promise<RefundTransactionOutcome> {
+  const { order, requestedPaise, reason, notes, initiatedBy, source, idempotencyKey } = params;
+
+  // Step 1: Reserve balance atomically BEFORE contacting Razorpay
+  const reservation = await createPendingRefundReservation(db, {
+    orderId: order.id,
+    amount_paise: requestedPaise,
+    reason,
+    notes: notes ?? null,
+    initiated_by: initiatedBy,
+    source,
+    idempotency_key: idempotencyKey
+  });
+
+  if (reservation.isReplay) {
+    const latestOrder = (await getAuthoritativeOrderById(order.id, db)) || reservation.order;
+    return {
+      outcome: 'replay',
+      refund: reservation.refund,
+      order: latestOrder
+    };
+  }
+
+  // Step 2: Invoke Razorpay Refunds API
+  const gatewayResult = await executeGatewayRefund({
+    orderId: order.id,
+    paymentId: String(order.razorpay_payment_id),
+    amountPaise: requestedPaise,
+    receipt: reservation.refund.id,
+    notes: {
+      order_id: order.id,
+      refund_id: reservation.refund.id,
+      initiated_by: initiatedBy,
+      source
+    }
+  });
+
+  // Step 3: Validate exact INR amount & currency consistency
+  const isGatewayAmountValid =
+    Number.isInteger(gatewayResult.amountPaise) &&
+    Number.isSafeInteger(gatewayResult.amountPaise) &&
+    gatewayResult.amountPaise > 0 &&
+    gatewayResult.amountPaise === requestedPaise;
+  const isGatewayCurrencyValid = String(gatewayResult.currency || '').toUpperCase() === 'INR';
+
+  if (
+    gatewayResult.amountMismatch ||
+    gatewayResult.currencyMismatch ||
+    !isGatewayAmountValid ||
+    !isGatewayCurrencyValid
+  ) {
+    logger.error(
+      `[CRITICAL FINANCIAL EXCEPTION] Gateway refund discrepancy for order ${order.id} (refund: ${reservation.refund.id}): requested=${requestedPaise} INR, reportedAmount=${gatewayResult.amountPaise}, reportedCurrency=${gatewayResult.currency}, rpRefundId=${gatewayResult.razorpayRefundId || 'none'}`
+    );
+    return {
+      outcome: 'mismatch',
+      refund: reservation.refund,
+      order: reservation.order,
+      gateway: gatewayResult
+    };
+  }
+
+  // Step 4: Settle reservation based on verified gateway response
+  if (gatewayResult.success && gatewayResult.status === 'PROCESSED') {
+    const settlement = await markRefundProcessed(db, {
+      refundId: reservation.refund.id,
+      razorpay_refund_id: gatewayResult.razorpayRefundId,
+      processed_at: gatewayResult.processedAt
+    });
+    return {
+      outcome: 'processed',
+      refund: settlement.refund,
+      order: settlement.order,
+      gateway: gatewayResult
+    };
+  }
+
+  if (gatewayResult.success && gatewayResult.status === 'PENDING') {
+    return {
+      outcome: 'pending',
+      refund: reservation.refund,
+      order: reservation.order,
+      gateway: gatewayResult
+    };
+  }
+
+  if (gatewayResult.isTimeout) {
+    return {
+      outcome: 'timeout',
+      refund: reservation.refund,
+      order: reservation.order,
+      gateway: gatewayResult
+    };
+  }
+
+  const failedSettlement = await markRefundFailed(db, {
+    refundId: reservation.refund.id,
+    error_code: gatewayResult.errorCode || 'GATEWAY_REJECTED',
+    error_description: gatewayResult.errorDescription || 'Gateway rejected refund'
+  });
+
+  return {
+    outcome: 'failed',
+    refund: failedSettlement.refund,
+    order: failedSettlement.order,
+    gateway: gatewayResult
+  };
+}
+
+/**
+ * Evaluates whether an order qualifies for an automatic refund under strict Phase H.2 rules:
+ * - Never refunds uncaptured/unverified payments
+ * - Never refunds orders in DISPENSING/CLAIMING or with uncertain dispense outcomes
+ * - Never refunds already DISPENSED/COMPLETED orders
+ * - Refunds ONLY confirmed pre-dispense failures or stale unclaimed QUEUED orders past expiry
+ */
+export function evaluateAutoRefundEligibility(
+  order: any,
+  nowMs: number = Date.now(),
+  queuedExpiryMs: number = resolveAutoRefundQueuedExpiryMs()
+): AutoRefundEligibilityResult {
+  if (!order || order.is_malformed) {
+    return {
+      eligible: false,
+      skipReason: 'MISSING_MACHINE_ID',
+      details: 'Order is missing or malformed.'
+    };
+  }
+
+  const machineId = order.machine_id ? String(order.machine_id).trim() : '';
+  if (!machineId || machineId.toLowerCase() === 'undefined' || machineId.toLowerCase() === 'null') {
+    return {
+      eligible: false,
+      skipReason: 'MISSING_MACHINE_ID',
+      details: 'Order has no valid machine_id.'
+    };
+  }
+
+  const status = String(order.status || '').toUpperCase();
+  if (status !== 'PAID') {
+    if (status === 'COMPLETED') {
+      return {
+        eligible: false,
+        skipReason: 'ALREADY_DISPENSED',
+        details: 'Completed orders are never auto-refunded.'
+      };
+    }
+    return {
+      eligible: false,
+      skipReason: 'NOT_PAID',
+      details: `Order status "${status}" is not eligible for auto-refund.`
+    };
+  }
+
+  const dispenseStatus = String(order.dispense_status || 'PENDING').toUpperCase();
+  const dispenseOutcome = String(order.dispense_outcome || '').toUpperCase();
+  const failureStage = String(order.failure_stage || '').toUpperCase();
+
+  // Strictly block already-dispensed orders
+  if (order.dispensed === true || dispenseStatus === 'DISPENSED' || dispenseOutcome === 'DISPENSED') {
+    return {
+      eligible: false,
+      skipReason: 'ALREADY_DISPENSED',
+      details: 'Order was already dispensed; auto-refund forbidden.'
+    };
+  }
+
+  // Strictly block active or interrupted dispensing states (physical outcome uncertain)
+  if (dispenseStatus === 'CLAIMING' || dispenseStatus === 'DISPENSING') {
+    return {
+      eligible: false,
+      skipReason: 'UNCERTAIN_DISPENSE_IN_PROGRESS',
+      details: `Order dispense_status is "${dispenseStatus}"; physical outcome uncertain.`
+    };
+  }
+
+  if (dispenseOutcome === 'UNCERTAIN' || failureStage === 'DURING_DISPENSE') {
+    return {
+      eligible: false,
+      skipReason: 'UNCERTAIN_DISPENSE_OUTCOME',
+      details: 'Dispense failed after pour/dispensing started; requires manual investigation before refund.'
+    };
+  }
+
+  // Financial verification (captured payment + no existing refund or pending hold)
+  const totalRefunded = Number(order.total_refunded_amount_paise || 0);
+  const pendingRefund = Number(order.pending_refund_amount_paise || 0);
+  const refundStatus = String(order.refund_status || 'NONE').toUpperCase();
+  if (totalRefunded > 0 || pendingRefund > 0 || refundStatus === 'FULL' || refundStatus === 'PENDING' || refundStatus === 'PARTIAL') {
+    return {
+      eligible: false,
+      skipReason: 'ALREADY_REFUNDED_OR_PENDING',
+      details: `Order already has refund activity (status=${refundStatus}, refunded=${totalRefunded}, pending=${pendingRefund}).`
+    };
+  }
+
+  const balance = calculateRemainingRefundableBalance(order);
+  if (
+    !balance.isExactCaptureKnown ||
+    order.captured_amount_paise === null ||
+    order.captured_amount_paise === undefined ||
+    !order.razorpay_payment_id
+  ) {
+    return {
+      eligible: false,
+      skipReason: 'UNVERIFIED_PAYMENT',
+      details: 'Exact captured payment amount or razorpay_payment_id is missing.'
+    };
+  }
+
+  if (balance.remainingRefundablePaise <= 0) {
+    return {
+      eligible: false,
+      skipReason: 'NO_REFUNDABLE_BALANCE',
+      details: 'Order has no remaining refundable balance.'
+    };
+  }
+
+  // Path A: Explicitly confirmed pre-dispense failure or already atomically expired
+  if (dispenseStatus === 'FAILED' || dispenseStatus === 'EXPIRED') {
+    const hasStartedMarkers = Boolean(order.dispense_started_at || order.claimed_at);
+    const hasExplicitPreDispenseProof =
+      dispenseOutcome === 'NOT_DISPENSED' ||
+      failureStage === 'PRE_DISPENSE' ||
+      dispenseStatus === 'EXPIRED';
+
+    if (hasStartedMarkers && !hasExplicitPreDispenseProof) {
+      return {
+        eligible: false,
+        skipReason: 'UNCERTAIN_DISPENSE_OUTCOME',
+        details: 'Order failed after hardware claim without conclusive pre-dispense confirmation.'
+      };
+    }
+
+    return {
+      eligible: true,
+      triggerReason: dispenseStatus === 'EXPIRED' ? 'STALE_QUEUED_EXPIRED' : 'CONFIRMED_PRE_DISPENSE_FAILURE',
+      needsExpiryTransition: false,
+      details: `Order ${order.id} confirmed non-dispensed (${dispenseStatus}).`
+    };
+  }
+
+  // Path B: Unclaimed QUEUED order past expiry TTL
+  if (dispenseStatus === 'QUEUED') {
+    if (order.claimed_at || order.dispense_started_at) {
+      return {
+        eligible: false,
+        skipReason: 'UNCERTAIN_DISPENSE_OUTCOME',
+        details: 'QUEUED order has claim/start timestamp and cannot be auto-expired safely.'
+      };
+    }
+
+    const explicitExpiresMs = order.expires_at ? Date.parse(String(order.expires_at)) : NaN;
+    const createdMs = order.created_at ? Date.parse(String(order.created_at)) : NaN;
+
+    let isExpired = false;
+    if (!Number.isNaN(explicitExpiresMs) && queuedExpiryMs === resolveAutoRefundQueuedExpiryMs()) {
+      isExpired = nowMs >= explicitExpiresMs;
+    } else if (!Number.isNaN(createdMs)) {
+      isExpired = nowMs - createdMs >= queuedExpiryMs;
+    } else {
+      return {
+        eligible: false,
+        skipReason: 'INVALID_TIMESTAMP',
+        details: 'Order lacks a valid created_at timestamp for safe expiry evaluation.'
+      };
+    }
+
+    if (!isExpired) {
+      return {
+        eligible: false,
+        skipReason: 'NOT_EXPIRED_YET',
+        details: 'QUEUED order has not yet reached expiry threshold.'
+      };
+    }
+
+    return {
+      eligible: true,
+      triggerReason: 'STALE_QUEUED_EXPIRED',
+      needsExpiryTransition: true,
+      details: `Unclaimed QUEUED order ${order.id} exceeded expiry threshold.`
+    };
+  }
+
+  return {
+    eligible: false,
+    skipReason: 'UNCERTAIN_DISPENSE_OUTCOME',
+    details: `Dispense state "${dispenseStatus}" is not eligible for auto-refund.`
+  };
+}
+
+/**
+ * Atomically transitions an eligible unclaimed stale QUEUED order -> EXPIRED inside Firestore
+ * (or local DB fallback) BEFORE refund reservation, ensuring RPi claim transactions and
+ * auto-refund expiry cannot race on the same order.
+ */
+async function lockAndVerifyOrderForAutoRefund(
+  db: any,
+  orderId: string,
+  nowMs: number,
+  queuedExpiryMs: number
+): Promise<{
+  proceed: boolean;
+  order?: any;
+  eligibility?: AutoRefundEligibilityResult;
+  didExpireQueued?: boolean;
+}> {
+  const nowIso = new Date(nowMs).toISOString();
+
+  if (isFirestoreActive()) {
+    const firestore = getFirestoreInstance()!;
+    const txRes = await firestore.runTransaction(async (tx) => {
+      const orderRef = firestore.collection('orders').doc(orderId);
+      const snap = await tx.get(orderRef);
+      if (!snap.exists) {
+        return {
+          proceed: false,
+          eligibility: {
+            eligible: false,
+            skipReason: 'NOT_PAID' as AutoRefundSkipReason,
+            details: `Order ${orderId} not found in Firestore.`
+          },
+          didExpireQueued: false
+        };
+      }
+
+      const liveOrder = { ...(snap.data() || {}), id: orderId };
+      const check = evaluateAutoRefundEligibility(liveOrder, nowMs, queuedExpiryMs);
+      if (!check.eligible) {
+        return { proceed: false, order: liveOrder, eligibility: check, didExpireQueued: false };
+      }
+
+      if (check.needsExpiryTransition) {
+        const updates = {
+          dispense_status: 'EXPIRED',
+          dispensed: false,
+          dispense_outcome: 'NOT_DISPENSED',
+          failure_stage: 'PRE_DISPENSE',
+          failure_reason: 'QUEUED_ORDER_EXPIRED_UNCLAIMED',
+          expired_at: nowIso,
+          updated_at: nowIso
+        };
+        tx.set(orderRef, updates, { merge: true });
+        return {
+          proceed: true,
+          order: { ...liveOrder, ...updates },
+          eligibility: check,
+          didExpireQueued: true
+        };
+      }
+
+      return { proceed: true, order: liveOrder, eligibility: check, didExpireQueued: false };
+    });
+
+    if (txRes.order) {
+      updateSyncedFirebaseOrder(orderId, txRes.order);
+      if (txRes.didExpireQueued && db?.run) {
+        await db.run('UPDATE orders SET dispense_status = ? WHERE id = ?', ['EXPIRED', orderId]).catch(() => {});
+      }
+    }
+    return txRes;
+  }
+
+  // Local DB / MockDatabase fallback
+  const localOrder = await getAuthoritativeOrderById(orderId, db);
+  if (!localOrder) {
+    return {
+      proceed: false,
+      eligibility: {
+        eligible: false,
+        skipReason: 'NOT_PAID',
+        details: `Order ${orderId} not found.`
+      }
+    };
+  }
+
+  const check = evaluateAutoRefundEligibility(localOrder, nowMs, queuedExpiryMs);
+  if (!check.eligible) {
+    return { proceed: false, order: localOrder, eligibility: check, didExpireQueued: false };
+  }
+
+  if (check.needsExpiryTransition && db?.run) {
+    const upd = await db.run(
+      `UPDATE orders SET dispense_status = 'EXPIRED'
+       WHERE id = ? AND status = 'PAID' AND dispense_status = 'QUEUED'
+         AND dispense_started_at IS NULL AND dispensed_at IS NULL`,
+      [orderId]
+    );
+    if (!upd || Number(upd.changes ?? 0) === 0) {
+      const latest = await getAuthoritativeOrderById(orderId, db);
+      const recheck = evaluateAutoRefundEligibility(latest, nowMs, queuedExpiryMs);
+      return { proceed: false, order: latest, eligibility: recheck, didExpireQueued: false };
+    }
+    const merged = {
+      ...localOrder,
+      dispense_status: 'EXPIRED',
+      dispensed: false,
+      dispense_outcome: 'NOT_DISPENSED',
+      failure_stage: 'PRE_DISPENSE',
+      failure_reason: 'QUEUED_ORDER_EXPIRED_UNCLAIMED',
+      expired_at: nowIso,
+      updated_at: nowIso
+    };
+    updateSyncedFirebaseOrder(orderId, merged);
+    return { proceed: true, order: merged, eligibility: check, didExpireQueued: true };
+  }
+
+  return { proceed: true, order: localOrder, eligibility: check, didExpireQueued: false };
+}
+
+/**
+ * Safely processes an automatic full refund for a single order if and only if
+ * it satisfies all Phase H.2 eligibility invariants inside an atomic transaction.
+ */
+export async function processAutoRefundForOrder(
+  db: any,
+  orderId: string,
+  options: { nowMs?: number; queuedExpiryMs?: number } = {}
+): Promise<{
+  status: 'refunded' | 'pending' | 'failed' | 'replayed' | 'skipped' | 'mismatch';
+  didExpireQueued: boolean;
+  skipReason?: AutoRefundSkipReason;
+  details: string;
+  refund?: RefundRecord;
+  order?: any;
+}> {
+  const nowMs = Number.isFinite(options.nowMs) ? Number(options.nowMs) : Date.now();
+  const queuedExpiryMs = resolveAutoRefundQueuedExpiryMs(options.queuedExpiryMs);
+
+  const locked = await lockAndVerifyOrderForAutoRefund(db, orderId, nowMs, queuedExpiryMs);
+  if (!locked.proceed || !locked.order || !locked.eligibility) {
+    return {
+      status: 'skipped',
+      didExpireQueued: false,
+      skipReason: locked.eligibility?.skipReason,
+      details: locked.eligibility?.details || 'Order not eligible for auto-refund.',
+      order: locked.order
+    };
+  }
+
+  const order = locked.order;
+  const triggerReason = locked.eligibility.triggerReason!;
+  const balance = calculateRemainingRefundableBalance(order);
+  const amountPaise = balance.remainingRefundablePaise;
+  const idempotencyKey = buildAutoRefundIdempotencyKey(order.id);
+  const reason =
+    triggerReason === 'STALE_QUEUED_EXPIRED'
+      ? 'auto_refund_queued_order_expired'
+      : 'auto_refund_dispense_failed_pre_dispense';
+
+  const execRes = await executeOrderRefundTransaction(db, {
+    order,
+    requestedPaise: amountPaise,
+    reason,
+    notes: order.failure_reason ? `Failure reason: ${order.failure_reason}` : locked.eligibility.details,
+    initiatedBy: 'system_auto_refund',
+    source: 'RECONCILIATION',
+    idempotencyKey
+  });
+
+  if (execRes.outcome === 'replay') {
+    return {
+      status: 'replayed',
+      didExpireQueued: Boolean(locked.didExpireQueued),
+      details: `Auto-refund idempotency replay for ${order.id} (status=${execRes.refund.status}).`,
+      refund: execRes.refund,
+      order: execRes.order
+    };
+  }
+  if (execRes.outcome === 'processed') {
+    logger.info(
+      `[Auto-Refund] Settled PROCESSED refund ${execRes.refund.id} (${amountPaise} paise) for order ${order.id} (machine ${order.machine_id}, reason=${triggerReason})`
+    );
+    return {
+      status: 'refunded',
+      didExpireQueued: Boolean(locked.didExpireQueued),
+      details: locked.eligibility.details,
+      refund: execRes.refund,
+      order: execRes.order
+    };
+  }
+  if (execRes.outcome === 'pending' || execRes.outcome === 'timeout') {
+    logger.warn(
+      `[Auto-Refund] Refund ${execRes.refund.id} held in PENDING (${execRes.outcome}) for order ${order.id} (machine ${order.machine_id})`
+    );
+    return {
+      status: 'pending',
+      didExpireQueued: Boolean(locked.didExpireQueued),
+      details: `Gateway refund ${execRes.outcome}; reservation held in PENDING.`,
+      refund: execRes.refund,
+      order: execRes.order
+    };
+  }
+  if (execRes.outcome === 'mismatch') {
+    return {
+      status: 'mismatch',
+      didExpireQueued: Boolean(locked.didExpireQueued),
+      details: 'Gateway refund amount/currency mismatch; reservation held in PENDING.',
+      refund: execRes.refund,
+      order: execRes.order
+    };
+  }
+
+  logger.warn(
+    `[Auto-Refund] Gateway rejected refund ${execRes.refund.id} for order ${order.id}: [${execRes.gateway.errorCode}] ${execRes.gateway.errorDescription}`
+  );
+  return {
+    status: 'failed',
+    didExpireQueued: Boolean(locked.didExpireQueued),
+    details: execRes.gateway.errorDescription || 'Gateway rejected refund request.',
+    refund: execRes.refund,
+    order: execRes.order
+  };
+}
+
+/**
+ * Records a machine-reported dispense outcome (`DISPENSING`, `DISPENSED`, `FAILED`, `EXPIRED`)
+ * inside an atomic transaction enforcing machine binding and refund-first exclusion, then invokes
+ * `processAutoRefundForOrder` ONLY when dispensing is conclusively confirmed not to have occurred.
+ */
+export async function reportMachineDispenseOutcome(
+  db: any,
+  params: {
+    orderId: string;
+    machineId: string;
+    dispenseStatus: 'DISPENSING' | 'DISPENSED' | 'FAILED' | 'EXPIRED';
+    failureStage?: 'PRE_DISPENSE' | 'DURING_DISPENSE';
+    failureReason?: string | null;
+    nowMs?: number;
+  }
+): Promise<{
+  order: any;
+  autoRefund?: Awaited<ReturnType<typeof processAutoRefundForOrder>>;
+}> {
+  const orderId = String(params.orderId || '').trim();
+  const machineId = String(params.machineId || '').trim();
+  const targetDispenseStatus = String(params.dispenseStatus || '').toUpperCase() as
+    | 'DISPENSING'
+    | 'DISPENSED'
+    | 'FAILED'
+    | 'EXPIRED';
+  const nowIso = new Date(params.nowMs ?? Date.now()).toISOString();
+
+  let committedOrder: any = null;
+
+  if (isFirestoreActive()) {
+    const firestore = getFirestoreInstance()!;
+    committedOrder = await firestore.runTransaction(async (tx) => {
+      const orderRef = firestore.collection('orders').doc(orderId);
+      const snap = await tx.get(orderRef);
+      if (!snap.exists) {
+        throw new NotFoundError(`Order with ID ${orderId} not found`);
+      }
+
+      const existing = { ...(snap.data() || {}), id: orderId } as any;
+      if (String(existing.machine_id || '').trim() !== machineId) {
+        throw new ForbiddenError(
+          `Machine ${machineId} cannot update dispense result for order ${orderId} belonging to ${existing.machine_id}`
+        );
+      }
+
+      const currentStatus = String(existing.status || 'PENDING').toUpperCase();
+      if (!['PAID', 'PREPARING', 'COMPLETED'].includes(currentStatus)) {
+        throw new ConflictError(`Cannot update dispense outcome for unpaid order ${orderId} (${currentStatus})`);
+      }
+
+      const currentDispense = String(existing.dispense_status || 'QUEUED').toUpperCase();
+      const refundStatus = String(existing.refund_status || 'NONE').toUpperCase();
+      const pendingRefund = Number(existing.pending_refund_amount_paise || 0);
+
+      if (targetDispenseStatus === 'DISPENSING') {
+        if (refundStatus === 'FULL' || pendingRefund > 0) {
+          throw new ConflictError(`Cannot claim order ${orderId}: refund already pending or completed`);
+        }
+        if (['DISPENSED', 'FAILED', 'EXPIRED', 'CANCELLED'].includes(currentDispense) || existing.dispensed === true) {
+          throw new ConflictError(`Cannot transition terminal order ${orderId} (${currentDispense}) to DISPENSING`);
+        }
+        const updates = {
+          dispense_status: 'DISPENSING',
+          claimed_by: machineId,
+          claimed_at: existing.claimed_at || nowIso,
+          dispense_started_at: existing.dispense_started_at || nowIso,
+          updated_at: nowIso
+        };
+        tx.set(orderRef, updates, { merge: true });
+        return { ...existing, ...updates };
+      }
+
+      if (targetDispenseStatus === 'DISPENSED') {
+        if (['FAILED', 'EXPIRED', 'CANCELLED'].includes(currentDispense)) {
+          throw new ConflictError(`Cannot mark terminal failed/expired order ${orderId} as DISPENSED`);
+        }
+        if (refundStatus === 'FULL' || pendingRefund > 0) {
+          throw new ConflictError(`Cannot mark refunded/pending-refund order ${orderId} as DISPENSED`);
+        }
+        const updates = {
+          dispense_status: 'DISPENSED',
+          dispensed: true,
+          dispense_outcome: 'DISPENSED',
+          dispensed_by: machineId,
+          dispensed_at: existing.dispensed_at || nowIso,
+          updated_at: nowIso
+        };
+        tx.set(orderRef, updates, { merge: true });
+        return { ...existing, ...updates };
+      }
+
+      // FAILED or EXPIRED
+      if (existing.dispensed === true || currentDispense === 'DISPENSED') {
+        throw new ConflictError(`Cannot mark already DISPENSED order ${orderId} as ${targetDispenseStatus}`);
+      }
+
+      const resolvedStage =
+        params.failureStage ||
+        (currentDispense === 'DISPENSING' || Boolean(existing.dispense_started_at)
+          ? 'DURING_DISPENSE'
+          : 'PRE_DISPENSE');
+
+      const resolvedOutcome =
+        resolvedStage === 'PRE_DISPENSE' ? 'NOT_DISPENSED' : 'UNCERTAIN';
+
+      const updates: any = {
+        dispense_status: targetDispenseStatus,
+        dispensed: false,
+        dispense_outcome: resolvedOutcome,
+        failure_stage: resolvedStage,
+        failure_reason: params.failureReason ? String(params.failureReason).trim() : null,
+        updated_at: nowIso
+      };
+      if (targetDispenseStatus === 'EXPIRED') {
+        updates.expired_at = existing.expired_at || nowIso;
+      }
+      tx.set(orderRef, updates, { merge: true });
+      return { ...existing, ...updates };
+    });
+
+    updateSyncedFirebaseOrder(orderId, committedOrder);
+    if (db?.run) {
+      await db.run('UPDATE orders SET dispense_status = ? WHERE id = ?', [committedOrder.dispense_status, orderId]).catch(() => {});
+    }
+  } else {
+    const existing = await getAuthoritativeOrderById(orderId, db);
+    if (!existing) {
+      throw new NotFoundError(`Order with ID ${orderId} not found`);
+    }
+    if (String(existing.machine_id || '').trim() !== machineId) {
+      throw new ForbiddenError(
+        `Machine ${machineId} cannot update dispense result for order ${orderId} belonging to ${existing.machine_id}`
+      );
+    }
+    const currentDispense = String(existing.dispense_status || 'QUEUED').toUpperCase();
+    const resolvedStage =
+      params.failureStage ||
+      (currentDispense === 'DISPENSING' || Boolean(existing.dispense_started_at)
+        ? 'DURING_DISPENSE'
+        : 'PRE_DISPENSE');
+    committedOrder = {
+      ...existing,
+      dispense_status: targetDispenseStatus,
+      dispensed: targetDispenseStatus === 'DISPENSED',
+      dispense_outcome:
+        targetDispenseStatus === 'DISPENSED'
+          ? 'DISPENSED'
+          : resolvedStage === 'PRE_DISPENSE'
+            ? 'NOT_DISPENSED'
+            : 'UNCERTAIN',
+      failure_stage: targetDispenseStatus === 'DISPENSED' ? undefined : resolvedStage,
+      failure_reason: params.failureReason ? String(params.failureReason).trim() : null,
+      updated_at: nowIso
+    };
+    await db.run('UPDATE orders SET dispense_status = ? WHERE id = ?', [targetDispenseStatus, orderId]).catch(() => {});
+    updateSyncedFirebaseOrder(orderId, committedOrder);
+  }
+
+  let autoRefund: Awaited<ReturnType<typeof processAutoRefundForOrder>> | undefined;
+  if (
+    (targetDispenseStatus === 'FAILED' || targetDispenseStatus === 'EXPIRED') &&
+    committedOrder.dispense_outcome === 'NOT_DISPENSED'
+  ) {
+    autoRefund = await processAutoRefundForOrder(db, orderId, { nowMs: params.nowMs });
+  }
+
+  const latestOrder = (await getAuthoritativeOrderById(orderId, db)) || committedOrder;
+  return { order: latestOrder, autoRefund };
+}
+
+/**
+ * Sweeps paid orders in Firestore / local mirror under a distributed lease, safely expiring
+ * unclaimed stale QUEUED orders and initiating idempotent Razorpay refunds ONLY for confirmed
+ * non-dispensed orders. Failures are isolated per order so one machine never blocks another.
+ */
+export async function runAutoRefundSweep(
+  options: AutoRefundSweepOptions = {}
+): Promise<AutoRefundSweepSummary> {
+  ensureFirebaseReady();
+  const db = getDB();
+  const nowMs = Number.isFinite(options.nowMs) ? Number(options.nowMs) : Date.now();
+  const expiryMs = resolveAutoRefundQueuedExpiryMs(options.queuedExpiryMs);
+  const cutoffIso = new Date(nowMs - expiryMs).toISOString();
+  const limit =
+    options.limit && Number.isFinite(options.limit) && options.limit > 0
+      ? Math.min(200, Math.floor(options.limit))
+      : 100;
+
+  const summary: AutoRefundSweepSummary = {
+    scanned: 0,
+    eligible: 0,
+    expired_queued: 0,
+    refunded_processed: 0,
+    refund_pending: 0,
+    refund_failed: 0,
+    replayed: 0,
+    skipped_dispensing: 0,
+    skipped_uncertain: 0,
+    skipped_dispensed: 0,
+    skipped_unverified: 0,
+    skipped_already_refunded: 0,
+    skipped_not_expired: 0,
+    skipped_other: 0,
+    errors: 0,
+    expiry_ms: expiryMs,
+    cutoff_iso: cutoffIso
+  };
+
+  const lease = await acquireReconciliationLeaseInFirebase();
+  if (!lease.acquired) {
+    summary.skipped_due_to_active_run = true;
+    return summary;
+  }
+
+  try {
+    const machineScope = options.machineId ? [String(options.machineId).trim()] : undefined;
+    const candidateOrders = await getAuthoritativeOrders(db, machineScope);
+    const paidOrders = candidateOrders
+      .filter((o) => String(o?.status || '').toUpperCase() === 'PAID')
+      .slice(0, limit);
+
+    summary.scanned = paidOrders.length;
+
+    for (const order of paidOrders) {
+      try {
+        const res = await processAutoRefundForOrder(db, order.id, {
+          nowMs,
+          queuedExpiryMs: expiryMs
+        });
+
+        if (res.didExpireQueued) {
+          summary.expired_queued += 1;
+        }
+
+        if (res.status === 'skipped') {
+          if (res.skipReason === 'UNCERTAIN_DISPENSE_IN_PROGRESS') summary.skipped_dispensing += 1;
+          else if (res.skipReason === 'UNCERTAIN_DISPENSE_OUTCOME') summary.skipped_uncertain += 1;
+          else if (res.skipReason === 'ALREADY_DISPENSED') summary.skipped_dispensed += 1;
+          else if (res.skipReason === 'UNVERIFIED_PAYMENT') summary.skipped_unverified += 1;
+          else if (res.skipReason === 'ALREADY_REFUNDED_OR_PENDING') summary.skipped_already_refunded += 1;
+          else if (res.skipReason === 'NOT_EXPIRED_YET') summary.skipped_not_expired += 1;
+          else summary.skipped_other += 1;
+          continue;
+        }
+
+        summary.eligible += 1;
+        if (res.status === 'refunded') summary.refunded_processed += 1;
+        else if (res.status === 'pending' || res.status === 'mismatch') summary.refund_pending += 1;
+        else if (res.status === 'failed') summary.refund_failed += 1;
+        else if (res.status === 'replayed') summary.replayed += 1;
+      } catch (err) {
+        summary.errors += 1;
+        logger.error(`[Auto-Refund Sweep] Error processing order ${order?.id}:`, err);
+      }
+    }
+
+    return summary;
+  } finally {
+    await releaseReconciliationLeaseInFirebase(lease.lockId);
+  }
+}
+
+export async function assertMachineOnlineIfGuardEnabled(
+  machineId: string,
+  db: any,
+  preloadedMachine?: any
+): Promise<void> {
+  if (!isOfflineMachineOrderBlockingEnabled()) {
+    return;
+  }
+  const machine = preloadedMachine || (await getAuthoritativeMachineState(machineId, db));
+  const connStatus = machine?.connection_status || computeConnectionStatus(machine?.last_seen);
+  if (connStatus === 'OFFLINE') {
+    throw new ServiceUnavailableError(
+      `Machine ${machineId} is currently offline (no recent Raspberry Pi heartbeat)`
+    );
+  }
+}

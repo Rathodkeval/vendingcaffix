@@ -83,8 +83,6 @@ async function runPhase292ApiTests() {
   await db.run('PRAGMA foreign_keys = OFF');
   await db.run('DELETE FROM refunds');
   await db.run('DELETE FROM orders');
-  await db.run('DELETE FROM inventory_ledger');
-  await db.run('DELETE FROM inventory');
   await db.run('DELETE FROM machine_products');
   await db.run('DELETE FROM machines');
   await db.run('PRAGMA foreign_keys = ON');
@@ -104,8 +102,7 @@ async function runPhase292ApiTests() {
     location: 'Main Lobby',
     owner_id: 'usr_owner_1',
     status: 'online',
-    desired_mode: 'RUNNING',
-    inventory: { milk_level: 80, coffee_level: 90 }
+    desired_mode: 'RUNNING'
   });
   await firestore.collection('machines').doc('CFX-MC-02').set({
     id: 'CFX-MC-02',
@@ -113,8 +110,7 @@ async function runPhase292ApiTests() {
     location: 'North Wing',
     owner_id: 'usr_owner_2',
     status: 'online',
-    desired_mode: 'RUNNING',
-    inventory: { milk_level: 70, coffee_level: 85 }
+    desired_mode: 'RUNNING'
   });
 
   // Start HTTP test server
@@ -177,13 +173,6 @@ async function runPhase292ApiTests() {
     await db.run(`
       INSERT INTO refunds (id, order_id, machine_id, razorpay_payment_id, razorpay_refund_id, amount_paise, status, reason, initiated_by, source, idempotency_key, created_at, updated_at)
       VALUES ('ref_102', 'ord_102', 'CFX-MC-01', 'pay_102', 'rfnd_102', 4000, 'PROCESSED', 'CUSTOMER_REQUEST', 'admin', 'SUPER_ADMIN_PORTAL', 'idem_ref_102', '2026-11-14T08:00:00.000Z', '2026-11-14T08:00:00.000Z')
-    `);
-    // Inventory movements
-    await db.run(`
-      INSERT INTO inventory_ledger (id, machine_id, ingredient, movement_type, quantity, balance_after, reason, idempotency_key, created_at)
-      VALUES
-      ('inv_1', 'CFX-MC-01', 'milk', 'DEDUCTION', 20, 80, 'Order ord_101', 'idem_inv_1', '2026-11-14T05:00:00.000Z'),
-      ('inv_2', 'CFX-MC-01', 'milk', 'REFILL', 100, 180, 'Morning refill', 'idem_inv_2', '2026-11-14T04:00:00.000Z')
     `);
 
     // -------------------------------------------------------------------------
@@ -264,9 +253,9 @@ async function runPhase292ApiTests() {
     console.log('   PASS: Owner with 0 assigned machines strictly returns empty metrics.');
 
     // -------------------------------------------------------------------------
-    // 4. Testing All 6 Analytics Endpoints
+    // 4. Testing All 5 Active Analytics Endpoints
     // -------------------------------------------------------------------------
-    console.log('4. Testing All 6 Analytics Endpoints...');
+    console.log('4. Testing All 5 Analytics Endpoints...');
     // 4.1 Overview
     const epOverview = await api('GET', '/analytics/overview', undefined, adminToken);
     assert.strictEqual(epOverview.status, 200);
@@ -289,14 +278,9 @@ async function runPhase292ApiTests() {
     assert.strictEqual(epProducts.status, 200);
     assert.ok(Array.isArray(epProducts.body.data));
 
-    // 4.5 Inventory
-    const epInventory = await api('GET', '/analytics/inventory?machine_id=CFX-MC-01', undefined, adminToken);
-    assert.strictEqual(epInventory.status, 200);
-    assert.ok(Array.isArray(epInventory.body.data));
-    const milkItem = epInventory.body.data.find((i: any) => i.ingredient === 'milk');
-    assert.ok(milkItem);
-    assert.strictEqual(milkItem.total_consumed, 20);
-    assert.strictEqual(milkItem.total_refilled, 100);
+    // 4.5 Removed inventory endpoint returns 404
+    const epInventoryRemoved = await api('GET', '/analytics/inventory?machine_id=CFX-MC-01', undefined, adminToken);
+    assert.strictEqual(epInventoryRemoved.status, 404);
 
     // 4.6 Refunds
     const epRefunds = await api('GET', '/analytics/refunds', undefined, adminToken);
@@ -305,7 +289,7 @@ async function runPhase292ApiTests() {
     assert.strictEqual(epRefunds.body.data.processed_refunds_paise, 4000);
     assert.strictEqual(epRefunds.body.data.recent_refunds.length, 1);
     assert.strictEqual(epRefunds.body.data.recent_refunds[0].id, 'ref_102');
-    console.log('   PASS: All 6 analytics endpoints successfully respond with valid structures.');
+    console.log('   PASS: All 5 analytics endpoints respond accurately & removed /analytics/inventory returns 404.');
 
     // -------------------------------------------------------------------------
     // 5. Zod Query Validation

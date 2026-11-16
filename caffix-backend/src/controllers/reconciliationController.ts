@@ -9,7 +9,6 @@ import {
   ReconciliationResult,
   DiscrepancyReason
 } from '../services/reconciliationService';
-import { getInventoryLedgerForMachine } from '../utils/inventoryLedger';
 
 export const getReconciliationReport = async (
   req: AuthRequest,
@@ -94,37 +93,6 @@ export const getSingleOrderReconciliation = async (
     res.status(200).json({
       status: 'success',
       data: item
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-export const getMachineInventoryLedger = async (
-  req: AuthRequest,
-  res: Response,
-  next: NextFunction
-): Promise<void> => {
-  const machineId = String(req.params.machine_id);
-  const db = getDB();
-
-  try {
-    if (req.user?.scope === 'kiosk_admin') {
-      return next(new ForbiddenError('Kiosk admin unlock tokens cannot access reconciliation endpoints'));
-    }
-
-    await assertMachineOwnershipOrAdmin(req.user, machineId);
-
-    const limit = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : 100;
-    const offset = typeof req.query.offset === 'string' ? parseInt(req.query.offset, 10) : 0;
-
-    const entries = await getInventoryLedgerForMachine(db, machineId, { limit, offset });
-
-    res.status(200).json({
-      status: 'success',
-      machine_id: machineId,
-      count: entries.length,
-      data: entries
     });
   } catch (error) {
     next(error);

@@ -7,7 +7,6 @@ import {
   getTimeSeries,
   getMachines,
   getProducts,
-  getInventory,
   getRefunds
 } from '../controllers/analyticsController';
 
@@ -101,7 +100,6 @@ router.get('/overview', validateRequest(analyticsQuerySchema), getOverview);
 router.get('/time-series', validateRequest(timeSeriesQuerySchema), getTimeSeries);
 router.get('/machines', validateRequest(analyticsQuerySchema), getMachines);
 router.get('/products', validateRequest(analyticsQuerySchema), getProducts);
-router.get('/inventory', validateRequest(analyticsQuerySchema), getInventory);
 router.get('/refunds', validateRequest(analyticsQuerySchema), getRefunds);
 
 export default router;

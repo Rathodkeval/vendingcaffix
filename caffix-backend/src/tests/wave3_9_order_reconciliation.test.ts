@@ -215,17 +215,6 @@ function seedMachineDoc(
     last_seen: null,
     owner_id: machineId === 'CFX-MC-01' ? 'owner_mc1' : 'owner_mc2',
     kiosk_token: secret,
-    estimated_inventory: {
-      milk_level: 100,
-      coffee_level: 100,
-      vanilla_level: 100,
-      hazelnut_level: 100,
-      irish_level: 100,
-      mocha_level: 100,
-      water_level: 100
-    },
-    inventory_source: 'software_estimated',
-    inventory_updated_at: nowIso,
     products: {},
     updated_at: nowIso
   });
@@ -302,9 +291,6 @@ async function runWave39Tests() {
         razorpay_order_id: 'order_rp_recent_1',
         created_at: new Date(Date.now() - 2 * 60_000).toISOString()
       });
-
-      const waterBefore = machineCol.get('CFX-MC-01').estimated_inventory.water_level;
-      const coffeeBefore = machineCol.get('CFX-MC-01').estimated_inventory.coffee_level;
 
       let authStage: 'authorized' | 'captured' = 'authorized';
       setRazorpayClientForTesting({
@@ -387,18 +373,10 @@ async function runWave39Tests() {
       assert.strictEqual(ordersCol.get(apiErrOrderId).status, 'PENDING');
       assert.strictEqual(ordersCol.get(tooRecentOrderId).status, 'PENDING');
 
-      // Only 1 order transitioned to PAID -> inventory deducted once (Espresso uses 3 water, 1 coffee? Let's verify exact positive deduction from baseline)
-      const waterAfterRun1 = machineCol.get('CFX-MC-01').estimated_inventory.water_level;
-      const coffeeAfterRun1 = machineCol.get('CFX-MC-01').estimated_inventory.coffee_level;
-      const singleOrderWaterDelta = waterBefore - waterAfterRun1;
-      const singleOrderCoffeeDelta = coffeeBefore - coffeeAfterRun1;
-      assert.ok(singleOrderWaterDelta > 0, 'Captured order recovery must deduct water once');
-      assert.ok(singleOrderCoffeeDelta > 0, 'Captured order recovery must deduct coffee once');
-
       // -----------------------------------------------------------------------
       // 2. Duplicate cron execution is completely idempotent (0 new writes on remaining resolved orders)
       // -----------------------------------------------------------------------
-      console.log('2. Testing duplicate cron execution causes zero extra Firestore writes or duplicate deductions...');
+      console.log('2. Testing duplicate cron execution causes zero extra Firestore writes...');
       const businessWritesBeforeReplay = fs.businessWriteCount;
       const resReplay = await api('GET', '/cron/reconcile-orders', undefined, {
         Authorization: `Bearer ${CRON_SECRET}`
@@ -407,10 +385,8 @@ async function runWave39Tests() {
       assert.strictEqual(
         fs.businessWriteCount,
         businessWritesBeforeReplay,
-        'Replay with unresolved/settled orders must produce 0 Firestore order/inventory writes'
+        'Replay with unresolved/settled orders must produce 0 Firestore order/machine writes'
       );
-      assert.strictEqual(machineCol.get('CFX-MC-01').estimated_inventory.water_level, waterAfterRun1);
-      assert.strictEqual(machineCol.get('CFX-MC-01').estimated_inventory.coffee_level, coffeeAfterRun1);
 
       // Now simulate authorized payment settling to captured -> subsequent cron run promotes it to PAID once
       authStage = 'captured';
@@ -420,11 +396,6 @@ async function runWave39Tests() {
       assert.strictEqual(resAuthCaptured.status, 200);
       assert.strictEqual(resAuthCaptured.data.data.reconciled_paid, 1);
       assert.strictEqual(ordersCol.get(authOrderId).status, 'PAID');
-      assert.strictEqual(
-        machineCol.get('CFX-MC-01').estimated_inventory.water_level,
-        waterAfterRun1 - singleOrderWaterDelta,
-        'Late capture of formerly authorized payment deducts inventory exactly once'
-      );
     }
 
     // -------------------------------------------------------------------------
@@ -468,8 +439,6 @@ async function runWave39Tests() {
         machine_id: 'CFX-MC-02',
         razorpay_order_id: 'order_rp_race_fail'
       });
-
-      const mc2WaterBefore = machineCol.get('CFX-MC-02').estimated_inventory.water_level;
 
       setRazorpayClientForTesting({
         orders: {
@@ -537,13 +506,6 @@ async function runWave39Tests() {
       assert.strictEqual(ordersCol.get('ORD-W39-ACTIVE-PAID').status, 'PAID');
       assert.strictEqual(ordersCol.get('ORD-W39-ACTIVE-PREP').status, 'PREPARING');
       assert.strictEqual(ordersCol.get('ORD-W39-ACTIVE-DONE').status, 'COMPLETED');
-
-      const mc2WaterAfter = machineCol.get('CFX-MC-02').estimated_inventory.water_level;
-      // Espresso deducts 30 water once (100 -> 70); must never deduct twice across concurrent webhook + 2 cron runs
-      assert.ok(
-        mc2WaterAfter >= 70 && mc2WaterAfter < mc2WaterBefore,
-        `Expected exactly 1 deduction on CFX-MC-02, got water_level=${mc2WaterAfter} (before=${mc2WaterBefore})`
-      );
       assert.strictEqual(
         cronRace1.data.data.reconciled_paid + cronRace2.data.data.reconciled_paid <= 1,
         true,

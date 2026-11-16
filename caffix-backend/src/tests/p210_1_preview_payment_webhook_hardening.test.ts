@@ -697,9 +697,10 @@ async function runP2101Tests() {
       });
       assert.strictEqual(whValidRes.status, 200, `Valid Preview webhook failed: ${JSON.stringify(whValidRes.data)}`);
       assert.strictEqual((await fs.collection('orders').doc(createdId).get()).data().status, 'PAID');
-      assert.ok(
-        (await fs.collection('inventory_ledger').get()).size > ledgerSizeBefore,
-        'Expected inventory ledger movements to be recorded after valid webhook payment'
+      assert.strictEqual(
+        (await fs.collection('inventory_ledger').get()).size,
+        ledgerSizeBefore,
+        'Inventory module removed: payment verification must perform 0 inventory_ledger writes'
       );
 
       // Valid HMAC-SHA256 Test Mode client payment verification (/api/payments/verify) succeeds (HTTP 200)

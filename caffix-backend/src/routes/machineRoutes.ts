@@ -6,8 +6,6 @@ import {
   registerMachine,
   updateMachineStatus,
   recordMachineHeartbeat,
-  getInventoryByMachine,
-  refillMachineInventory,
   getMachineProducts,
   updateMachineProduct
 } from '../controllers/machineController';
@@ -55,18 +53,6 @@ const heartbeatSchema = z.object({
   })
 });
 
-const refillSchema = z.object({
-  params: z.object({
-    machine_id: z.string()
-  }),
-  body: z.object({
-    ingredient: z.enum(['milk', 'coffee', 'vanilla', 'hazelnut', 'irish', 'mocha', 'water', 'ALL']),
-    quantity: z.number().finite('Refill quantity must be a finite number').positive('Invalid refill quantity: expected a positive finite number').optional(),
-    target: z.number().finite('Refill target must be a finite number').min(0, 'Refill target must be between 0 and 100').max(100, 'Refill target must be between 0 and 100').optional(),
-    reason: z.string().trim().max(500, 'Refill reason must be 500 characters or fewer').optional()
-  })
-});
-
 const getMachineProductsSchema = z.object({
   params: z.object({
     id: z.string().min(3)
@@ -97,7 +83,5 @@ router.patch('/:id/products/:productId', authenticateJWT, requireRole(['admin', 
 router.patch('/:id/owner', authenticateJWT, requireRole(['admin'], { disallowKioskAdmin: true }), validateRequest(assignOwnerSchema), assignMachineOwner);
 router.patch('/:id/status', authenticateJWT, requireRole(['admin', 'owner']), validateRequest(updateStatusSchema), updateMachineStatus);
 router.post('/:id/heartbeat', authenticateJWT, requireRole(['admin', 'owner', 'kiosk']), validateRequest(heartbeatSchema), recordMachineHeartbeat);
-router.get('/:machine_id/inventory', authenticateJWT, requireRole(['admin', 'owner', 'kiosk']), getInventoryByMachine);
-router.post('/:machine_id/refill', authenticateJWT, requireRole(['admin', 'owner']), validateRequest(refillSchema), refillMachineInventory);
 
 export default router;

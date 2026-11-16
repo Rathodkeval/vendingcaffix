@@ -26,13 +26,6 @@ import {
   getRefundsByOrderId
 } from '../utils/refunds';
 import {
-  recordInventoryMovement,
-  recordOrderDeductionsToLedger,
-  getInventoryLedgerForMachine,
-  getInventoryLedgerForOrder,
-  initializeInventoryLedgerSchema
-} from '../utils/inventoryLedger';
-import {
   reconcileOrderRecord,
   generateReconciliationReport,
   reconcileSingleOrderById
@@ -155,21 +148,8 @@ async function createIsolatedSqliteDb(): Promise<Database> {
       processed_at TEXT,
       UNIQUE(provider, event_id)
     );
-
-    CREATE TABLE IF NOT EXISTS inventory (
-      machine_id TEXT PRIMARY KEY,
-      coffee_level REAL DEFAULT 100,
-      milk_level REAL DEFAULT 100,
-      water_level REAL DEFAULT 100,
-      vanilla_level REAL DEFAULT 100,
-      hazelnut_level REAL DEFAULT 100,
-      irish_level REAL DEFAULT 100,
-      mocha_level REAL DEFAULT 100,
-      updated_at TEXT
-    );
   `);
 
-  await initializeInventoryLedgerSchema(db);
   return db;
 }
 
@@ -246,56 +226,35 @@ async function runPhase2_8_ReconciliationTests() {
       created_at: new Date().toISOString()
     });
 
-    const reqs = { coffee: 18, milk: 150, water: 50, vanilla: 0, hazelnut: 0, irish: 0, mocha: 0 };
-
     // First payment arrival
     const res1 = await commitOrderTransitionInFirebase({
       order: { id: orderId, machine_id: machineId, amount: 100 },
       targetStatus: 'PAID',
       razorpayPaymentId: 'pay_first_123',
-      capturedAmountPaise: 10000,
-      requirements: reqs
+      capturedAmountPaise: 10000
     });
 
     assert.strictEqual(res1?.didTransition, true);
-    assert.strictEqual(res1?.didDeductInventory, true);
 
     // Duplicate payment arrival (same payment ID)
     const res2 = await commitOrderTransitionInFirebase({
       order: { id: orderId, machine_id: machineId, amount: 100 },
       targetStatus: 'PAID',
       razorpayPaymentId: 'pay_first_123',
-      capturedAmountPaise: 10000,
-      requirements: reqs
+      capturedAmountPaise: 10000
     });
 
     assert.strictEqual(res2?.didTransition, false);
     assert.strictEqual(res2?.alreadyProcessed, true);
-    assert.strictEqual(res2?.didDeductInventory, false);
-
-    // Verify machine stock was deducted ONCE (100 - 18 = 82)
-    const machineSnap = await firestore.collection('machines').doc(machineId).get();
-    const inv = machineSnap.data()?.estimated_inventory;
-    assert.strictEqual(inv.coffee_level, 82);
-
-    // Verify ledger has exactly 1 deduction for coffee
-    const ledgerSnap = await firestore
-      .collection('machines')
-      .doc(machineId)
-      .collection('inventory_ledger')
-      .where('order_id', '==', orderId)
-      .where('ingredient', '==', 'coffee')
-      .get();
-    assert.strictEqual(ledgerSnap.size, 1);
 
     // Verify reconciliation result is MATCH
     const orderSnap = await firestore.collection('orders').doc(orderId).get();
     const rec = reconcileOrderRecord(orderSnap.data(), {
-      refunds: [],
-      inventoryMovements: ledgerSnap.docs.map(d => d.data() as any)
+      refunds: []
     });
     assert.strictEqual(rec.reconciliation_result, 'MATCH');
     assert.strictEqual(rec.discrepancy_reason, 'NONE');
+    assert.strictEqual(rec.inventory_movement_status, 'NOT_APPLICABLE');
   });
 
   // SCENARIO 2: Delayed payment events reconciliation
@@ -434,43 +393,10 @@ async function runPhase2_8_ReconciliationTests() {
     assert.strictEqual(rec.recommended_action, 'INVESTIGATE_HARDWARE_DISPENSE');
   });
 
-  // SCENARIO 6: Duplicate inventory deductions prevention & audit
-  await test('Duplicate inventory deductions prevention & audit (INVENTORY_DEDUCTION_DUPLICATED)', async () => {
-    const db = await createIsolatedSqliteDb();
-    const orderId = 'ord_inv_deduct_06';
+  // SCENARIO 6: Inventory reconciliation removed (inventory_movement_status is NOT_APPLICABLE)
+  await test('Paid order reconciles as MATCH with inventory_movement_status NOT_APPLICABLE', async () => {
+    const orderId = 'ord_inv_removed_06';
     const machineId = 'CFX-MC-03';
-
-    // Record deduction
-    await recordInventoryMovement(db, {
-      machine_id: machineId,
-      ingredient: 'coffee',
-      quantity: 18,
-      movement_type: 'DEDUCTION',
-      balance_after: 82,
-      order_id: orderId,
-      idempotency_key: `order_${orderId}_deduct_coffee`
-    });
-
-    // Attempt second deduction with identical idempotency key -> returns existing record without inserting duplicate
-    const secondTry = await recordInventoryMovement(db, {
-      machine_id: machineId,
-      ingredient: 'coffee',
-      quantity: 18,
-      movement_type: 'DEDUCTION',
-      balance_after: 64,
-      order_id: orderId,
-      idempotency_key: `order_${orderId}_deduct_coffee`
-    });
-
-    const entries = await getInventoryLedgerForOrder(db, orderId);
-    assert.strictEqual(entries.length, 1, 'Idempotency key must strictly prevent duplicate rows');
-    assert.strictEqual(secondTry.balance_after, 82, 'Returns original record balance');
-
-    // If duplicate movement manually exists, reconciliation flags INVENTORY_DEDUCTION_DUPLICATED
-    const duplicatedMovements = [
-      { id: '1', machine_id: machineId, ingredient: 'coffee', quantity: 18, movement_type: 'DEDUCTION' as const, balance_after: 82, created_at: new Date().toISOString() },
-      { id: '2', machine_id: machineId, ingredient: 'coffee', quantity: 18, movement_type: 'DEDUCTION' as const, balance_after: 64, created_at: new Date().toISOString() }
-    ];
 
     const rec = reconcileOrderRecord({
       id: orderId,
@@ -482,13 +408,12 @@ async function runPhase2_8_ReconciliationTests() {
       razorpay_payment_id: 'pay_ok_06',
       created_at: new Date().toISOString()
     }, {
-      refunds: [],
-      inventoryMovements: duplicatedMovements
+      refunds: []
     });
 
-    assert.strictEqual(rec.reconciliation_result, 'DISCREPANCY');
-    assert.strictEqual(rec.discrepancy_reason, 'INVENTORY_DEDUCTION_DUPLICATED');
-    assert.strictEqual(rec.recommended_action, 'FLAG_DATA_CORRUPTION');
+    assert.strictEqual(rec.reconciliation_result, 'MATCH');
+    assert.strictEqual(rec.discrepancy_reason, 'NONE');
+    assert.strictEqual(rec.inventory_movement_status, 'NOT_APPLICABLE');
   });
 
   // SCENARIO 7: Partial refunds reconciliation
@@ -649,15 +574,6 @@ async function runPhase2_8_ReconciliationTests() {
         pending_refund_amount_paise: 0,
         created_at: new Date().toISOString()
       });
-      await recordInventoryMovement(db, {
-        machine_id: machineId,
-        ingredient: 'coffee',
-        quantity: 18,
-        movement_type: 'DEDUCTION',
-        balance_after: 100 - i * 5,
-        order_id: oid,
-        idempotency_key: `order_${oid}_deduct_coffee`
-      });
     }
 
     // Run 10 parallel reconciliation report queries
@@ -754,8 +670,6 @@ async function runPhase2_8_ReconciliationTests() {
       created_at: new Date().toISOString()
     });
 
-    const reqs = { coffee: 18, milk: 150, water: 50, vanilla: 0, hazelnut: 0, irish: 0, mocha: 0 };
-
     // Concurrently trigger transition from 5 parallel promises
     const parallelTransitions = await Promise.all(
       Array.from({ length: 5 }).map((_, i) =>
@@ -763,8 +677,7 @@ async function runPhase2_8_ReconciliationTests() {
           order: { id: orderId, machine_id: machineId, amount: 100 },
           targetStatus: 'PAID',
           razorpayPaymentId: `pay_tx_${i}`,
-          capturedAmountPaise: 10000,
-          requirements: reqs
+          capturedAmountPaise: 10000
         })
       )
     );
@@ -772,10 +685,6 @@ async function runPhase2_8_ReconciliationTests() {
     // Exactly one must have transitioned
     const transitionedCount = parallelTransitions.filter(r => r?.didTransition).length;
     assert.strictEqual(transitionedCount, 1, 'Exactly one transaction must succeed with didTransition=true');
-
-    // Exactly one deduction must have occurred on machine stock
-    const machineSnap = await firestore.collection('machines').doc(machineId).get();
-    assert.strictEqual(machineSnap.data()?.estimated_inventory.coffee_level, 82);
   });
 
   // SCENARIO 12: Serverless cold-start recovery
@@ -799,17 +708,6 @@ async function runPhase2_8_ReconciliationTests() {
       created_at: new Date().toISOString()
     });
 
-    await firestore.collection('inventory_ledger').doc(`inv_mov_${orderId}_coffee`).set({
-      id: `inv_mov_${orderId}_coffee`,
-      machine_id: machineId,
-      ingredient: 'coffee',
-      quantity: 18,
-      movement_type: 'DEDUCTION',
-      balance_after: 82,
-      order_id: orderId,
-      created_at: new Date().toISOString()
-    });
-
     // In a new fresh cold SQLite instance with empty memory
     const coldDb = await createIsolatedSqliteDb();
 
@@ -819,7 +717,7 @@ async function runPhase2_8_ReconciliationTests() {
     assert.strictEqual(reconciledItem?.order_id, orderId);
     assert.strictEqual(reconciledItem?.machine_id, machineId);
     assert.strictEqual(reconciledItem?.reconciliation_result, 'MATCH');
-    assert.strictEqual(reconciledItem?.inventory_movement_status, 'RECORDED');
+    assert.strictEqual(reconciledItem?.inventory_movement_status, 'NOT_APPLICABLE');
   });
 
   // SCENARIO 15 (H-1): Empty machineIds scope MUST fail-closed to 'NONE' (never leak fleet)

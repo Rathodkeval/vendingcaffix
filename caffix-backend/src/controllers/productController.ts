@@ -126,7 +126,11 @@ export const getProducts = async (
         if (!machine) {
           return next(new NotFoundError(`Machine with ID ${machineId} not found`));
         }
-        const machineProducts = await getAuthoritativeMachineProducts(machineId, db);
+        const machineProducts = await getAuthoritativeMachineProducts(
+          machineId,
+          db,
+          (machine as any)._remoteMachine
+        );
         res.status(200).json({
           status: 'success',
           machine_id: machineId,

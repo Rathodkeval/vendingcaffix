@@ -4,7 +4,6 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { getConfiguredMachineSeeds } from '../config/db';
 import { AppError, ConflictError, ServiceUnavailableError } from './errors';
-import { IngredientRequirements, assertSufficientInventory } from './inventory';
 import { reconcileOrderRefundRecords } from './refunds';
 import logger from './logger';
 
@@ -15,6 +14,21 @@ let lastInitializedSignature: string | null = null;
 let moduleInitError: Error | null = null;
 let firestoreSeededForInstance: any | null = null;
 let firestoreSeedPromise: Promise<void> | null = null;
+const analyticsInvalidationListeners = new Set<() => void>();
+
+export function registerAnalyticsCacheInvalidator(fn: () => void): void {
+  analyticsInvalidationListeners.add(fn);
+}
+
+export function notifyAnalyticsMutation(): void {
+  for (const fn of analyticsInvalidationListeners) {
+    try {
+      fn();
+    } catch {
+      // ignore listener errors
+    }
+  }
+}
 
 class VersionedMirrorStore {
   private readonly store = new Map<string, any>();
@@ -153,6 +167,7 @@ export function setFirestoreForTesting(options: {
     syncedMachinesStore.clear();
     syncedUsersStore.clear();
   }
+  notifyAnalyticsMutation();
 }
 
 export function resetFirestoreSeedStateForTesting(): void {
@@ -161,6 +176,7 @@ export function resetFirestoreSeedStateForTesting(): void {
   syncedOrdersStore.clear();
   syncedMachinesStore.clear();
   syncedUsersStore.clear();
+  notifyAnalyticsMutation();
 }
 
 export const PRODUCTION_FIREBASE_PROJECT_ID = 'caffix-vending';
@@ -427,6 +443,7 @@ export function updateSyncedFirebaseOrder(orderId: string, partial: any): void {
   if (existing) {
     syncedOrdersStore.set(normalizedId, { ...existing, ...partial });
   }
+  notifyAnalyticsMutation();
 }
 
 export function getSyncedFirebaseMachine(machineId: string): any | undefined {
@@ -476,18 +493,6 @@ function sanitizeOrderPayload(order: any): any {
   return sanitizedOrder;
 }
 
-function buildEstimatedInventoryPayload(inv: any) {
-  return {
-    milk_level: Number(inv?.milk_level ?? 100),
-    coffee_level: Number(inv?.coffee_level ?? 100),
-    vanilla_level: Number(inv?.vanilla_level ?? 100),
-    hazelnut_level: Number(inv?.hazelnut_level ?? 100),
-    irish_level: Number(inv?.irish_level ?? 100),
-    mocha_level: Number(inv?.mocha_level ?? 100),
-    water_level: Number(inv?.water_level ?? 100)
-  };
-}
-
 export interface AtomicOrderTransitionInput {
   order: any;
   targetStatus: string;
@@ -495,8 +500,6 @@ export interface AtomicOrderTransitionInput {
   razorpayPaymentId?: string | null;
   razorpaySignature?: string | null;
   capturedAmountPaise?: number | null;
-  requirements?: IngredientRequirements | null;
-  fallbackInventory?: any;
   allowPaidOrderRecovery?: boolean;
   webhookFencing?: { provider: string; eventId: string; claimCount: number } | null;
 }
@@ -504,18 +507,16 @@ export interface AtomicOrderTransitionInput {
 export interface AtomicOrderTransitionResult {
   didTransition: boolean;
   didTransitionFromPendingToActive: boolean;
-  didDeductInventory: boolean;
   alreadyProcessed: boolean;
   rejectedByStateGuard?: boolean;
   alreadyClaimedOrDispensed: boolean;
   authoritativeOrder: any;
-  updatedEstimatedInventory: ReturnType<typeof buildEstimatedInventoryPayload> | null;
 }
 
 /**
- * Executes an atomic cross-instance order status transition + inventory deduction inside a
- * Firestore transaction. Returns null when Firestore is disabled (local non-strict mode).
- * Prevents concurrent Vercel instances or duplicate webhooks from double-deducting inventory,
+ * Executes an atomic cross-instance order status transition inside a Firestore transaction.
+ * Returns null when Firestore is disabled (local non-strict mode).
+ * Prevents concurrent Vercel instances or duplicate webhooks from double-processing paid transitions,
  * overwriting paid/completed/dispensing orders with late FAILED/CANCELLED events,
  * or resetting Raspberry Pi dispense_status ('DISPENSING' | 'DISPENSED') back to 'QUEUED'.
  */
@@ -551,13 +552,6 @@ export async function commitOrderTransitionInFirebase(
       const orderRef = firestore!.collection('orders').doc(orderId);
       const orderSnap = await tx.get(orderRef);
       const existingData = orderSnap.exists ? orderSnap.data() || {} : {};
-      const machineId = String(existingData.machine_id || sanitizedOrder.machine_id || '');
-
-      const machineRef =
-        machineId && input.requirements
-          ? firestore!.collection('machines').doc(machineId)
-          : null;
-      const machineSnap = machineRef ? await tx.get(machineRef) : null;
 
       if (existingData.machine_id && existingData.machine_id !== sanitizedOrder.machine_id) {
         logger.warn(
@@ -572,8 +566,11 @@ export async function commitOrderTransitionInFirebase(
       const currentDispenseStatus = String(existingData.dispense_status || '').toUpperCase();
       const alreadyClaimedOrDispensed =
         existingData.dispensed === true ||
+        currentDispenseStatus === 'CLAIMING' ||
         currentDispenseStatus === 'DISPENSING' ||
-        currentDispenseStatus === 'DISPENSED';
+        currentDispenseStatus === 'DISPENSED' ||
+        currentDispenseStatus === 'FAILED' ||
+        currentDispenseStatus === 'EXPIRED';
       const isPaidOrActive =
         ['PAID', 'PREPARING', 'COMPLETED'].includes(currentStatus) ||
         ['QUEUED', 'DISPENSING', 'DISPENSED'].includes(currentDispenseStatus) ||
@@ -584,8 +581,6 @@ export async function commitOrderTransitionInFirebase(
         (currentStatus === 'COMPLETED' &&
           (targetStatus === 'PAID' || targetStatus === 'PREPARING')) ||
         ((currentStatus === 'PAID' || currentStatus === 'PREPARING') && targetStatus === 'PAID');
-
-      const existingMachineInv = machineSnap?.data()?.estimated_inventory || null;
 
       if (isAlreadyProcessed) {
         if (input.capturedAmountPaise !== undefined && input.capturedAmountPaise !== null) {
@@ -618,14 +613,10 @@ export async function commitOrderTransitionInFirebase(
         return {
           didTransition: false,
           didTransitionFromPendingToActive: false,
-          didDeductInventory: false,
           alreadyProcessed: true,
           rejectedByStateGuard: false,
           alreadyClaimedOrDispensed,
-          authoritativeOrder: { ...existingData, id: existingData.id || orderId },
-          updatedEstimatedInventory: existingMachineInv
-            ? buildEstimatedInventoryPayload(existingMachineInv)
-            : null
+          authoritativeOrder: { ...existingData, id: existingData.id || orderId }
         };
       }
 
@@ -647,15 +638,11 @@ export async function commitOrderTransitionInFirebase(
           return {
             didTransition: false,
             didTransitionFromPendingToActive: false,
-            didDeductInventory: false,
             alreadyProcessed: true,
             rejectedByStateGuard: true,
             conflictReason: `Cannot dispense order ${orderId}: order is fully refunded (refund_status=FULL)`,
             alreadyClaimedOrDispensed,
-            authoritativeOrder: { ...existingData, id: existingData.id || orderId },
-            updatedEstimatedInventory: existingMachineInv
-              ? buildEstimatedInventoryPayload(existingMachineInv)
-              : null
+            authoritativeOrder: { ...existingData, id: existingData.id || orderId }
           };
         }
 
@@ -666,15 +653,11 @@ export async function commitOrderTransitionInFirebase(
           return {
             didTransition: false,
             didTransitionFromPendingToActive: false,
-            didDeductInventory: false,
             alreadyProcessed: true,
             rejectedByStateGuard: true,
             conflictReason: `Cannot dispense order ${orderId}: order has pending refund reservation (${pendingRefundPaise} paise)`,
             alreadyClaimedOrDispensed,
-            authoritativeOrder: { ...existingData, id: existingData.id || orderId },
-            updatedEstimatedInventory: existingMachineInv
-              ? buildEstimatedInventoryPayload(existingMachineInv)
-              : null
+            authoritativeOrder: { ...existingData, id: existingData.id || orderId }
           };
         }
       }
@@ -701,14 +684,10 @@ export async function commitOrderTransitionInFirebase(
         return {
           didTransition: false,
           didTransitionFromPendingToActive: false,
-          didDeductInventory: false,
           alreadyProcessed: true,
           rejectedByStateGuard: !(isNonPaidTarget && isClosedUnpaidOrigin),
           alreadyClaimedOrDispensed,
-          authoritativeOrder: { ...existingData, id: existingData.id || orderId },
-          updatedEstimatedInventory: existingMachineInv
-            ? buildEstimatedInventoryPayload(existingMachineInv)
-            : null
+          authoritativeOrder: { ...existingData, id: existingData.id || orderId }
         };
       }
 
@@ -716,84 +695,6 @@ export async function commitOrderTransitionInFirebase(
         currentStatus === 'PENDING' ||
         (Boolean(input.allowPaidOrderRecovery) && isClosedUnpaidOrigin && targetStatus === 'PAID');
       const didTransitionFromPendingToActive = canPromoteToActive && transitionToActive;
-      const shouldDeductInventory = Boolean(
-        didTransitionFromPendingToActive &&
-          !alreadyClaimedOrDispensed &&
-          input.requirements &&
-          machineRef
-      );
-
-      let updatedEstimatedInventory: ReturnType<typeof buildEstimatedInventoryPayload> | null =
-        existingMachineInv ? buildEstimatedInventoryPayload(existingMachineInv) : null;
-
-      if (shouldDeductInventory && input.requirements && machineRef) {
-        const baseInv = existingMachineInv || input.fallbackInventory;
-        const req = input.requirements;
-        if (input.productName) {
-          assertSufficientInventory(baseInv, input.productName, machineId);
-        }
-        updatedEstimatedInventory = {
-          milk_level: Number(baseInv.milk_level ?? 100) - req.milk,
-          coffee_level: Number(baseInv.coffee_level ?? 100) - req.coffee,
-          vanilla_level: Number(baseInv.vanilla_level ?? 100) - req.vanilla,
-          hazelnut_level: Number(baseInv.hazelnut_level ?? 100) - req.hazelnut,
-          irish_level: Number(baseInv.irish_level ?? 100) - req.irish,
-          mocha_level: Number(baseInv.mocha_level ?? 100) - req.mocha,
-          water_level: Number(baseInv.water_level ?? 100) - req.water
-        };
-        tx.set(
-          machineRef,
-          {
-            id: machineId,
-            estimated_inventory: updatedEstimatedInventory,
-            inventory_source: 'software_estimated',
-            inventory_updated_at: nowIso,
-            updated_at: nowIso
-          },
-          { merge: true }
-        );
-
-        // Auditable Inventory Ledger (Phase 2.8): Record movement per ingredient atomically
-        const ingredientMap: Array<{ name: keyof IngredientRequirements; key: string }> = [
-          { name: 'coffee', key: 'coffee_level' },
-          { name: 'milk', key: 'milk_level' },
-          { name: 'water', key: 'water_level' },
-          { name: 'vanilla', key: 'vanilla_level' },
-          { name: 'hazelnut', key: 'hazelnut_level' },
-          { name: 'irish', key: 'irish_level' },
-          { name: 'mocha', key: 'mocha_level' }
-        ];
-
-        for (const item of ingredientMap) {
-          const qty = req[item.name];
-          if (typeof qty === 'number' && qty > 0) {
-            const balanceAfter = (updatedEstimatedInventory as any)[item.key] ?? 0;
-            const idempotencyKey = `order_${orderId}_deduct_${String(item.name)}`;
-            const movementId = `inv_mov_${idempotencyKey}`;
-            const movementDoc = {
-              id: movementId,
-              machine_id: machineId,
-              ingredient: String(item.name),
-              quantity: qty,
-              movement_type: 'DEDUCTION',
-              balance_after: balanceAfter,
-              order_id: orderId,
-              refund_id: null,
-              reason: `Order ${orderId} preparation deduction`,
-              idempotency_key: idempotencyKey,
-              created_at: nowIso
-            };
-            const rootLedgerRef = firestore!.collection('inventory_ledger').doc(movementId);
-            const subLedgerRef = firestore!
-              .collection('machines')
-              .doc(machineId)
-              .collection('inventory_ledger')
-              .doc(movementId);
-            tx.set(rootLedgerRef, movementDoc, { merge: true });
-            tx.set(subLedgerRef, movementDoc, { merge: true });
-          }
-        }
-      }
 
       const payloadToWrite: any = {
         ...sanitizedOrder,
@@ -839,30 +740,17 @@ export async function commitOrderTransitionInFirebase(
       return {
         didTransition: true,
         didTransitionFromPendingToActive,
-        didDeductInventory: shouldDeductInventory,
         alreadyProcessed: false,
         rejectedByStateGuard: false,
         alreadyClaimedOrDispensed,
-        authoritativeOrder: { ...existingData, ...payloadToWrite, id: orderId },
-        updatedEstimatedInventory
+        authoritativeOrder: { ...existingData, ...payloadToWrite, id: orderId }
       };
     });
 
     if (result.authoritativeOrder) {
       syncedOrdersStore.set(orderId, result.authoritativeOrder);
     }
-    if (result.didDeductInventory && result.updatedEstimatedInventory && sanitizedOrder.machine_id) {
-      const mId = String(result.authoritativeOrder?.machine_id || sanitizedOrder.machine_id);
-      const existingLocalMachine = syncedMachinesStore.get(mId) || { id: mId };
-      syncedMachinesStore.set(mId, {
-        ...existingLocalMachine,
-        id: mId,
-        estimated_inventory: result.updatedEstimatedInventory,
-        inventory_source: 'software_estimated',
-        inventory_updated_at: nowIso,
-        updated_at: nowIso
-      });
-    }
+    notifyAnalyticsMutation();
 
     return result;
   } catch (error: any) {
@@ -929,12 +817,15 @@ export async function syncOrderToFirebase(
         sanitizedOrder.machine_id = existingData.machine_id;
       }
 
-      // Prevent duplicate dispensing: if Raspberry Pi has already claimed or dispensed this order,
-      // do not reset dispense_status or dispensed flags
+      // Prevent duplicate dispensing or reverting failed/expired orders back to QUEUED
+      const existingDispenseUpper = String(existingData.dispense_status || '').toUpperCase();
       const alreadyClaimedOrDispensed =
         existingData.dispensed === true ||
-        existingData.dispense_status === 'DISPENSING' ||
-        existingData.dispense_status === 'DISPENSED';
+        existingDispenseUpper === 'CLAIMING' ||
+        existingDispenseUpper === 'DISPENSING' ||
+        existingDispenseUpper === 'DISPENSED' ||
+        existingDispenseUpper === 'FAILED' ||
+        existingDispenseUpper === 'EXPIRED';
 
       const payloadToWrite: any = {
         ...sanitizedOrder,
@@ -1052,65 +943,6 @@ export async function updateMachineHeartbeatInFirebase(
 }
 
 /**
- * Targeted partial update for software-estimated inventory levels.
- */
-export async function updateMachineInventoryInFirebase(
-  machineId: string,
-  inventory: {
-    milk_level: number;
-    coffee_level: number;
-    vanilla_level: number;
-    hazelnut_level: number;
-    irish_level: number;
-    mocha_level: number;
-    water_level: number;
-  }
-): Promise<void> {
-  if (!machineId || !inventory) return;
-  ensureFirebaseReady();
-  const nowIso = new Date().toISOString();
-  const estimatedInventory = {
-    milk_level: Number(inventory.milk_level),
-    coffee_level: Number(inventory.coffee_level),
-    vanilla_level: Number(inventory.vanilla_level),
-    hazelnut_level: Number(inventory.hazelnut_level),
-    irish_level: Number(inventory.irish_level),
-    mocha_level: Number(inventory.mocha_level),
-    water_level: Number(inventory.water_level)
-  };
-
-  const existingLocal = syncedMachinesStore.get(machineId) || { id: machineId };
-  syncedMachinesStore.set(machineId, {
-    ...existingLocal,
-    id: machineId,
-    estimated_inventory: estimatedInventory,
-    inventory_source: 'software_estimated',
-    inventory_updated_at: nowIso,
-    updated_at: nowIso
-  });
-
-  if (!firestore) {
-    return;
-  }
-
-  try {
-    await firestore.collection('machines').doc(machineId).set(
-      {
-        id: machineId,
-        estimated_inventory: estimatedInventory,
-        inventory_source: 'software_estimated',
-        inventory_updated_at: nowIso,
-        updated_at: nowIso
-      },
-      { merge: true }
-    );
-    logger.info(`Synced software-estimated inventory for machine ${machineId} to Firestore`);
-  } catch (error) {
-    handleFirestoreFailure(`Failed to sync inventory for machine ${machineId} to Firestore`, error);
-  }
-}
-
-/**
  * Targeted partial update for machine ownership (`owner_id` ONLY).
  * Strictly preserves `desired_mode`, `status`, `last_seen`, `estimated_inventory`, and `products`.
  */
@@ -1147,6 +979,7 @@ export async function updateMachineOwnerInFirebase(
       { merge: true }
     );
     logger.info(`Updated machine ${machineId} owner_id=${normalizedOwnerId ?? 'null'} in Firestore`);
+    notifyAnalyticsMutation();
   } catch (error) {
     handleFirestoreFailure(`Failed to update owner_id for machine ${machineId} in Firestore`, error);
   }
@@ -1209,6 +1042,7 @@ export async function updateMachineProductInFirebase(
     logger.info(
       `Updated machine ${machineId} product ${pidKey} (price=₹${entry.price}, is_available=${entry.is_available}) in Firestore`
     );
+    notifyAnalyticsMutation();
   } catch (error) {
     handleFirestoreFailure(
       `Failed to update product ${pidKey} for machine ${machineId} in Firestore`,
@@ -1222,9 +1056,28 @@ export async function updateMachineProductInFirebase(
  * Uses the global `products` catalog as default, overlaid with machine-specific overrides
  * from Firestore (`machines/{machineId}.products`) and `machine_products` in SQLite/MockDatabase.
  */
+export function getAuthoritativeMachineProducts(
+  machineId: string,
+  db: any,
+  preloadedRemoteMachine?: any
+): Promise<
+  Array<{
+    id: number;
+    product_id: number;
+    machine_id: string;
+    name: string;
+    default_price: number;
+    price: number;
+    is_available: boolean;
+    description: string;
+    image: string;
+    updated_at: string | null;
+  }>
+>;
 export async function getAuthoritativeMachineProducts(
   machineId: string,
-  db: any
+  db: any,
+  preloadedRemoteMachine?: any
 ): Promise<
   Array<{
     id: number;
@@ -1243,7 +1096,10 @@ export async function getAuthoritativeMachineProducts(
   const catalogProducts = await db.all('SELECT * FROM products');
   const sortedCatalog = [...catalogProducts].sort((a, b) => Number(a.id) - Number(b.id));
 
-  const remoteMachine = await getMachineFromFirebase(machineId);
+  const remoteMachine =
+    preloadedRemoteMachine !== undefined
+      ? preloadedRemoteMachine
+      : await getMachineFromFirebase(machineId);
   const remoteProductsMap =
     remoteMachine?.products && typeof remoteMachine.products === 'object'
       ? remoteMachine.products
@@ -1351,7 +1207,8 @@ export async function getAuthoritativeMachineProducts(
 export async function getAuthoritativeMachineProduct(
   machineId: string,
   productId: number,
-  db: any
+  db: any,
+  preloadedRemoteMachine?: any
 ): Promise<{
   id: number;
   product_id: number;
@@ -1364,7 +1221,7 @@ export async function getAuthoritativeMachineProduct(
   image: string;
   updated_at: string | null;
 } | null> {
-  const products = await getAuthoritativeMachineProducts(machineId, db);
+  const products = await getAuthoritativeMachineProducts(machineId, db, preloadedRemoteMachine);
   return products.find((p) => Number(p.id) === Number(productId)) || null;
 }
 
@@ -1404,9 +1261,6 @@ export async function syncMachineToFirebase(
     last_seen: existingMirror.last_seen ?? (machine.last_seen || null),
     owner_id: 'owner_id' in existingMirror ? existingMirror.owner_id : (machine.owner_id ?? null),
     ...(machine.kiosk_token ? { kiosk_token: machine.kiosk_token } : {}),
-    ...(machine.estimated_inventory ? { estimated_inventory: machine.estimated_inventory } : {}),
-    ...(machine.inventory_source ? { inventory_source: machine.inventory_source } : {}),
-    ...(machine.inventory_updated_at ? { inventory_updated_at: machine.inventory_updated_at } : {}),
     ...(machine.products ? { products: machine.products } : {}),
     updated_at: existingMirror.updated_at || nowIso
   };
@@ -1445,11 +1299,6 @@ export async function syncMachineToFirebase(
         payload.kiosk_token = machine.kiosk_token;
       }
       if (options.createOnly) {
-        if (machine.estimated_inventory) {
-          payload.estimated_inventory = machine.estimated_inventory;
-          payload.inventory_source = machine.inventory_source || 'software_estimated';
-          payload.inventory_updated_at = machine.inventory_updated_at || nowIso;
-        }
         payload.products = machine.products || {};
         tx.set(docRef, payload);
       } else {
@@ -1530,11 +1379,18 @@ export async function getAllMachinesFromFirebase(): Promise<Map<string, any>> {
  * prevents local SQLite/MockDatabase seed defaults from overwriting newer Firestore data,
  * and computes real-time `connection_status` from `last_seen` (90s timeout) separately from `desired_mode`.
  */
-export async function getAuthoritativeMachineState(machineId: string, db: any): Promise<any | null> {
+export async function getAuthoritativeMachineState(
+  machineId: string,
+  db: any,
+  preloadedRemoteMachine?: any
+): Promise<any | null> {
   if (!machineId) return null;
   ensureFirebaseReady();
 
-  const remoteMachine = await getMachineFromFirebase(machineId);
+  const remoteMachine =
+    preloadedRemoteMachine !== undefined
+      ? preloadedRemoteMachine
+      : await getMachineFromFirebase(machineId);
   let localMachine = await db.get('SELECT * FROM machines WHERE id = ?', [machineId]);
 
   if (firestore && !remoteMachine) {
@@ -1623,47 +1479,9 @@ export async function getAuthoritativeMachineState(machineId: string, db: any): 
     );
   }
 
-  // Ensure local inventory row exists and hydrate from Firestore estimated_inventory if Firestore has it
-  let localInv = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [machineId]);
-  if (!localInv) {
-    await db.run(
-      'INSERT INTO inventory (machine_id, milk_level, coffee_level, vanilla_level, hazelnut_level, irish_level, mocha_level, water_level, updated_at) VALUES (?, 100, 100, 100, 100, 100, 100, 100, ?)',
-      [machineId, resolvedUpdatedAt]
-    );
-    localInv = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [machineId]);
-  }
-
-  const remoteInv = remoteMachine?.estimated_inventory;
-  if (remoteInv && typeof remoteInv === 'object') {
-    const remoteInvUpdated = remoteMachine?.inventory_updated_at || remoteMachine?.updated_at || '';
-    const localInvUpdated = localInv?.updated_at || '2026-01-01T00:00:00.000Z';
-    const shouldHydrateInv =
-      Boolean(firestore) ||
-      !localInvUpdated ||
-      !remoteInvUpdated ||
-      remoteInvUpdated >= localInvUpdated;
-    if (shouldHydrateInv) {
-      await db.run(
-        'UPDATE inventory SET milk_level = ?, coffee_level = ?, vanilla_level = ?, hazelnut_level = ?, irish_level = ?, mocha_level = ?, water_level = ?, updated_at = ? WHERE machine_id = ?',
-        [
-          remoteInv.milk_level ?? localInv.milk_level,
-          remoteInv.coffee_level ?? localInv.coffee_level,
-          remoteInv.vanilla_level ?? localInv.vanilla_level,
-          remoteInv.hazelnut_level ?? localInv.hazelnut_level,
-          remoteInv.irish_level ?? localInv.irish_level,
-          remoteInv.mocha_level ?? localInv.mocha_level,
-          remoteInv.water_level ?? localInv.water_level,
-          remoteInvUpdated || new Date().toISOString(),
-          machineId
-        ]
-      );
-      localInv = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [machineId]);
-    }
-  }
-
   const connectionStatus = computeConnectionStatus(resolvedLastSeen);
 
-  return {
+  const machineState = {
     id: machineId,
     machine_name: resolvedMachineName,
     location: resolvedLocation,
@@ -1674,18 +1492,18 @@ export async function getAuthoritativeMachineState(machineId: string, db: any): 
     last_seen: resolvedLastSeen,
     kiosk_token: resolvedKioskToken,
     owner_id: resolvedOwnerId,
-    updated_at: resolvedUpdatedAt,
-    inventory_source: 'software_estimated',
-    inventory: {
-      milk_level: localInv?.milk_level ?? 100,
-      coffee_level: localInv?.coffee_level ?? 100,
-      vanilla_level: localInv?.vanilla_level ?? 100,
-      hazelnut_level: localInv?.hazelnut_level ?? 100,
-      irish_level: localInv?.irish_level ?? 100,
-      mocha_level: localInv?.mocha_level ?? 100,
-      water_level: localInv?.water_level ?? 100
-    }
+    updated_at: resolvedUpdatedAt
   };
+
+  if (remoteMachine) {
+    Object.defineProperty(machineState, '_remoteMachine', {
+      value: remoteMachine,
+      enumerable: false,
+      configurable: true
+    });
+  }
+
+  return machineState;
 }
 
 /**
@@ -1706,7 +1524,8 @@ export async function getAuthoritativeMachinesList(db: any): Promise<any[]> {
 
   const results: any[] = [];
   for (const mId of allMachineIds) {
-    const state = await getAuthoritativeMachineState(mId, db);
+    const preloadedRemote = remoteMachinesMap.has(mId) ? remoteMachinesMap.get(mId) : null;
+    const state = await getAuthoritativeMachineState(mId, db, preloadedRemote);
     if (state) {
       results.push(state);
     }
@@ -2175,8 +1994,13 @@ function buildNormalizedAuthoritativeFallbackOrder(remoteOrder: any): any {
  * Authoritative Firestore Order Read-Through & Hydration
  * Preserves historical charged `amount` on each order across Vercel serverless cold starts.
  */
-async function hydrateLocalOrderFromAuthoritativeRecord(remoteOrder: any, db: any): Promise<any | null> {
+async function hydrateLocalOrderFromAuthoritativeRecord(
+  remoteOrder: any,
+  db: any,
+  options: { reconcileRefunds?: boolean } = {}
+): Promise<any | null> {
   if (!remoteOrder || !remoteOrder.id) return null;
+  const shouldReconcileRefunds = options.reconcileRefunds !== false;
   const orderId = String(remoteOrder.id);
   const machineId = normalizeOrderMachineId(remoteOrder.machine_id);
   const productId = parseOrderProductId(remoteOrder.product_id ?? remoteOrder.productId);
@@ -2185,18 +2009,18 @@ async function hydrateLocalOrderFromAuthoritativeRecord(remoteOrder: any, db: an
       ? remoteOrder.created_at
       : null;
 
-  if (!machineId || productId === null) {
-    logger.warn(
-      `Skipping local order hydration for malformed Firestore document ${orderId}: machine_id=${String(
-        remoteOrder.machine_id ?? 'missing'
-      )}, product_id=${String(remoteOrder.product_id ?? remoteOrder.productId ?? 'missing')}`
-    );
-    return null;
-  }
-
   const existing = await db.get('SELECT * FROM orders WHERE id = ?', [orderId]);
 
   if (!existing) {
+    if (!machineId || productId === null) {
+      logger.warn(
+        `Skipping local order hydration for malformed Firestore document ${orderId}: machine_id=${String(
+          remoteOrder.machine_id ?? 'missing'
+        )}, product_id=${String(remoteOrder.product_id ?? remoteOrder.productId ?? 'missing')}`
+      );
+      return null;
+    }
+
     if (!createdAt) {
       logger.warn(
         `Skipping local SQL hydration for order ${orderId}: missing authoritative created_at timestamp`
@@ -2260,7 +2084,10 @@ async function hydrateLocalOrderFromAuthoritativeRecord(remoteOrder: any, db: an
         orderId
       ]).catch(() => {});
     }
-    if (remoteOrder.refund_status || remoteOrder.total_refunded_amount_paise !== undefined || remoteOrder.pending_refund_amount_paise !== undefined) {
+    if (
+      shouldReconcileRefunds &&
+      (remoteOrder.refund_status || remoteOrder.total_refunded_amount_paise !== undefined || remoteOrder.pending_refund_amount_paise !== undefined)
+    ) {
       await reconcileOrderRefundRecords(orderId, remoteOrder, db, firestore);
     }
     if (remoteOrder.captured_amount_paise !== undefined && remoteOrder.captured_amount_paise !== null) {
@@ -2315,7 +2142,9 @@ async function hydrateLocalOrderFromAuthoritativeRecord(remoteOrder: any, db: an
     }
 
     // Reconcile individual refund documents and calculate authoritative balances (Parts B & C)
-    await reconcileOrderRefundRecords(orderId, remoteOrder, db, firestore);
+    if (shouldReconcileRefunds) {
+      await reconcileOrderRefundRecords(orderId, remoteOrder, db, firestore);
+    }
   }
 
   return await db.get(
@@ -2476,6 +2305,12 @@ export function enrichAuthoritativeOrderRecord(o: any): any {
     updated_at: o.updated_at || synced?.updated_at || createdAt || null,
     dispensed_at: o.dispensed_at || synced?.dispensed_at || null,
     dispense_started_at: o.dispense_started_at || synced?.dispense_started_at || null,
+    claimed_at: o.claimed_at || synced?.claimed_at || null,
+    expires_at: o.expires_at || synced?.expires_at || null,
+    expired_at: o.expired_at || synced?.expired_at || null,
+    dispense_outcome: o.dispense_outcome || synced?.dispense_outcome || null,
+    failure_stage: o.failure_stage || synced?.failure_stage || null,
+    failure_reason: o.failure_reason || synced?.failure_reason || null,
     refund_status: o.refund_status || synced?.refund_status || 'NONE',
     total_refunded_amount_paise: Number(o.total_refunded_amount_paise ?? synced?.total_refunded_amount_paise ?? 0),
     pending_refund_amount_paise: Number(o.pending_refund_amount_paise ?? synced?.pending_refund_amount_paise ?? 0),
@@ -2483,51 +2318,155 @@ export function enrichAuthoritativeOrderRecord(o: any): any {
   };
 }
 
-export async function getAuthoritativeOrders(
+export interface AuthoritativeOrdersQueryOptions {
+  limit?: number;
+  startDate?: string;
+  endDate?: string;
+  cursor?: string;
+}
+
+export interface PaginatedAuthoritativeOrdersResult {
+  orders: any[];
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+function normalizeIsoBound(raw?: string): string | null {
+  if (!raw || typeof raw !== 'string' || !raw.trim()) return null;
+  const trimmed = raw.trim();
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
+export async function getAuthoritativeOrdersPaginated(
   db: any,
-  filterMachineIds?: string[]
-): Promise<any[]> {
+  filterMachineIds?: string[],
+  queryOptions?: AuthoritativeOrdersQueryOptions
+): Promise<PaginatedAuthoritativeOrdersResult> {
   ensureFirebaseReady();
+
+  if (filterMachineIds !== undefined && filterMachineIds.length === 0) {
+    return { orders: [], hasMore: false, nextCursor: null };
+  }
+
+  const rawLimit = queryOptions?.limit;
+  const normalizedLimit =
+    rawLimit !== undefined && Number.isFinite(Number(rawLimit)) && Number(rawLimit) > 0
+      ? Math.min(500, Math.max(1, Math.floor(Number(rawLimit))))
+      : undefined;
+  const fetchLimit = normalizedLimit !== undefined ? normalizedLimit + 1 : undefined;
+  const startIso = normalizeIsoBound(queryOptions?.startDate);
+  const endIso = normalizeIsoBound(queryOptions?.endDate);
+  const cursorIso = normalizeIsoBound(queryOptions?.cursor);
+
+  const isScopedOrPaginated = Boolean(
+    filterMachineIds !== undefined ||
+      normalizedLimit !== undefined ||
+      startIso ||
+      endIso ||
+      cursorIso
+  );
+
+  const allowedSet =
+    filterMachineIds !== undefined
+      ? new Set(filterMachineIds.map((m) => String(m).trim()).filter(Boolean))
+      : null;
+
+  if (allowedSet && allowedSet.size === 0) {
+    return { orders: [], hasMore: false, nextCursor: null };
+  }
+
+  let fetchedOrders: Map<string, any> | null = null;
+
   if (firestore) {
     const preFetchEpochs = syncedOrdersStore.captureEpochs();
-    const fetchedOrders = new Map<string, any>();
+    fetchedOrders = new Map<string, any>();
     try {
-      const snap = await firestore.collection('orders').get();
-      snap.forEach((doc) => {
-        const data = doc.data();
-        if (data) {
-          const id = String(data.id || doc.id);
-          fetchedOrders.set(id, { ...data, id });
+      const applyBounds = (baseQuery: FirebaseFirestore.Query): FirebaseFirestore.Query => {
+        let q = baseQuery;
+        if (startIso) q = q.where('created_at', '>=', startIso);
+        if (endIso) q = q.where('created_at', '<=', endIso);
+        if (cursorIso) q = q.where('created_at', '<', cursorIso);
+        if (fetchLimit !== undefined) {
+          q = q.orderBy('created_at', 'desc').limit(fetchLimit);
         }
-      });
-      syncedOrdersStore.reconcileSnapshot(preFetchEpochs, fetchedOrders);
+        return q;
+      };
+
+      if (allowedSet) {
+        const machineList = Array.from(allowedSet);
+        const chunks: string[][] = [];
+        for (let i = 0; i < machineList.length; i += 30) {
+          chunks.push(machineList.slice(i, i + 30));
+        }
+        const chunkSnaps = await Promise.all(
+          chunks.map((chunk) => {
+            const base =
+              chunk.length === 1
+                ? firestore!.collection('orders').where('machine_id', '==', chunk[0])
+                : firestore!.collection('orders').where('machine_id', 'in', chunk);
+            return applyBounds(base).get();
+          })
+        );
+        for (const snap of chunkSnaps) {
+          snap.forEach((doc) => {
+            const data = doc.data();
+            if (data) {
+              const id = String(data.id || doc.id);
+              fetchedOrders!.set(id, { ...data, id });
+            }
+          });
+        }
+      } else {
+        const snap = await applyBounds(firestore.collection('orders')).get();
+        snap.forEach((doc) => {
+          const data = doc.data();
+          if (data) {
+            const id = String(data.id || doc.id);
+            fetchedOrders!.set(id, { ...data, id });
+          }
+        });
+      }
+
+      if (!isScopedOrPaginated) {
+        syncedOrdersStore.reconcileSnapshot(preFetchEpochs, fetchedOrders);
+      } else {
+        for (const [id, record] of fetchedOrders.entries()) {
+          const epochBefore = preFetchEpochs.get(id) ?? 0;
+          syncedOrdersStore.setIfUnchanged(id, epochBefore, record);
+        }
+      }
     } catch (error) {
       handleFirestoreFailure('Failed to fetch orders from Firestore', error);
     }
   }
 
-  for (const o of syncedOrdersStore.values()) {
-    await hydrateLocalOrderFromAuthoritativeRecord(o, db);
+  // Hydrate fetched/cached orders WITHOUT triggering N+1 subcollection refund queries
+  const ordersToHydrate =
+    firestore && isScopedOrPaginated && fetchedOrders
+      ? fetchedOrders.values()
+      : syncedOrdersStore.values();
+
+  for (const o of ordersToHydrate) {
+    if (allowedSet) {
+      const mId = normalizeOrderMachineId(o?.machine_id);
+      if (!mId || !allowedSet.has(mId)) continue;
+    }
+    await hydrateLocalOrderFromAuthoritativeRecord(o, db, { reconcileRefunds: false });
   }
 
   let results: any[] = [];
-  const allowedSet =
-    filterMachineIds !== undefined
-      ? new Set(filterMachineIds.map((m) => String(m).trim()))
-      : null;
-
-  if (filterMachineIds !== undefined) {
-    if (filterMachineIds.length === 0) {
-      return [];
-    }
-    if (filterMachineIds.length === 1) {
+  if (allowedSet !== null) {
+    const machineList = Array.from(allowedSet);
+    if (machineList.length === 1) {
       results = await db.all(
         `SELECT o.*, p.name as product_name
          FROM orders o
          LEFT JOIN products p ON o.product_id = p.id
          WHERE o.machine_id = ?
          ORDER BY o.created_at DESC`,
-        [filterMachineIds[0]]
+        [machineList[0]]
       );
     } else {
       const allOrders = await db.all(
@@ -2536,7 +2475,7 @@ export async function getAuthoritativeOrders(
          LEFT JOIN products p ON o.product_id = p.id
          ORDER BY o.created_at DESC`
       );
-      results = allOrders.filter((o: any) => allowedSet!.has(String(o.machine_id || '').trim()));
+      results = allOrders.filter((o: any) => allowedSet.has(String(o.machine_id || '').trim()));
     }
   } else {
     results = await db.all(
@@ -2555,8 +2494,13 @@ export async function getAuthoritativeOrders(
     }
   }
 
-  // Preserve authoritative Firestore / synced records even when local SQL hydration was skipped
-  for (const remoteOrder of syncedOrdersStore.values()) {
+  // Merge authoritative Firestore records (and in offline mode, preserve syncedOrdersStore entries)
+  const remoteMergeSource =
+    firestore && isScopedOrPaginated && fetchedOrders
+      ? fetchedOrders.values()
+      : syncedOrdersStore.values();
+
+  for (const remoteOrder of remoteMergeSource) {
     const fallback = buildNormalizedAuthoritativeFallbackOrder(remoteOrder);
     if (allowedSet !== null) {
       if (!fallback.machine_id || !allowedSet.has(fallback.machine_id)) {
@@ -2578,9 +2522,48 @@ export async function getAuthoritativeOrders(
     }
   }
 
-  return Array.from(mergedById.values()).sort((a, b) =>
+  let finalOrders = Array.from(mergedById.values());
+
+  if (firestore && isScopedOrPaginated && fetchedOrders) {
+    finalOrders = finalOrders.filter((o) => fetchedOrders!.has(String(o.id)));
+  } else {
+    if (startIso) {
+      finalOrders = finalOrders.filter((o) => o.created_at && String(o.created_at) >= startIso);
+    }
+    if (endIso) {
+      finalOrders = finalOrders.filter((o) => o.created_at && String(o.created_at) <= endIso);
+    }
+    if (cursorIso) {
+      finalOrders = finalOrders.filter((o) => o.created_at && String(o.created_at) < cursorIso);
+    }
+  }
+
+  finalOrders.sort((a, b) =>
     String(b.created_at || '').localeCompare(String(a.created_at || ''))
   );
+
+  let hasMore = false;
+  let nextCursor: string | null = null;
+  if (normalizedLimit !== undefined && finalOrders.length > normalizedLimit) {
+    hasMore = true;
+    finalOrders = finalOrders.slice(0, normalizedLimit);
+    nextCursor = finalOrders[finalOrders.length - 1]?.created_at || null;
+  }
+
+  return {
+    orders: finalOrders,
+    hasMore,
+    nextCursor
+  };
+}
+
+export async function getAuthoritativeOrders(
+  db: any,
+  filterMachineIds?: string[],
+  queryOptions?: AuthoritativeOrdersQueryOptions
+): Promise<any[]> {
+  const result = await getAuthoritativeOrdersPaginated(db, filterMachineIds, queryOptions);
+  return result.orders;
 }
 
 /**
@@ -2670,112 +2653,86 @@ export async function ensureFirestoreSeeded(db: any): Promise<void> {
       if (process.env.VERCEL && db) {
         await db.run('DELETE FROM orders');
         if (isProductionEnv) {
-          await db.run('DELETE FROM inventory');
           await db.run('DELETE FROM machines');
         }
       }
 
-      // 1. Seed default Admin user (`users/1`) ONLY if missing in Firestore AND NOT in Production
-      // Default staging credentials ('admin123') are never seeded into Production Firestore.
-      const adminRef = activeFirestore.collection('users').doc('1');
-      const adminRecord = await activeFirestore.runTransaction(async (tx: any) => {
-        const snap = await tx.get(adminRef);
-        if (snap.exists) {
-          const existing = snap.data() || {};
-          return { ...existing, id: String(existing.id || '1') };
-        }
-        if (isProductionEnv) {
-          return null;
-        }
-        const nowIso = new Date().toISOString();
-        const defaultAdmin = {
-          id: '1',
-          name: 'Caffix Manager',
-          email: 'admin@caffix.com',
-          password: bcrypt.hashSync('admin123', 10),
-          role: 'admin' as const,
-          setup_token_hash: null,
-          setup_token_expires_at: null,
-          must_change_password: 0,
-          updated_at: nowIso
-        };
-        tx.set(adminRef, defaultAdmin);
-        return defaultAdmin;
-      });
-      if (adminRecord) {
-        syncedUsersStore.set('1', adminRecord);
-        if (db) {
-          await hydrateLocalUserFromAuthoritativeRecord(adminRecord, db);
-        }
-      }
-
-      // 2. Seed default Kiosk user (`users/2`) ONLY if missing in Firestore AND NOT in Production
-      // Default staging credentials ('kiosk123') are never seeded into Production Firestore.
-      const kioskRef = activeFirestore.collection('users').doc('2');
-      const kioskRecord = await activeFirestore.runTransaction(async (tx: any) => {
-        const snap = await tx.get(kioskRef);
-        if (snap.exists) {
-          const existing = snap.data() || {};
-          return { ...existing, id: String(existing.id || '2') };
-        }
-        if (isProductionEnv) {
-          return null;
-        }
-        const nowIso = new Date().toISOString();
-        const defaultKiosk = {
-          id: '2',
-          name: 'kiosk-one',
-          email: 'kiosk01@caffix.com',
-          password: bcrypt.hashSync('kiosk123', 10),
-          role: 'kiosk' as const,
-          setup_token_hash: null,
-          setup_token_expires_at: null,
-          must_change_password: 0,
-          updated_at: nowIso
-        };
-        tx.set(kioskRef, defaultKiosk);
-        return defaultKiosk;
-      });
-      if (kioskRecord) {
-        syncedUsersStore.set('2', kioskRecord);
-        if (db) {
-          await hydrateLocalUserFromAuthoritativeRecord(kioskRecord, db);
-        }
-      }
-
-      // 3. Seed default Machines (`machines/CFX-MC-01`, `machines/CFX-MC-02`, `machines/CFX-MC-03`, etc.) ONLY if missing in Firestore (Preview/non-Production only)
+      // 1-3. Non-Production / Staging default user & machine seeding ONLY if missing in Firestore.
+      // Production never seeds default accounts ('admin123'/'kiosk123') or demo machines, so skip
+      // redundant cold-start transaction reads when VERCEL_ENV=production.
       if (!isProductionEnv) {
+        // 1. Seed default Admin user (`users/1`) ONLY if missing in Firestore
+        const adminRef = activeFirestore.collection('users').doc('1');
+        const adminRecord = await activeFirestore.runTransaction(async (tx: any) => {
+          const snap = await tx.get(adminRef);
+          if (snap.exists) {
+            const existing = snap.data() || {};
+            return { ...existing, id: String(existing.id || '1') };
+          }
+          const nowIso = new Date().toISOString();
+          const defaultAdmin = {
+            id: '1',
+            name: 'Caffix Manager',
+            email: 'admin@caffix.com',
+            password: bcrypt.hashSync('admin123', 10),
+            role: 'admin' as const,
+            setup_token_hash: null,
+            setup_token_expires_at: null,
+            must_change_password: 0,
+            updated_at: nowIso
+          };
+          tx.set(adminRef, defaultAdmin);
+          return defaultAdmin;
+        });
+        if (adminRecord) {
+          syncedUsersStore.set('1', adminRecord);
+          if (db) {
+            await hydrateLocalUserFromAuthoritativeRecord(adminRecord, db);
+          }
+        }
+
+        // 2. Seed default Kiosk user (`users/2`) ONLY if missing in Firestore
+        const kioskRef = activeFirestore.collection('users').doc('2');
+        const kioskRecord = await activeFirestore.runTransaction(async (tx: any) => {
+          const snap = await tx.get(kioskRef);
+          if (snap.exists) {
+            const existing = snap.data() || {};
+            return { ...existing, id: String(existing.id || '2') };
+          }
+          const nowIso = new Date().toISOString();
+          const defaultKiosk = {
+            id: '2',
+            name: 'kiosk-one',
+            email: 'kiosk01@caffix.com',
+            password: bcrypt.hashSync('kiosk123', 10),
+            role: 'kiosk' as const,
+            setup_token_hash: null,
+            setup_token_expires_at: null,
+            must_change_password: 0,
+            updated_at: nowIso
+          };
+          tx.set(kioskRef, defaultKiosk);
+          return defaultKiosk;
+        });
+        if (kioskRecord) {
+          syncedUsersStore.set('2', kioskRecord);
+          if (db) {
+            await hydrateLocalUserFromAuthoritativeRecord(kioskRecord, db);
+          }
+        }
+
+        // 3. Seed default Machines (`machines/CFX-MC-01`, `machines/CFX-MC-02`, `machines/CFX-MC-03`, etc.) ONLY if missing in Firestore
         const seeds = getConfiguredMachineSeeds();
         for (let i = 0; i < seeds.length; i++) {
           const m = seeds[i];
           const defaultLocation = i === 0 ? 'Delhi Airport T3' : m.location;
-          const defaultInventory =
-            i === 0
-              ? {
-                  milk_level: 92,
-                  coffee_level: 78,
-                  vanilla_level: 65,
-                  hazelnut_level: 55,
-                  irish_level: 60,
-                  mocha_level: 50,
-                  water_level: 85
-                }
-              : {
-                  milk_level: 100,
-                  coffee_level: 100,
-                  vanilla_level: 100,
-                  hazelnut_level: 100,
-                  irish_level: 100,
-                  mocha_level: 100,
-                  water_level: 100
-                };
 
           const machineRef = activeFirestore.collection('machines').doc(m.id);
           const machineRecord = await activeFirestore.runTransaction(async (tx: any) => {
             const snap = await tx.get(machineRef);
             if (snap.exists) {
               const existing = snap.data() || {};
-              // Strictly preserve existing owner_id, desired_mode, status, last_seen, estimated_inventory, and products!
+              // Strictly preserve existing owner_id, desired_mode, status, last_seen, and products!
               if (m.kiosk_token && !existing.kiosk_token) {
                 tx.set(machineRef, { kiosk_token: m.kiosk_token }, { merge: true });
                 return { ...existing, id: existing.id || m.id, kiosk_token: m.kiosk_token };
@@ -2792,9 +2749,6 @@ export async function ensureFirestoreSeeded(db: any): Promise<void> {
               status: 'online',
               last_seen: null,
               owner_id: null,
-              estimated_inventory: defaultInventory,
-              inventory_source: 'software_estimated',
-              inventory_updated_at: nowIso,
               products: {},
               updated_at: nowIso,
               ...(m.kiosk_token ? { kiosk_token: m.kiosk_token } : {})

@@ -1,4 +1,9 @@
-import { getFirestoreInstance, isFirestoreActive, isStrictFirebaseEnvironment } from '../utils/firebase';
+import {
+  getFirestoreInstance,
+  isFirestoreActive,
+  isStrictFirebaseEnvironment,
+  registerAnalyticsCacheInvalidator
+} from '../utils/firebase';
 import { ServiceUnavailableError } from '../utils/errors';
 import logger from '../utils/logger';
 
@@ -77,16 +82,6 @@ export interface ProductAnalyticsItem {
   refunded_units: number;
   refunded_amount_paise: number;
   refunded_amount_inr: number;
-}
-
-export interface InventoryMovementAnalytics {
-  ingredient: string;
-  total_consumed: number;
-  total_refilled: number;
-  total_waste: number;
-  total_adjustments: number;
-  current_balance: number | null;
-  inventory_source?: string | null;
 }
 
 export interface RefundItemSummary {
@@ -401,72 +396,165 @@ export function chunkMachineIds(machineIds?: string[], maxChunkSize: number = 30
   return chunks;
 }
 
+interface AnalyticsCacheEntry {
+  firestoreRef: any;
+  expiresAt: number;
+  data: any[];
+}
+
+const inFlightAnalyticsQueries = new Map<string, Promise<any[]>>();
+const analyticsQueryCache = new Map<string, AnalyticsCacheEntry>();
+const MAX_ANALYTICS_CACHE_ENTRIES = 128;
+
+export function clearAnalyticsCache(): void {
+  inFlightAnalyticsQueries.clear();
+  analyticsQueryCache.clear();
+}
+
+registerAnalyticsCacheInvalidator(clearAnalyticsCache);
+
+function getAnalyticsCacheTtlMs(): number {
+  const raw = process.env.ANALYTICS_CACHE_TTL_MS;
+  if (raw !== undefined && String(raw).trim() !== '') {
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed >= 0 ? Math.min(60_000, Math.floor(parsed)) : 0;
+  }
+  const isDeployedRuntime = Boolean(
+    process.env.VERCEL ||
+      process.env.VERCEL_ENV ||
+      String(process.env.NODE_ENV || '').toLowerCase() === 'production'
+  );
+  return isDeployedRuntime ? 15_000 : 0;
+}
+
+function buildAnalyticsCacheKey(kind: string, options?: AnalyticsScopeOptions): string {
+  const mId = options?.machineId ? String(options.machineId).trim() : '';
+  const mIds =
+    options?.machineIds !== undefined
+      ? Array.from(new Set(options.machineIds.map((m) => String(m || '').trim()).filter(Boolean)))
+          .sort()
+          .join(',')
+      : '*';
+  const start = options?.timeframe?.startDate ? String(options.timeframe.startDate).trim() : '';
+  const end = options?.timeframe?.endDate ? String(options.timeframe.endDate).trim() : '';
+  return `${kind}|${mId}|${mIds}|${start}|${end}`;
+}
+
+async function runCoalescedFirestoreAnalyticsQuery(
+  kind: string,
+  firestore: FirebaseFirestore.Firestore,
+  options: AnalyticsScopeOptions | undefined,
+  loader: () => Promise<any[]>
+): Promise<any[]> {
+  const key = buildAnalyticsCacheKey(kind, options);
+  const ttlMs = getAnalyticsCacheTtlMs();
+  const now = Date.now();
+
+  if (ttlMs > 0) {
+    const cached = analyticsQueryCache.get(key);
+    if (cached && cached.firestoreRef === firestore && cached.expiresAt > now) {
+      return cached.data;
+    }
+  }
+
+  const existingInFlight = inFlightAnalyticsQueries.get(key);
+  if (existingInFlight) {
+    return existingInFlight;
+  }
+
+  const promise = (async () => {
+    const result = await loader();
+    if (ttlMs > 0) {
+      if (analyticsQueryCache.size >= MAX_ANALYTICS_CACHE_ENTRIES) {
+        analyticsQueryCache.clear();
+      }
+      analyticsQueryCache.set(key, {
+        firestoreRef: firestore,
+        expiresAt: Date.now() + ttlMs,
+        data: result
+      });
+    }
+    return result;
+  })();
+
+  inFlightAnalyticsQueries.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    if (inFlightAnalyticsQueries.get(key) === promise) {
+      inFlightAnalyticsQueries.delete(key);
+    }
+  }
+}
+
 async function queryFirestoreOrders(options?: AnalyticsScopeOptions): Promise<any[]> {
   const firestore = getFirestoreInstance();
   if (!firestore) {
     throw new ServiceUnavailableError('Firestore instance not available');
   }
-  try {
-    const startIso = options?.timeframe?.startDate
-      ? (!isNaN(new Date(options.timeframe.startDate).getTime())
-          ? new Date(options.timeframe.startDate).toISOString()
-          : options.timeframe.startDate)
-      : null;
-    const endIso = options?.timeframe?.endDate
-      ? (!isNaN(new Date(options.timeframe.endDate).getTime())
-          ? new Date(options.timeframe.endDate).toISOString()
-          : options.timeframe.endDate)
-      : null;
+  return runCoalescedFirestoreAnalyticsQuery('orders', firestore, options, async () => {
+    try {
+      const startIso = options?.timeframe?.startDate
+        ? (!isNaN(new Date(options.timeframe.startDate).getTime())
+            ? new Date(options.timeframe.startDate).toISOString()
+            : options.timeframe.startDate)
+        : null;
+      const endIso = options?.timeframe?.endDate
+        ? (!isNaN(new Date(options.timeframe.endDate).getTime())
+            ? new Date(options.timeframe.endDate).toISOString()
+            : options.timeframe.endDate)
+        : null;
 
-    // 1. Explicit single machine query
-    if (options?.machineId) {
-      let q: FirebaseFirestore.Query = firestore.collection('orders').where('machine_id', '==', options.machineId);
+      // 1. Explicit single machine query
+      if (options?.machineId) {
+        let q: FirebaseFirestore.Query = firestore.collection('orders').where('machine_id', '==', options.machineId);
+        if (startIso) q = q.where('created_at', '>=', startIso);
+        if (endIso) q = q.where('created_at', '<=', endIso);
+        const snap = await q.get();
+        return snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+      }
+
+      // 2. Machine IDs scope specified (e.g. Owner assigned machines)
+      if (options?.machineIds !== undefined) {
+        if (options.machineIds.length === 0) return [];
+
+        const chunks = chunkMachineIds(options.machineIds, 30);
+        if (chunks.length === 0) return [];
+
+        const chunkPromises = chunks.map(async (chunk) => {
+          let q: FirebaseFirestore.Query = firestore.collection('orders');
+          if (chunk.length === 1) {
+            q = q.where('machine_id', '==', chunk[0]);
+          } else {
+            q = q.where('machine_id', 'in', chunk);
+          }
+          if (startIso) q = q.where('created_at', '>=', startIso);
+          if (endIso) q = q.where('created_at', '<=', endIso);
+          return q.get();
+        });
+
+        const snapshots = await Promise.all(chunkPromises);
+        const docMap = new Map<string, any>();
+        for (const snap of snapshots) {
+          for (const d of snap.docs) {
+            if (!docMap.has(d.id)) {
+              docMap.set(d.id, { ...d.data(), id: d.id });
+            }
+          }
+        }
+        return Array.from(docMap.values());
+      }
+
+      // 3. Fleet-wide query (Super Admin without machine filters)
+      let q: FirebaseFirestore.Query = firestore.collection('orders');
       if (startIso) q = q.where('created_at', '>=', startIso);
       if (endIso) q = q.where('created_at', '<=', endIso);
       const snap = await q.get();
       return snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+    } catch (err: any) {
+      throw new ServiceUnavailableError(`Firestore orders query failed: ${err?.message || err}`);
     }
-
-    // 2. Machine IDs scope specified (e.g. Owner assigned machines)
-    if (options?.machineIds !== undefined) {
-      if (options.machineIds.length === 0) return [];
-
-      const chunks = chunkMachineIds(options.machineIds, 30);
-      if (chunks.length === 0) return [];
-
-      const chunkPromises = chunks.map(async (chunk) => {
-        let q: FirebaseFirestore.Query = firestore.collection('orders');
-        if (chunk.length === 1) {
-          q = q.where('machine_id', '==', chunk[0]);
-        } else {
-          q = q.where('machine_id', 'in', chunk);
-        }
-        if (startIso) q = q.where('created_at', '>=', startIso);
-        if (endIso) q = q.where('created_at', '<=', endIso);
-        return q.get();
-      });
-
-      const snapshots = await Promise.all(chunkPromises);
-      const docMap = new Map<string, any>();
-      for (const snap of snapshots) {
-        for (const d of snap.docs) {
-          if (!docMap.has(d.id)) {
-            docMap.set(d.id, { ...d.data(), id: d.id });
-          }
-        }
-      }
-      return Array.from(docMap.values());
-    }
-
-    // 3. Fleet-wide query (Super Admin without machine filters)
-    let q: FirebaseFirestore.Query = firestore.collection('orders');
-    if (startIso) q = q.where('created_at', '>=', startIso);
-    if (endIso) q = q.where('created_at', '<=', endIso);
-    const snap = await q.get();
-    return snap.docs.map((d) => ({ ...d.data(), id: d.id }));
-  } catch (err: any) {
-    throw new ServiceUnavailableError(`Firestore orders query failed: ${err?.message || err}`);
-  }
+  });
 }
 
 /**
@@ -482,64 +570,66 @@ async function queryFirestoreRefunds(options?: AnalyticsScopeOptions): Promise<a
   if (!firestore) {
     throw new ServiceUnavailableError('Firestore instance not available');
   }
-  try {
-    const startIso = options?.timeframe?.startDate
-      ? (!isNaN(new Date(options.timeframe.startDate).getTime())
-          ? new Date(options.timeframe.startDate).toISOString()
-          : options.timeframe.startDate)
-      : null;
-    const endIso = options?.timeframe?.endDate
-      ? (!isNaN(new Date(options.timeframe.endDate).getTime())
-          ? new Date(options.timeframe.endDate).toISOString()
-          : options.timeframe.endDate)
-      : null;
+  return runCoalescedFirestoreAnalyticsQuery('refunds', firestore, options, async () => {
+    try {
+      const startIso = options?.timeframe?.startDate
+        ? (!isNaN(new Date(options.timeframe.startDate).getTime())
+            ? new Date(options.timeframe.startDate).toISOString()
+            : options.timeframe.startDate)
+        : null;
+      const endIso = options?.timeframe?.endDate
+        ? (!isNaN(new Date(options.timeframe.endDate).getTime())
+            ? new Date(options.timeframe.endDate).toISOString()
+            : options.timeframe.endDate)
+        : null;
 
-    if (options?.machineId) {
-      let q: FirebaseFirestore.Query = firestore.collection('refunds').where('machine_id', '==', options.machineId);
+      if (options?.machineId) {
+        let q: FirebaseFirestore.Query = firestore.collection('refunds').where('machine_id', '==', options.machineId);
+        if (startIso) q = q.where('created_at', '>=', startIso);
+        if (endIso) q = q.where('created_at', '<=', endIso);
+        const snap = await q.get();
+        return snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+      }
+
+      if (options?.machineIds !== undefined) {
+        if (options.machineIds.length === 0) return [];
+
+        const chunks = chunkMachineIds(options.machineIds, 30);
+        if (chunks.length === 0) return [];
+
+        const chunkPromises = chunks.map(async (chunk) => {
+          let q: FirebaseFirestore.Query = firestore.collection('refunds');
+          if (chunk.length === 1) {
+            q = q.where('machine_id', '==', chunk[0]);
+          } else {
+            q = q.where('machine_id', 'in', chunk);
+          }
+          if (startIso) q = q.where('created_at', '>=', startIso);
+          if (endIso) q = q.where('created_at', '<=', endIso);
+          return q.get();
+        });
+
+        const snapshots = await Promise.all(chunkPromises);
+        const docMap = new Map<string, any>();
+        for (const snap of snapshots) {
+          for (const d of snap.docs) {
+            if (!docMap.has(d.id)) {
+              docMap.set(d.id, { ...d.data(), id: d.id });
+            }
+          }
+        }
+        return Array.from(docMap.values());
+      }
+
+      let q: FirebaseFirestore.Query = firestore.collection('refunds');
       if (startIso) q = q.where('created_at', '>=', startIso);
       if (endIso) q = q.where('created_at', '<=', endIso);
       const snap = await q.get();
       return snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+    } catch (err: any) {
+      throw new ServiceUnavailableError(`Firestore refunds query failed: ${err?.message || err}`);
     }
-
-    if (options?.machineIds !== undefined) {
-      if (options.machineIds.length === 0) return [];
-
-      const chunks = chunkMachineIds(options.machineIds, 30);
-      if (chunks.length === 0) return [];
-
-      const chunkPromises = chunks.map(async (chunk) => {
-        let q: FirebaseFirestore.Query = firestore.collection('refunds');
-        if (chunk.length === 1) {
-          q = q.where('machine_id', '==', chunk[0]);
-        } else {
-          q = q.where('machine_id', 'in', chunk);
-        }
-        if (startIso) q = q.where('created_at', '>=', startIso);
-        if (endIso) q = q.where('created_at', '<=', endIso);
-        return q.get();
-      });
-
-      const snapshots = await Promise.all(chunkPromises);
-      const docMap = new Map<string, any>();
-      for (const snap of snapshots) {
-        for (const d of snap.docs) {
-          if (!docMap.has(d.id)) {
-            docMap.set(d.id, { ...d.data(), id: d.id });
-          }
-        }
-      }
-      return Array.from(docMap.values());
-    }
-
-    let q: FirebaseFirestore.Query = firestore.collection('refunds');
-    if (startIso) q = q.where('created_at', '>=', startIso);
-    if (endIso) q = q.where('created_at', '<=', endIso);
-    const snap = await q.get();
-    return snap.docs.map((d) => ({ ...d.data(), id: d.id }));
-  } catch (err: any) {
-    throw new ServiceUnavailableError(`Firestore refunds query failed: ${err?.message || err}`);
-  }
+  });
 }
 
 async function queryFirestoreMachines(options?: AnalyticsScopeOptions): Promise<any[]> {
@@ -547,90 +637,27 @@ async function queryFirestoreMachines(options?: AnalyticsScopeOptions): Promise<
   if (!firestore) {
     throw new ServiceUnavailableError('Firestore instance not available');
   }
-  try {
-    if (options?.machineId) {
-      const doc = await firestore.collection('machines').doc(options.machineId).get();
-      if (!doc.exists) return [];
-      return [{ ...doc.data(), id: doc.id }];
-    }
-    if (options?.machineIds !== undefined && options.machineIds.length === 0) {
-      return [];
-    }
-    const snap = await firestore.collection('machines').get();
-    let list = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
-    if (options?.machineIds !== undefined) {
-      const allowed = new Set(options.machineIds);
-      list = list.filter((m) => allowed.has(m.id));
-    }
-    return list;
-  } catch (err: any) {
-    throw new ServiceUnavailableError(`Firestore machines query failed: ${err?.message || err}`);
-  }
-}
-
-async function queryFirestoreInventoryLedger(options?: AnalyticsScopeOptions): Promise<any[]> {
-  const firestore = getFirestoreInstance();
-  if (!firestore) {
-    throw new ServiceUnavailableError('Firestore instance not available');
-  }
-  try {
-    const startIso = options?.timeframe?.startDate
-      ? (!isNaN(new Date(options.timeframe.startDate).getTime())
-          ? new Date(options.timeframe.startDate).toISOString()
-          : options.timeframe.startDate)
-      : null;
-    const endIso = options?.timeframe?.endDate
-      ? (!isNaN(new Date(options.timeframe.endDate).getTime())
-          ? new Date(options.timeframe.endDate).toISOString()
-          : options.timeframe.endDate)
-      : null;
-
-    if (options?.machineId) {
-      let q: FirebaseFirestore.Query = firestore.collection('inventory_ledger').where('machine_id', '==', options.machineId);
-      if (startIso) q = q.where('created_at', '>=', startIso);
-      if (endIso) q = q.where('created_at', '<=', endIso);
-      const snap = await q.get();
-      return snap.docs.map((d) => ({ ...d.data(), id: d.id }));
-    }
-
-    if (options?.machineIds !== undefined) {
-      if (options.machineIds.length === 0) return [];
-
-      const chunks = chunkMachineIds(options.machineIds, 30);
-      if (chunks.length === 0) return [];
-
-      const chunkPromises = chunks.map(async (chunk) => {
-        let q: FirebaseFirestore.Query = firestore.collection('inventory_ledger');
-        if (chunk.length === 1) {
-          q = q.where('machine_id', '==', chunk[0]);
-        } else {
-          q = q.where('machine_id', 'in', chunk);
-        }
-        if (startIso) q = q.where('created_at', '>=', startIso);
-        if (endIso) q = q.where('created_at', '<=', endIso);
-        return q.get();
-      });
-
-      const snapshots = await Promise.all(chunkPromises);
-      const docMap = new Map<string, any>();
-      for (const snap of snapshots) {
-        for (const d of snap.docs) {
-          if (!docMap.has(d.id)) {
-            docMap.set(d.id, { ...d.data(), id: d.id });
-          }
-        }
+  return runCoalescedFirestoreAnalyticsQuery('machines', firestore, options, async () => {
+    try {
+      if (options?.machineId) {
+        const doc = await firestore.collection('machines').doc(options.machineId).get();
+        if (!doc.exists) return [];
+        return [{ ...doc.data(), id: doc.id }];
       }
-      return Array.from(docMap.values());
+      if (options?.machineIds !== undefined && options.machineIds.length === 0) {
+        return [];
+      }
+      const snap = await firestore.collection('machines').get();
+      let list = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+      if (options?.machineIds !== undefined) {
+        const allowed = new Set(options.machineIds);
+        list = list.filter((m) => allowed.has(m.id));
+      }
+      return list;
+    } catch (err: any) {
+      throw new ServiceUnavailableError(`Firestore machines query failed: ${err?.message || err}`);
     }
-
-    let q: FirebaseFirestore.Query = firestore.collection('inventory_ledger');
-    if (startIso) q = q.where('created_at', '>=', startIso);
-    if (endIso) q = q.where('created_at', '<=', endIso);
-    const snap = await q.get();
-    return snap.docs.map((d) => ({ ...d.data(), id: d.id }));
-  } catch (err: any) {
-    throw new ServiceUnavailableError(`Firestore inventory_ledger query failed: ${err?.message || err}`);
-  }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1419,264 +1446,6 @@ export async function getProductSalesAnalytics(
 }
 
 /**
- * 12. Ingredient consumption (movement_type = 'DEDUCTION') from inventory_ledger.
- */
-export async function getIngredientConsumption(
-  db: any,
-  options?: AnalyticsScopeOptions
-): Promise<Record<string, number>> {
-  if (shouldRunFirestore(options)) {
-    const ledger = await queryFirestoreInventoryLedger(options);
-    const result: Record<string, number> = {};
-    for (const l of ledger) {
-      if (l.movement_type === 'DEDUCTION') {
-        result[l.ingredient] = (result[l.ingredient] || 0) + Number(l.quantity || 0);
-      }
-    }
-    return result;
-  }
-
-  const { whereSql, params } = buildSqlFilter('l', options);
-  const rows = await db.all(
-    `SELECT l.ingredient, COALESCE(SUM(l.quantity), 0) as total_qty
-     FROM inventory_ledger l
-     WHERE l.movement_type = 'DEDUCTION' ${whereSql}
-     GROUP BY l.ingredient`,
-    params
-  );
-
-  const result: Record<string, number> = {};
-  for (const r of rows) {
-    result[r.ingredient] = Number(r.total_qty || 0);
-  }
-  return result;
-}
-
-/**
- * 13. Inventory refill quantities (movement_type = 'REFILL') from inventory_ledger.
- */
-export async function getInventoryRefillQuantities(
-  db: any,
-  options?: AnalyticsScopeOptions
-): Promise<Record<string, number>> {
-  if (shouldRunFirestore(options)) {
-    const ledger = await queryFirestoreInventoryLedger(options);
-    const result: Record<string, number> = {};
-    for (const l of ledger) {
-      if (l.movement_type === 'REFILL') {
-        result[l.ingredient] = (result[l.ingredient] || 0) + Number(l.quantity || 0);
-      }
-    }
-    return result;
-  }
-
-  const { whereSql, params } = buildSqlFilter('l', options);
-  const rows = await db.all(
-    `SELECT l.ingredient, COALESCE(SUM(l.quantity), 0) as total_qty
-     FROM inventory_ledger l
-     WHERE l.movement_type = 'REFILL' ${whereSql}
-     GROUP BY l.ingredient`,
-    params
-  );
-
-  const result: Record<string, number> = {};
-  for (const r of rows) {
-    result[r.ingredient] = Number(r.total_qty || 0);
-  }
-  return result;
-}
-
-/**
- * 14. Waste and adjustments from inventory_ledger.
- */
-export async function getWasteAndAdjustments(
-  db: any,
-  options?: AnalyticsScopeOptions
-): Promise<{ waste: Record<string, number>; adjustments: Record<string, number> }> {
-  if (shouldRunFirestore(options)) {
-    const ledger = await queryFirestoreInventoryLedger(options);
-    const waste: Record<string, number> = {};
-    const adjustments: Record<string, number> = {};
-    for (const l of ledger) {
-      if (l.movement_type === 'WASTE') {
-        waste[l.ingredient] = (waste[l.ingredient] || 0) + Number(l.quantity || 0);
-      } else if (l.movement_type === 'ADJUSTMENT') {
-        adjustments[l.ingredient] = (adjustments[l.ingredient] || 0) + Number(l.quantity || 0);
-      }
-    }
-    return { waste, adjustments };
-  }
-
-  const { whereSql, params } = buildSqlFilter('l', options);
-  const rows = await db.all(
-    `SELECT l.ingredient, l.movement_type, COALESCE(SUM(l.quantity), 0) as total_qty
-     FROM inventory_ledger l
-     WHERE l.movement_type IN ('WASTE', 'ADJUSTMENT') ${whereSql}
-     GROUP BY l.ingredient, l.movement_type`,
-    params
-  );
-
-  const waste: Record<string, number> = {};
-  const adjustments: Record<string, number> = {};
-
-  for (const r of rows) {
-    if (r.movement_type === 'WASTE') {
-      waste[r.ingredient] = Number(r.total_qty || 0);
-    } else if (r.movement_type === 'ADJUSTMENT') {
-      adjustments[r.ingredient] = Number(r.total_qty || 0);
-    }
-  }
-
-  return { waste, adjustments };
-}
-
-/**
- * Comprehensive inventory movement analytics per ingredient.
- * Calculates recorded software balance across authorized machine(s) without hardcoded values (Finding A8-1).
- */
-export async function getInventoryAnalytics(
-  db: any,
-  options?: AnalyticsScopeOptions
-): Promise<InventoryMovementAnalytics[]> {
-  const validIngredients = ['milk', 'coffee', 'vanilla', 'hazelnut', 'irish', 'mocha', 'water'];
-  const consumption = await getIngredientConsumption(db, options);
-  const refills = await getInventoryRefillQuantities(db, options);
-  const { waste, adjustments } = await getWasteAndAdjustments(db, options);
-
-  const balances: Record<string, number | null> = {};
-  for (const ing of validIngredients) {
-    balances[ing] = null;
-  }
-  let inventorySource: string = 'software_estimated';
-
-  if (shouldRunFirestore(options)) {
-    const firestore = getFirestoreInstance();
-    if (firestore) {
-      if (options?.machineId) {
-        // Single machine query
-        const mDoc = await firestore.collection('machines').doc(options.machineId).get();
-        if (mDoc.exists) {
-          const data = mDoc.data() || {};
-          const inv = data.estimated_inventory || data.inventory || {};
-          inventorySource = data.inventory_source || 'software_estimated';
-          for (const ing of validIngredients) {
-            const level = inv[`${ing}_level`] ?? inv[ing];
-            if (level !== undefined && level !== null && !isNaN(Number(level))) {
-              balances[ing] = Math.max(0, Number(level));
-            }
-          }
-        }
-      } else if (options?.machineIds !== undefined) {
-        // Owner scoped machines
-        if (options.machineIds.length === 0) {
-          for (const ing of validIngredients) {
-            balances[ing] = 0;
-          }
-        } else {
-          const machines = await queryFirestoreMachines(options);
-          const hasRecord: Record<string, boolean> = {};
-          for (const m of machines) {
-            const inv = m.estimated_inventory || m.inventory || {};
-            for (const ing of validIngredients) {
-              const level = inv[`${ing}_level`] ?? inv[ing];
-              if (level !== undefined && level !== null && !isNaN(Number(level))) {
-                balances[ing] = (balances[ing] ?? 0) + Math.max(0, Number(level));
-                hasRecord[ing] = true;
-              }
-            }
-          }
-          for (const ing of validIngredients) {
-            if (!hasRecord[ing]) balances[ing] = null;
-          }
-        }
-      } else {
-        // Super Admin fleet-wide query
-        const machines = await queryFirestoreMachines();
-        const hasRecord: Record<string, boolean> = {};
-        for (const m of machines) {
-          const inv = m.estimated_inventory || m.inventory || {};
-          for (const ing of validIngredients) {
-            const level = inv[`${ing}_level`] ?? inv[ing];
-            if (level !== undefined && level !== null && !isNaN(Number(level))) {
-              balances[ing] = (balances[ing] ?? 0) + Math.max(0, Number(level));
-              hasRecord[ing] = true;
-            }
-          }
-        }
-        for (const ing of validIngredients) {
-          if (!hasRecord[ing]) balances[ing] = null;
-        }
-      }
-    }
-  } else if (db && db.get) {
-    if (options?.machineId) {
-      // Single machine query
-      const inv = await db.get('SELECT * FROM inventory WHERE machine_id = ?', [options.machineId]);
-      if (inv) {
-        for (const ing of validIngredients) {
-          const level = inv[`${ing}_level`];
-          if (level !== undefined && level !== null && !isNaN(Number(level))) {
-            balances[ing] = Math.max(0, Number(level));
-          }
-        }
-      }
-    } else if (options?.machineIds !== undefined) {
-      // Owner scoped machines
-      if (options.machineIds.length === 0) {
-        for (const ing of validIngredients) {
-          balances[ing] = 0;
-        }
-      } else {
-        const placeholders = options.machineIds.map(() => '?').join(', ');
-        const rows = await db.all(
-          `SELECT * FROM inventory WHERE machine_id IN (${placeholders})`,
-          options.machineIds
-        );
-        const hasRecord: Record<string, boolean> = {};
-        for (const r of rows) {
-          for (const ing of validIngredients) {
-            const level = r[`${ing}_level`];
-            if (level !== undefined && level !== null && !isNaN(Number(level))) {
-              balances[ing] = (balances[ing] ?? 0) + Math.max(0, Number(level));
-              hasRecord[ing] = true;
-            }
-          }
-        }
-        for (const ing of validIngredients) {
-          if (!hasRecord[ing]) balances[ing] = null;
-        }
-      }
-    } else {
-      // Super Admin fleet-wide query
-      const rows = await db.all('SELECT * FROM inventory');
-      const hasRecord: Record<string, boolean> = {};
-      for (const r of rows) {
-        for (const ing of validIngredients) {
-          const level = r[`${ing}_level`];
-          if (level !== undefined && level !== null && !isNaN(Number(level))) {
-            balances[ing] = (balances[ing] ?? 0) + Math.max(0, Number(level));
-            hasRecord[ing] = true;
-          }
-        }
-      }
-      for (const ing of validIngredients) {
-        if (!hasRecord[ing]) balances[ing] = null;
-      }
-    }
-  }
-
-  return validIngredients.map((ing) => ({
-    ingredient: ing,
-    total_consumed: consumption[ing] || 0,
-    total_refilled: refills[ing] || 0,
-    total_waste: waste[ing] || 0,
-    total_adjustments: adjustments[ing] || 0,
-    current_balance: balances[ing],
-    inventory_source: balances[ing] !== null ? inventorySource : null
-  }));
-}
-
-/**
  * Time-series analytics with timezone bucketing in Asia/Kolkata.
  * Net revenue is signed integer paise without clamping.
  */
@@ -1836,15 +1605,32 @@ async function detectOverRefundInFirestore(
     return false;
   }
 
-  const candidateOrderIds = new Set<string>();
-  for (const o of orders) {
-    if (o.id) candidateOrderIds.add(o.id);
-  }
+  const processedByOrder = new Map<string, number>();
+  const ordersWithRefundActivity = new Set<string>();
   for (const r of refunds) {
-    if (r.order_id) candidateOrderIds.add(r.order_id);
+    if (!r.order_id) continue;
+    ordersWithRefundActivity.add(r.order_id);
+    if (String(r.status || '').toUpperCase() === 'PROCESSED') {
+      processedByOrder.set(r.order_id, (processedByOrder.get(r.order_id) || 0) + Number(r.amount_paise || 0));
+    }
   }
 
-  for (const orderId of candidateOrderIds) {
+  for (const o of orders) {
+    if (
+      o.id &&
+      (Number(o.total_refunded_amount_paise || 0) > 0 || Number(o.pending_refund_amount_paise || 0) > 0)
+    ) {
+      ordersWithRefundActivity.add(o.id);
+    }
+  }
+
+  if (ordersWithRefundActivity.size === 0) {
+    return false;
+  }
+
+  const hasBoundedTimeframe = Boolean(options?.timeframe?.startDate || options?.timeframe?.endDate);
+
+  for (const orderId of ordersWithRefundActivity) {
     let orderDoc = ordersMap.get(orderId);
     if (!orderDoc) {
       const oSnap = await firestore.collection('orders').doc(orderId).get();
@@ -1864,6 +1650,17 @@ async function detectOverRefundInFirestore(
         ? Number(orderDoc.captured_amount_paise)
         : Math.round(Number(orderDoc.amount || 0) * 100);
 
+    const orderTotalRefunded = Number(orderDoc.total_refunded_amount_paise || 0);
+    const windowProcessed = processedByOrder.get(orderId) || 0;
+    if (Math.max(orderTotalRefunded, windowProcessed) > captured) {
+      return true;
+    }
+
+    // In unbounded (all-time) mode, all refund docs are already loaded in `refunds`
+    if (!hasBoundedTimeframe) {
+      continue;
+    }
+
     const allRefundsSnap = await firestore
       .collection('refunds')
       .where('order_id', '==', orderId)
@@ -1875,12 +1672,7 @@ async function detectOverRefundInFirestore(
       0
     );
 
-    const maxRefunded = Math.max(
-      cumulativeProcessedRefunds,
-      Number(orderDoc.total_refunded_amount_paise || 0)
-    );
-
-    if (maxRefunded > captured) {
+    if (Math.max(cumulativeProcessedRefunds, orderTotalRefunded) > captured) {
       return true;
     }
   }

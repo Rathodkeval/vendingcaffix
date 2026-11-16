@@ -76,15 +76,17 @@ class OptimisticMockFirestore {
             return self.collection(`${colName}/${id}/${subColName}`);
           },
           async get() {
+            // Capture snapshot BEFORE async network/I/O yield to accurately simulate concurrent MVCC reads
+            const has = colMap.has(id);
+            const raw = colMap.get(id);
+            const versionAtRead = self.getVersion(path);
             if (self.readYieldMs > 0) {
               await new Promise((r) => setTimeout(r, self.readYieldMs));
             }
-            const has = colMap.has(id);
-            const raw = colMap.get(id);
             return {
               id,
               exists: has,
-              _version: self.getVersion(path),
+              _version: versionAtRead,
               data: () => (raw ? JSON.parse(JSON.stringify(raw)) : undefined)
             };
           },
@@ -308,7 +310,6 @@ async function runTests() {
     // Test 2: Raw JSON bytes with whitespace differences (pretty-printed multiline JSON)
     console.log('2. Testing exact raw JSON bytes with whitespace differences...');
     {
-      const initialWater = machineCol.get('CFX-MC-01').estimated_inventory.water_level;
       const order = await createPendingOrder(firestore, kioskToken, 'order_live_ws_001');
       const prettyPayload =
         '{\n  "event":   "payment.captured",\n  "payload": {\n    "payment": {\n      "entity": {\n        "id": "pay_ws_001",\n        "order_id": "' +
@@ -323,18 +324,12 @@ async function runTests() {
       assert.strictEqual(res.status, 200, 'Pretty-printed raw bytes signature must succeed');
       assert.strictEqual(ordersCol.get(order.orderId).status, 'PAID');
       assert.strictEqual(ordersCol.get(order.orderId).dispense_status, 'QUEUED');
-      assert.strictEqual(
-        machineCol.get('CFX-MC-01').estimated_inventory.water_level,
-        initialWater - 5,
-        'Inventory deducted exactly once'
-      );
     }
     console.log('   PASS: Exact raw-byte HMAC succeeded despite whitespace formatting.');
 
     // Test 3: Raw JSON bytes with key ordering differences + valid order.paid
     console.log('3. Testing exact raw JSON bytes with JSON key ordering differences...');
     {
-      const initialWater = machineCol.get('CFX-MC-01').estimated_inventory.water_level;
       const order = await createPendingOrder(firestore, kioskToken, 'order_live_keyorder_002');
       // Wire bytes put payload BEFORE event and order_id BEFORE id (differs from canonical key order)
       const canonicalRaw = `{"event":"order.paid","payload":{"payment":{"entity":{"id":"pay_key_002","order_id":"${order.razorpayOrderId}"}},"order":{"entity":{"id":"${order.razorpayOrderId}"}}}}`;
@@ -356,17 +351,12 @@ async function runTests() {
       assert.strictEqual(res.status, 200, 'Reordered JSON keys signed over exact wire bytes must pass');
       assert.strictEqual(ordersCol.get(order.orderId).status, 'PAID');
       assert.strictEqual(ordersCol.get(order.orderId).dispense_status, 'QUEUED');
-      assert.strictEqual(
-        machineCol.get('CFX-MC-01').estimated_inventory.water_level,
-        initialWater - 5
-      );
     }
     console.log('   PASS: Reordered JSON keys raw-byte HMAC verified cleanly.');
 
     // Test 4: Duplicate order.paid, duplicate payment.captured, and both arriving sequentially
     console.log('4. Testing duplicate order.paid, duplicate payment.captured, and both sequential events...');
     {
-      const initialWater = machineCol.get('CFX-MC-01').estimated_inventory.water_level;
       const orderA = await createPendingOrder(firestore, kioskToken, 'order_live_dup_a');
 
       const orderPaidBody = JSON.stringify({
@@ -397,16 +387,10 @@ async function runTests() {
         200
       );
 
-      assert.strictEqual(
-        machineCol.get('CFX-MC-01').estimated_inventory.water_level,
-        initialWater - 5,
-        'Duplicate + cross-event webhooks must deduct inventory only once'
-      );
       assert.strictEqual(ordersCol.get(orderA.orderId).status, 'PAID');
       assert.strictEqual(ordersCol.get(orderA.orderId).dispense_status, 'QUEUED');
 
       // Reverse order: payment.captured first, then order.paid
-      const waterBeforeB = machineCol.get('CFX-MC-01').estimated_inventory.water_level;
       const orderB = await createPendingOrder(firestore, kioskToken, 'order_live_dup_b');
       const capturedB = JSON.stringify({
         event: 'payment.captured',
@@ -424,17 +408,13 @@ async function runTests() {
         (await sendRawWebhook(orderPaidB, { 'x-razorpay-signature': signRawBytes(orderPaidB) })).status,
         200
       );
-      assert.strictEqual(
-        machineCol.get('CFX-MC-01').estimated_inventory.water_level,
-        waterBeforeB - 5
-      );
+      assert.strictEqual(ordersCol.get(orderB.orderId).status, 'PAID');
     }
     console.log('   PASS: Sequential duplicate and cross-event webhooks deduplicated.');
 
     // Test 5: Concurrent HTTP delivery AND direct cross-instance Firestore MVCC transaction contention
     console.log('5. Testing concurrent delivery & cross-instance Firestore transaction idempotency...');
     {
-      const waterBeforeHttpRace = machineCol.get('CFX-MC-01').estimated_inventory.water_level;
       const orderRace = await createPendingOrder(firestore, kioskToken, 'order_live_race_http');
       const rawPaid = JSON.stringify({
         event: 'order.paid',
@@ -453,46 +433,28 @@ async function runTests() {
       assert.strictEqual(r1.status, 200);
       assert.strictEqual(r2.status, 200);
       assert.strictEqual(r3.status, 200);
-      assert.strictEqual(
-        machineCol.get('CFX-MC-01').estimated_inventory.water_level,
-        waterBeforeHttpRace - 5,
-        'Concurrent HTTP webhooks must only deduct inventory once'
-      );
+      assert.strictEqual(ordersCol.get(orderRace.orderId).status, 'PAID');
 
       // Direct cross-instance simulation bypassing in-process mutex (two Vercel instances simultaneously)
-      const waterBeforeCrossInstance = machineCol.get('CFX-MC-01').estimated_inventory.water_level;
       const orderCross = await createPendingOrder(firestore, kioskToken, 'order_live_cross_inst');
       const storedOrderCross = ordersCol.get(orderCross.orderId);
       firestore.readYieldMs = 15;
       const retriesBefore = firestore.transactionRetries;
       try {
-        const reqs = {
-          water: 5,
-          coffee: 6,
-          milk: 5,
-          vanilla: 0,
-          hazelnut: 0,
-          irish: 0,
-          mocha: 0
-        };
         const [txA, txB] = await Promise.all([
           commitOrderTransitionInFirebase({
             order: { ...storedOrderCross },
             targetStatus: 'PAID',
             productName: 'Classic Crest',
             razorpayPaymentId: 'pay_cross_1',
-            razorpaySignature: 'sig_cross_1',
-            requirements: reqs,
-            fallbackInventory: machineCol.get('CFX-MC-01').estimated_inventory
+            razorpaySignature: 'sig_cross_1'
           }),
           commitOrderTransitionInFirebase({
             order: { ...storedOrderCross },
             targetStatus: 'PAID',
             productName: 'Classic Crest',
             razorpayPaymentId: 'pay_cross_1',
-            razorpaySignature: 'sig_cross_2',
-            requirements: reqs,
-            fallbackInventory: machineCol.get('CFX-MC-01').estimated_inventory
+            razorpaySignature: 'sig_cross_2'
           })
         ]);
         const winners = [txA, txB].filter((t) => t && t.didTransitionFromPendingToActive && !t.alreadyProcessed);
@@ -500,11 +462,6 @@ async function runTests() {
         assert.strictEqual(winners.length, 1, 'Exactly one serverless instance may win PENDING -> PAID');
         assert.strictEqual(skipped.length, 1, 'Contending instance must retry and see alreadyProcessed=true');
         assert.ok(firestore.transactionRetries > retriesBefore, 'Simulated MVCC contention retry must have occurred');
-        assert.strictEqual(
-          machineCol.get('CFX-MC-01').estimated_inventory.water_level,
-          waterBeforeCrossInstance - 5,
-          'Cross-instance race must deduct estimated_inventory only once'
-        );
       } finally {
         firestore.readYieldMs = 0;
       }
@@ -514,7 +471,6 @@ async function runTests() {
     // Test 6: Preserve DISPENSING & DISPENSED states and prevent duplicate dispense queuing
     console.log('6. Testing DISPENSING & DISPENSED preservation on late webhooks...');
     {
-      const waterStart = machineCol.get('CFX-MC-01').estimated_inventory.water_level;
 
       // Case A: Already PAID + DISPENSING in Firestore
       const dispensingOrder = await createPendingOrder(firestore, kioskToken, 'order_live_dispensing');
@@ -594,20 +550,12 @@ async function runTests() {
       assert.strictEqual(resStale.status, 200);
       assert.strictEqual(ordersCol.get(stalePendingDispensing.orderId).dispense_status, 'DISPENSING');
       assert.strictEqual(ordersCol.get(stalePendingDispensing.orderId).dispensed, true);
-
-      // Only dispensingOrder deducted once (-5 water); dispensed & already-dispensing stale orders must NOT deduct again
-      assert.strictEqual(
-        machineCol.get('CFX-MC-01').estimated_inventory.water_level,
-        waterStart - 5,
-        'Already DISPENSING/DISPENSED orders must never deduct inventory again'
-      );
     }
-    console.log('   PASS: DISPENSING & DISPENSED states preserved without duplicate dispensing or deduction.');
+    console.log('   PASS: DISPENSING & DISPENSED states preserved without duplicate dispensing.');
 
     // Test 7: Unknown / unsupported events (e.g. payment.authorized, refund.created) safely ignored
     console.log('7. Testing unsupported events (payment.authorized, refund.created) safely acknowledged...');
     {
-      const waterBefore = machineCol.get('CFX-MC-01').estimated_inventory.water_level;
       const pendingOrder = await createPendingOrder(firestore, kioskToken, 'order_live_unsupported_ignored');
 
       for (const evt of ['payment.authorized', 'refund.created']) {
@@ -621,7 +569,6 @@ async function runTests() {
       }
 
       assert.strictEqual(ordersCol.get(pendingOrder.orderId).status, 'PENDING');
-      assert.strictEqual(machineCol.get('CFX-MC-01').estimated_inventory.water_level, waterBefore);
     }
     console.log('   PASS: Unsupported events acknowledged cleanly with zero state mutation.');
 

@@ -87,14 +87,6 @@ async function runWave2PortalRbacTests() {
         { Authorization: `Bearer ${adminToken}` }
       );
       assert.strictEqual(runRes.status, 200, `Admin must restore RUNNING mode on ${machineId}`);
-
-      const refillRes = await api(
-        'POST',
-        `/machines/${machineId}/refill`,
-        { ingredient: 'ALL' },
-        { Authorization: `Bearer ${adminToken}` }
-      );
-      assert.strictEqual(refillRes.status, 200, `Admin must refill ${machineId}`);
     }
 
     // 2. Invite & activate Owner A (CFX-MC-01, CFX-MC-02) and Owner B (CFX-MC-03), leaving CFX-MC-04 & CFX-MC-95 unassigned
@@ -239,7 +231,6 @@ async function runWave2PortalRbacTests() {
       const checks = await Promise.all([
         api('GET', `/machines/${forbiddenMachine}`, undefined, { Authorization: `Bearer ${ownerAToken}` }),
         api('PATCH', `/machines/${forbiddenMachine}/status`, { desired_mode: 'MAINTENANCE' }, { Authorization: `Bearer ${ownerAToken}` }),
-        api('POST', `/machines/${forbiddenMachine}/refill`, { ingredient: 'water' }, { Authorization: `Bearer ${ownerAToken}` }),
         api('GET', `/machines/${forbiddenMachine}/products`, undefined, { Authorization: `Bearer ${ownerAToken}` }),
         api('PUT', `/machines/${forbiddenMachine}/products/1`, { price: 175, is_available: false }, { Authorization: `Bearer ${ownerAToken}` }),
         api('PATCH', `/machines/${forbiddenMachine}/products/1`, { price: 175 }, { Authorization: `Bearer ${ownerAToken}` }),

@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import {
   authenticateCronSecret,
-  reconcilePendingOrders
+  reconcilePendingOrders,
+  reconcileAutoRefunds
 } from '../controllers/cronController';
 
 const router = Router();
@@ -10,6 +11,8 @@ const router = Router();
 // POST is also allowed with the same CRON_SECRET bearer header for manual operator runs.
 router.get('/reconcile-orders', authenticateCronSecret, reconcilePendingOrders);
 router.post('/reconcile-orders', authenticateCronSecret, reconcilePendingOrders);
+router.get('/auto-refund', authenticateCronSecret, reconcileAutoRefunds);
+router.post('/auto-refund', authenticateCronSecret, reconcileAutoRefunds);
 
 export default router;
 
