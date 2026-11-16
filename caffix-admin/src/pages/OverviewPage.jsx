@@ -10,7 +10,7 @@ import {
   MapPin,
   Clock
 } from 'lucide-react';
-import { ConnectionBadge, ModeBadge, SoftwareEstimatedBadge } from '../components/StatusBadges';
+import { ConnectionBadge, ModeBadge } from '../components/StatusBadges';
 import {
   formatINR,
   formatSignedINR,
@@ -108,16 +108,6 @@ export default function OverviewPage({
       icon: ShoppingBag,
       accent: 'bg-[#8C6246] text-white'
     }
-  ];
-
-  const ingredientKeys = [
-    { key: 'water_level', label: 'Water' },
-    { key: 'coffee_level', label: 'Coffee Beans' },
-    { key: 'milk_level', label: 'Milk' },
-    { key: 'vanilla_level', label: 'Vanilla Syrup' },
-    { key: 'hazelnut_level', label: 'Hazelnut Syrup' },
-    { key: 'irish_level', label: 'Irish Cream' },
-    { key: 'mocha_level', label: 'Mocha Syrup' }
   ];
 
   return (
@@ -299,85 +289,6 @@ export default function OverviewPage({
                 })}
               </tbody>
             </table>
-          </div>
-        )}
-      </div>
-
-      {/* Software-Estimated Stock Summary */}
-      <div className="bg-white rounded-2xl border border-[#EED9C4] p-6 shadow-xs">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-[#EED9C4]">
-          <div>
-            <h2 className="font-display text-lg font-bold text-[#2C1E17]">
-              Fleet Estimated Ingredient Stock Summary
-            </h2>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Calculated automatically from order deductions since last refill reset.
-            </p>
-          </div>
-          <SoftwareEstimatedBadge />
-        </div>
-
-        {machines.length === 0 ? (
-          <div className="py-8 text-center text-sm text-slate-500">
-            No machine stock records to display.
-          </div>
-        ) : (
-          <div className="mt-5 grid grid-cols-1 lg:grid-cols-2 gap-5">
-            {machines.map((m) => {
-              const inv = m.estimated_inventory || {};
-              return (
-                <div
-                  key={m.id}
-                  className="rounded-xl border border-[#EED9C4] bg-[#FAF6F0]/40 p-4 space-y-3"
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="font-bold text-sm text-[#2C1E17]">{m.machine_name}</span>
-                      <span className="ml-2 text-xs font-mono text-[#8C6246]">({m.id})</span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => onSelectMachineForDetails(m.id)}
-                      className="text-xs font-semibold text-[#4E3629] hover:underline"
-                    >
-                      Manage Refills →
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                    {ingredientKeys.map((ing) => {
-                      const val = Number(inv[ing.key] ?? 100);
-                      const isLow = val <= 25;
-                      return (
-                        <div
-                          key={ing.key}
-                          className="bg-white rounded-lg p-2.5 border border-[#EED9C4]/80"
-                        >
-                          <div className="flex items-center justify-between text-[11px] font-medium text-slate-600">
-                            <span className="truncate">{ing.label}</span>
-                            <span
-                              className={`font-bold ${
-                                isLow ? 'text-red-600' : 'text-[#4E3629]'
-                              }`}
-                            >
-                              {val}%
-                            </span>
-                          </div>
-                          <div className="mt-1.5 h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
-                            <div
-                              className={`h-full rounded-full ${
-                                isLow ? 'bg-red-500' : 'bg-[#4E3629]'
-                              }`}
-                              style={{ width: `${Math.max(0, Math.min(100, val))}%` }}
-                            />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })}
           </div>
         )}
       </div>

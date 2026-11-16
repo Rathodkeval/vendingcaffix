@@ -274,9 +274,8 @@ async function runAdminDashboardTests() {
     console.log('   PASS: Machine registration and owner assignment/unassignment verified.');
 
     // 6. Per-Machine Pricing, Mode Control & Historical Order Preservation
-    console.log('5. Testing per-machine pricing, refill/mode control & order amount immutability...');
+    console.log('5. Testing per-machine pricing, mode control & order amount immutability...');
     await adminApi.updateMachineMode('CFX-MC-02', 'RUNNING', adminToken, TEST_BASE_URL);
-    await adminApi.refillMachineInventory('CFX-MC-02', 'ALL', adminToken, TEST_BASE_URL);
     await adminApi.updateMachineProduct(
       'CFX-MC-02',
       1,
@@ -410,10 +409,11 @@ async function runAdminDashboardTests() {
     assert.strictEqual(typeof adminApi.getAnalyticsTimeSeries, 'function');
     assert.strictEqual(typeof adminApi.getAnalyticsMachines, 'function');
     assert.strictEqual(typeof adminApi.getAnalyticsProducts, 'function');
-    assert.strictEqual(typeof adminApi.getAnalyticsInventory, 'function');
     assert.strictEqual(typeof adminApi.getAnalyticsRefunds, 'function');
+    assert.strictEqual(adminApi.getAnalyticsInventory, undefined);
+    assert.strictEqual(adminApi.refillMachineInventory, undefined);
 
-    // 8.1 Call all 6 endpoints with valid Admin token
+    // 8.1 Call all 5 active endpoints with valid Admin token
     const overviewRes = await adminApi.getAnalyticsOverview({}, adminToken, TEST_BASE_URL);
     assert.strictEqual(overviewRes.status, 'success');
     assert.ok(typeof overviewRes.data.gross_sales_paise === 'number');
@@ -432,10 +432,6 @@ async function runAdminDashboardTests() {
     const prRes = await adminApi.getAnalyticsProducts({}, adminToken, TEST_BASE_URL);
     assert.strictEqual(prRes.status, 'success');
     assert.ok(Array.isArray(prRes.data));
-
-    const invRes = await adminApi.getAnalyticsInventory({}, adminToken, TEST_BASE_URL);
-    assert.strictEqual(invRes.status, 'success');
-    assert.ok(Array.isArray(invRes.data));
 
     const rfRes = await adminApi.getAnalyticsRefunds({}, adminToken, TEST_BASE_URL);
     assert.strictEqual(rfRes.status, 'success');
@@ -478,21 +474,14 @@ async function runAdminDashboardTests() {
     assert.ok(salesReportsSource.includes('adminApi.getAnalyticsTimeSeries'), 'Must call getAnalyticsTimeSeries');
     assert.ok(salesReportsSource.includes('adminApi.getAnalyticsMachines'), 'Must call getAnalyticsMachines');
     assert.ok(salesReportsSource.includes('adminApi.getAnalyticsProducts'), 'Must call getAnalyticsProducts');
-    assert.ok(salesReportsSource.includes('adminApi.getAnalyticsInventory'), 'Must call getAnalyticsInventory');
+    assert.ok(!salesReportsSource.includes('getAnalyticsInventory'), 'Must NOT call removed getAnalyticsInventory');
     assert.ok(salesReportsSource.includes('adminApi.getAnalyticsRefunds'), 'Must call getAnalyticsRefunds');
     assert.ok(salesReportsSource.includes('AbortController'), 'Must use AbortController for stale-request protection');
     assert.ok(salesReportsSource.includes('Critical Financial Invariant Violation Detected'), 'Must display over-refund banner');
     assert.ok(salesReportsSource.includes('Period Net Revenue Deficit'), 'Must display net deficit banner');
-    assert.ok(salesReportsSource.includes('UntrackedBadge'), 'Must use UntrackedBadge for null inventory balances');
     assert.ok(!salesReportsSource.includes('computeSalesAnalytics('), 'Must not use client-side computeSalesAnalytics for analytics');
 
-    const statusBadgesSource = fs.readFileSync(
-      path.resolve(__dirname, '../components/StatusBadges.jsx'),
-      'utf-8'
-    );
-    assert.ok(statusBadgesSource.includes('export function UntrackedBadge'), 'StatusBadges must export UntrackedBadge');
-
-    console.log('   PASS: All 6 analytics APIs, signed currency, date filters, and UI invariants verified.');
+    console.log('   PASS: All 5 analytics APIs, signed currency, date filters, and UI invariants verified.');
 
     // 9. Verify Phase 2.9.3.4 Fix W-1: Section-Specific API Error Handling & Isolated Retry
     console.log('9. Verifying Phase 2.9.3.4 Fix W-1 section-specific error handling & retry...');
@@ -517,14 +506,14 @@ async function runAdminDashboardTests() {
     assert.ok(timeSeriesFailMsg.length > 0, 'Auxiliary endpoint must fail with validation error');
 
     // 9.2 Simulate multiple auxiliary sections failing independently while others succeed
-    let inventoryFailMsg = '';
+    let productsFailMsg = '';
     try {
-      // Invalid machine ID format to trigger Zod 400 rejection in inventory endpoint
-      await adminApi.getAnalyticsInventory({ machine_id: 'INVALID$$ID' }, adminToken, TEST_BASE_URL);
+      // Invalid machine ID format to trigger Zod 400 rejection in products analytics endpoint
+      await adminApi.getAnalyticsProducts({ machine_id: 'INVALID$$ID' }, adminToken, TEST_BASE_URL);
     } catch (err) {
-      inventoryFailMsg = err.message;
+      productsFailMsg = err.message;
     }
-    assert.ok(inventoryFailMsg.length > 0, 'Inventory query with invalid machine_id must fail independently');
+    assert.ok(productsFailMsg.length > 0, 'Products analytics query with invalid machine_id must fail independently');
     // Ensure machines endpoint still succeeds independently
     const machinesSuccess = await adminApi.getAnalyticsMachines({}, adminToken, TEST_BASE_URL);
     assert.strictEqual(machinesSuccess.status, 'success');

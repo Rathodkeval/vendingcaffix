@@ -10,7 +10,6 @@ import {
   AlertCircle,
   RefreshCw,
   Package,
-  Layers,
   RotateCcw,
   CheckCircle2,
   Clock,
@@ -27,7 +26,6 @@ import {
   getKolkataMonthStart,
   validateDateRange
 } from '../utils/formatters';
-import { SoftwareEstimatedBadge, UntrackedBadge } from '../components/StatusBadges';
 
 function formatSyncTime(date) {
   if (!date) return 'Not yet synchronized';
@@ -96,7 +94,6 @@ export default function SalesReportsPage({ machines = [] }) {
   const [timeSeries, setTimeSeries] = useState([]);
   const [machineAnalytics, setMachineAnalytics] = useState([]);
   const [productAnalytics, setProductAnalytics] = useState([]);
-  const [inventoryAnalytics, setInventoryAnalytics] = useState([]);
   const [refundsAnalytics, setRefundsAnalytics] = useState(null);
 
   // Section-specific loading and error states (W-1 Fix)
@@ -105,7 +102,6 @@ export default function SalesReportsPage({ machines = [] }) {
     timeSeries: true,
     machines: true,
     products: true,
-    inventory: true,
     refunds: true
   });
   const [sectionErrors, setSectionErrors] = useState({
@@ -113,7 +109,6 @@ export default function SalesReportsPage({ machines = [] }) {
     timeSeries: '',
     machines: '',
     products: '',
-    inventory: '',
     refunds: ''
   });
   // Section-specific synchronization timestamps (A-2)
@@ -122,7 +117,6 @@ export default function SalesReportsPage({ machines = [] }) {
     timeSeries: null,
     machines: null,
     products: null,
-    inventory: null,
     refunds: null
   });
   const [lastFullSync, setLastFullSync] = useState(null);
@@ -134,7 +128,6 @@ export default function SalesReportsPage({ machines = [] }) {
     timeSeries: 0,
     machines: 0,
     products: 0,
-    inventory: 0,
     refunds: 0
   });
   const isMountedRef = useRef(true);
@@ -221,9 +214,6 @@ export default function SalesReportsPage({ machines = [] }) {
         } else if (sectionKey === 'products') {
           const res = await adminApi.getAnalyticsProducts(queryParams, requestOptions);
           resData = res?.data || [];
-        } else if (sectionKey === 'inventory') {
-          const res = await adminApi.getAnalyticsInventory(queryParams, requestOptions);
-          resData = res?.data || [];
         } else if (sectionKey === 'refunds') {
           const res = await adminApi.getAnalyticsRefunds(queryParams, requestOptions);
           resData = res?.data || null;
@@ -236,7 +226,6 @@ export default function SalesReportsPage({ machines = [] }) {
         else if (sectionKey === 'timeSeries') setTimeSeries(resData);
         else if (sectionKey === 'machines') setMachineAnalytics(resData);
         else if (sectionKey === 'products') setProductAnalytics(resData);
-        else if (sectionKey === 'inventory') setInventoryAnalytics(resData);
         else if (sectionKey === 'refunds') setRefundsAnalytics(resData);
 
         // A-2: Update ONLY this section's timestamp. Do NOT update lastFullSync!
@@ -252,7 +241,6 @@ export default function SalesReportsPage({ machines = [] }) {
           else if (sectionKey === 'timeSeries') setTimeSeries([]);
           else if (sectionKey === 'machines') setMachineAnalytics([]);
           else if (sectionKey === 'products') setProductAnalytics([]);
-          else if (sectionKey === 'inventory') setInventoryAnalytics([]);
           else if (sectionKey === 'refunds') setRefundsAnalytics(null);
           // Note: Failed retry does not advance section timestamp
         }
@@ -340,7 +328,6 @@ export default function SalesReportsPage({ machines = [] }) {
         timeSeries: null,
         machines: null,
         products: null,
-        inventory: null,
         refunds: null
       });
       setLastFullSync(null);
@@ -363,7 +350,7 @@ export default function SalesReportsPage({ machines = [] }) {
 
     // Invalidate any active or pending individual retries across all sections
     const capturedSectionIds = {};
-    for (const key of ['overview', 'timeSeries', 'machines', 'products', 'inventory', 'refunds']) {
+    for (const key of ['overview', 'timeSeries', 'machines', 'products', 'refunds']) {
       const nextSectionId = (sectionRequestIdsRef.current[key] || 0) + 1;
       sectionRequestIdsRef.current[key] = nextSectionId;
       capturedSectionIds[key] = nextSectionId;
@@ -378,7 +365,6 @@ export default function SalesReportsPage({ machines = [] }) {
       timeSeries: true,
       machines: true,
       products: true,
-      inventory: true,
       refunds: true
     });
     setSectionErrors({
@@ -386,7 +372,6 @@ export default function SalesReportsPage({ machines = [] }) {
       timeSeries: '',
       machines: '',
       products: '',
-      inventory: '',
       refunds: ''
     });
 
@@ -399,14 +384,13 @@ export default function SalesReportsPage({ machines = [] }) {
         adminApi.getAnalyticsTimeSeries({ ...queryParams, interval: timeInterval }, requestOptions),
         adminApi.getAnalyticsMachines(queryParams, requestOptions),
         adminApi.getAnalyticsProducts(queryParams, requestOptions),
-        adminApi.getAnalyticsInventory(queryParams, requestOptions),
         adminApi.getAnalyticsRefunds(queryParams, requestOptions)
       ]);
 
       // If aborted or obsolete generation, discard results completely (A-1)
       if (controller.signal.aborted || isFullRefreshObsolete()) return;
 
-      const [ovRes, tsRes, mcRes, prRes, invRes, rfRes] = results;
+      const [ovRes, tsRes, mcRes, prRes, rfRes] = results;
       const now = new Date();
       const updatedSectionTimestamps = {};
       let allSectionsSucceeded = true;
@@ -487,26 +471,7 @@ export default function SalesReportsPage({ machines = [] }) {
         allSectionsSucceeded = false;
       }
 
-      // 5. Inventory
-      if (sectionRequestIdsRef.current.inventory === capturedSectionIds.inventory) {
-        if (invRes.status === 'fulfilled') {
-          setInventoryAnalytics(invRes.value?.data || []);
-          updatedSectionTimestamps.inventory = now;
-        } else {
-          allSectionsSucceeded = false;
-          if (invRes.reason?.name !== 'AbortError') {
-            setInventoryAnalytics([]);
-            setSectionErrors((prev) => ({
-              ...prev,
-              inventory: invRes.reason?.message || 'Failed to load ingredient telemetry and balances'
-            }));
-          }
-        }
-      } else {
-        allSectionsSucceeded = false;
-      }
-
-      // 6. Refunds
+      // 5. Refunds
       if (sectionRequestIdsRef.current.refunds === capturedSectionIds.refunds) {
         if (rfRes.status === 'fulfilled') {
           setRefundsAnalytics(rfRes.value?.data || null);
@@ -530,7 +495,7 @@ export default function SalesReportsPage({ machines = [] }) {
         setSectionLastUpdated((prev) => ({ ...prev, ...updatedSectionTimestamps }));
       }
 
-      // A-2: Update global dashboard synchronization timestamp ONLY if all 6 sections succeeded
+      // A-2: Update global dashboard synchronization timestamp ONLY if all 5 sections succeeded
       if (allSectionsSucceeded) {
         setLastFullSync(now);
       }
@@ -543,7 +508,6 @@ export default function SalesReportsPage({ machines = [] }) {
           timeSeries: fallbackMsg,
           machines: fallbackMsg,
           products: fallbackMsg,
-          inventory: fallbackMsg,
           refunds: fallbackMsg
         });
       }
@@ -551,7 +515,7 @@ export default function SalesReportsPage({ machines = [] }) {
       if (!isFullRefreshObsolete()) {
         setSectionLoading((prev) => {
           const next = { ...prev };
-          for (const key of ['overview', 'timeSeries', 'machines', 'products', 'inventory', 'refunds']) {
+          for (const key of ['overview', 'timeSeries', 'machines', 'products', 'refunds']) {
             if (sectionRequestIdsRef.current[key] === capturedSectionIds[key]) {
               next[key] = false;
             }
@@ -567,7 +531,7 @@ export default function SalesReportsPage({ machines = [] }) {
     return () => {
       isMountedRef.current = false;
       requestIdRef.current += 1;
-      for (const key of ['overview', 'timeSeries', 'machines', 'products', 'inventory', 'refunds']) {
+      for (const key of ['overview', 'timeSeries', 'machines', 'products', 'refunds']) {
         sectionRequestIdsRef.current[key] = (sectionRequestIdsRef.current[key] || 0) + 1;
       }
       if (abortControllerRef.current) {
@@ -1214,94 +1178,7 @@ export default function SalesReportsPage({ machines = [] }) {
         </div>
       </div>
 
-      {/* 5. Ingredient Consumption & Real Inventory Balances */}
-      <div className="bg-white rounded-2xl border border-[#EED9C4] shadow-xs overflow-hidden">
-        <div className="px-6 py-4 border-b border-[#EED9C4] flex items-center justify-between">
-          <div>
-            <h3 className="font-display text-base font-bold text-[#2C1E17] flex items-center gap-2 flex-wrap">
-              <span className="flex items-center gap-2">
-                <Layers className="w-4 h-4 text-[#4E3629]" />
-                Ingredient Consumption & Inventory Ledger Balances
-              </span>
-              <span className="text-[11px] font-normal text-slate-400">
-                • Updated: {formatSyncTime(sectionLastUpdated.inventory)}
-              </span>
-            </h3>
-            <p className="text-xs text-slate-500">
-              Recorded inventory balances across machines with consumption, refills, waste, and calibration movements
-            </p>
-          </div>
-        </div>
-
-        {sectionLoading.inventory ? (
-          <SectionLoading label="Loading ingredient telemetry and balances..." />
-        ) : sectionErrors.inventory ? (
-          <div className="p-6">
-            <SectionError
-              title="Inventory Telemetry Unavailable"
-              message={sectionErrors.inventory}
-              onRetry={() => retrySection('inventory')}
-              retrying={sectionLoading.inventory}
-            />
-          </div>
-        ) : inventoryAnalytics.length === 0 ? (
-          <div className="p-8 text-center text-xs text-slate-400">
-            No ingredient telemetry available.
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-[#FAF6F0] text-[#4E3629] font-bold border-b border-[#EED9C4]">
-                <tr>
-                  <th className="px-4 py-3">Ingredient</th>
-                  <th className="px-4 py-3">Current Balance</th>
-                  <th className="px-4 py-3 text-right">Total Consumed</th>
-                  <th className="px-4 py-3 text-right">Total Refilled</th>
-                  <th className="px-4 py-3 text-right">Waste</th>
-                  <th className="px-4 py-3 text-right">Adjustments</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#EED9C4]/50">
-                {inventoryAnalytics.map((inv) => (
-                  <tr key={inv.ingredient} className="hover:bg-[#FAF6F0]/40 transition-colors">
-                    <td className="px-4 py-3 font-bold text-[#2C1E17] capitalize">
-                      {inv.ingredient}
-                    </td>
-                    <td className="px-4 py-3">
-                      {inv.current_balance !== null && inv.current_balance !== undefined ? (
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-[#4E3629] text-sm">
-                            {inv.current_balance}%
-                          </span>
-                          {inv.inventory_source === 'software_estimated' && (
-                            <SoftwareEstimatedBadge />
-                          )}
-                        </div>
-                      ) : (
-                        <UntrackedBadge />
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-right font-semibold text-slate-700">
-                      {inv.total_consumed} units
-                    </td>
-                    <td className="px-4 py-3 text-right font-semibold text-emerald-700">
-                      +{inv.total_refilled} units
-                    </td>
-                    <td className="px-4 py-3 text-right font-semibold text-rose-700">
-                      {inv.total_waste > 0 ? `-${inv.total_waste} units` : '0'}
-                    </td>
-                    <td className="px-4 py-3 text-right font-semibold text-amber-700">
-                      {inv.total_adjustments !== 0 ? `${inv.total_adjustments} units` : '0'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* 6. Refund Audit & Recent Movements */}
+      {/* 5. Refund Audit & Recent Movements */}
       <div className="bg-white rounded-2xl border border-[#EED9C4] p-6 shadow-xs space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#EED9C4] pb-4">
           <div>

@@ -3,7 +3,6 @@ import { MapPin, Clock, Wrench, PlayCircle, Sliders, Tag, Users } from 'lucide-r
 import {
   ConnectionBadge,
   ModeBadge,
-  SoftwareEstimatedBadge,
   ConfirmModal
 } from '../components/StatusBadges';
 import { formatDateTime, formatRelativeHeartbeat } from '../utils/formatters';
@@ -43,7 +42,6 @@ export default function MachinesPage({
             Super Admins can inspect telemetry and toggle operational modes across the entire fleet.
           </p>
         </div>
-        <SoftwareEstimatedBadge />
       </div>
 
       {machines.length === 0 ? (

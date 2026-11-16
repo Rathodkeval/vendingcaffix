@@ -311,7 +311,7 @@ export default function AdminFleetPage({ machines, owners: initialOwners, onRefr
                 Register New Vending Machine
               </h3>
               <p className="text-xs text-slate-500">
-                Add a new CAFFIX kiosk unit to Firestore and initialize its estimated inventory
+                Add a new CAFFIX kiosk unit to Firestore
               </p>
             </div>
           </div>

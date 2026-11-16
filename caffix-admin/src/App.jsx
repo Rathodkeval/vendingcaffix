@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { RefreshCw, AlertCircle, KeyRound, X, CheckCircle2 } from 'lucide-react';
 import {
   adminApi,
@@ -18,6 +18,9 @@ import OrdersPage from './pages/OrdersPage';
 import SalesReportsPage from './pages/SalesReportsPage';
 import AdminFleetPage from './pages/AdminFleetPage';
 
+const ORDERS_PAGE_SIZE = 100;
+const PORTAL_POLL_INTERVAL_MS = 30000;
+
 export default function App() {
   const [authChecking, setAuthChecking] = useState(true);
   const [user, setUser] = useState(null);
@@ -26,11 +29,15 @@ export default function App() {
 
   const [machines, setMachines] = useState([]);
   const [orders, setOrders] = useState([]);
+  const [ordersPagination, setOrdersPagination] = useState({ hasMore: false, nextCursor: null });
+  const [loadingMoreOrders, setLoadingMoreOrders] = useState(false);
   const [owners, setOwners] = useState([]);
   const [analyticsOverview, setAnalyticsOverview] = useState({ today: null, all: null });
   const [selectedMachineId, setSelectedMachineId] = useState('');
   const [loadingData, setLoadingData] = useState(false);
   const [globalError, setGlobalError] = useState('');
+  const pollTickRef = useRef(0);
+  const lastLiveSyncAtRef = useRef(0);
 
   // Change Password Modal State
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
@@ -38,85 +45,144 @@ export default function App() {
   const [newPassword, setNewPassword] = useState('');
   const [passwordStatus, setPasswordStatus] = useState({ error: '', success: '', loading: false });
 
-  const loadDashboardData = useCallback(async (silent = false) => {
+  const loadDashboardData = useCallback(async (silent = false, options = {}) => {
     const token = getStoredToken();
     if (!token) return;
     if (!silent) setLoadingData(true);
     setGlobalError('');
 
+    const isFullSync = !silent || Boolean(options.includeHeavy);
+    const includeLiveOrdersAndToday = isFullSync || options.includeOrders !== false;
+
     try {
       const todayStr = getKolkataDateString();
-      const results = await Promise.allSettled([
-        adminApi.getMe(token),
-        adminApi.getMachines(token),
-        adminApi.getOrders(undefined, token),
-        adminApi.getOwners(token),
-        adminApi.getAnalyticsOverview({ start_date: todayStr, end_date: todayStr }, token),
-        adminApi.getAnalyticsOverview({}, token)
-      ]);
 
-      const meResult = results[0];
-      const machinesResult = results[1];
-      const ordersResult = results[2];
-      const ownersResult = results[3];
-      const todayAnalyticsResult = results[4];
-      const allAnalyticsResult = results[5];
+      if (isFullSync) {
+        const results = await Promise.allSettled([
+          adminApi.getMe(token),
+          adminApi.getMachines(token),
+          adminApi.getOrders({ limit: ORDERS_PAGE_SIZE }, token),
+          adminApi.getOwners(token),
+          adminApi.getAnalyticsOverview({ start_date: todayStr, end_date: todayStr }, token),
+          adminApi.getAnalyticsOverview({}, token)
+        ]);
 
-      if (meResult.status === 'rejected') {
-        throw meResult.reason;
-      }
+        const meResult = results[0];
+        const machinesResult = results[1];
+        const ordersResult = results[2];
+        const ownersResult = results[3];
+        const todayAnalyticsResult = results[4];
+        const allAnalyticsResult = results[5];
 
-      const profile = meResult.value?.data;
-      if (!profile || profile.role !== 'admin') {
-        clearStoredToken();
-        setUser(null);
-        setMachines([]);
-        setOrders([]);
-        setOwners([]);
-        setSessionNotice(
-          'Access denied: This portal is restricted to CAFFIX Super Admin accounts.'
-        );
-        return;
-      }
+        if (meResult.status === 'rejected') {
+          throw meResult.reason;
+        }
 
-      setUser(profile);
+        const profile = meResult.value?.data;
+        if (!profile || profile.role !== 'admin') {
+          clearStoredToken();
+          setUser(null);
+          setMachines([]);
+          setOrders([]);
+          setOrdersPagination({ hasMore: false, nextCursor: null });
+          setOwners([]);
+          setSessionNotice(
+            'Access denied: This portal is restricted to CAFFIX Super Admin accounts.'
+          );
+          return;
+        }
 
-      if (machinesResult.status === 'fulfilled') {
-        const machineList = machinesResult.value?.data || [];
-        setMachines(machineList);
-        setSelectedMachineId((prev) => {
-          if (prev && machineList.some((m) => m.id === prev)) {
-            return prev;
+        setUser(profile);
+
+        if (machinesResult.status === 'fulfilled') {
+          const machineList = machinesResult.value?.data || [];
+          setMachines(machineList);
+          setSelectedMachineId((prev) => {
+            if (prev && machineList.some((m) => m.id === prev)) {
+              return prev;
+            }
+            return machineList[0]?.id || '';
+          });
+        } else {
+          setGlobalError(machinesResult.reason?.message || 'Failed to load fleet machines.');
+        }
+
+        if (ordersResult.status === 'fulfilled') {
+          setOrders(ordersResult.value?.data || []);
+          setOrdersPagination({
+            hasMore: Boolean(ordersResult.value?.pagination?.has_more),
+            nextCursor: ordersResult.value?.pagination?.next_cursor || null
+          });
+        } else {
+          setOrders([]);
+          setOrdersPagination({ hasMore: false, nextCursor: null });
+          if (machinesResult.status === 'fulfilled') {
+            setGlobalError(ordersResult.reason?.message || 'Unable to synchronize fleet orders.');
           }
-          return machineList[0]?.id || '';
+        }
+
+        if (ownersResult.status === 'fulfilled') {
+          setOwners(ownersResult.value?.data || []);
+        }
+
+        setAnalyticsOverview({
+          today: todayAnalyticsResult.status === 'fulfilled' ? (todayAnalyticsResult.value?.data || null) : null,
+          all: allAnalyticsResult.status === 'fulfilled' ? (allAnalyticsResult.value?.data || null) : null
         });
       } else {
-        setGlobalError(machinesResult.reason?.message || 'Failed to load fleet machines.');
-      }
+        // Lightweight background poll: machines (30s heartbeat/connectivity), plus bounded recent
+        // orders & today's KPIs on every 60s cycle; skips auth/me, owners, and all-time scans.
+        const requests = [adminApi.getMachines(token)];
+        if (includeLiveOrdersAndToday) {
+          requests.push(adminApi.getOrders({ limit: ORDERS_PAGE_SIZE }, token));
+          requests.push(adminApi.getAnalyticsOverview({ start_date: todayStr, end_date: todayStr }, token));
+        }
 
-      if (ordersResult.status === 'fulfilled') {
-        setOrders(ordersResult.value?.data || []);
-      } else {
-        setOrders([]);
+        const results = await Promise.allSettled(requests);
+        const machinesResult = results[0];
+
         if (machinesResult.status === 'fulfilled') {
-          setGlobalError(ordersResult.reason?.message || 'Unable to synchronize fleet orders.');
+          const machineList = machinesResult.value?.data || [];
+          setMachines(machineList);
+          setSelectedMachineId((prev) => {
+            if (prev && machineList.some((m) => m.id === prev)) {
+              return prev;
+            }
+            return machineList[0]?.id || '';
+          });
+        }
+
+        if (includeLiveOrdersAndToday) {
+          const ordersResult = results[1];
+          const todayAnalyticsResult = results[2];
+
+          if (ordersResult?.status === 'fulfilled') {
+            const freshPage = ordersResult.value?.data || [];
+            setOrders((prev) => {
+              if (!prev || prev.length <= ORDERS_PAGE_SIZE) {
+                return freshPage;
+              }
+              const freshIds = new Set(freshPage.map((o) => o.id));
+              return [...freshPage, ...prev.filter((o) => !freshIds.has(o.id))];
+            });
+          }
+
+          if (todayAnalyticsResult?.status === 'fulfilled') {
+            setAnalyticsOverview((prev) => ({
+              ...prev,
+              today: todayAnalyticsResult.value?.data || prev.today
+            }));
+          }
         }
       }
-
-      if (ownersResult.status === 'fulfilled') {
-        setOwners(ownersResult.value?.data || []);
-      }
-
-      setAnalyticsOverview({
-        today: todayAnalyticsResult.status === 'fulfilled' ? (todayAnalyticsResult.value?.data || null) : null,
-        all: allAnalyticsResult.status === 'fulfilled' ? (allAnalyticsResult.value?.data || null) : null
-      });
+      lastLiveSyncAtRef.current = Date.now();
     } catch (err) {
       if (err.status === 403) {
         clearStoredToken();
         setUser(null);
         setMachines([]);
         setOrders([]);
+        setOrdersPagination({ hasMore: false, nextCursor: null });
         setOwners([]);
         setSessionNotice(
           err.message || 'Access denied: This portal is restricted to CAFFIX Super Admin accounts.'
@@ -130,6 +196,33 @@ export default function App() {
       if (!silent) setLoadingData(false);
     }
   }, []);
+
+  const handleLoadMoreOrders = useCallback(async () => {
+    const token = getStoredToken();
+    if (!token || !ordersPagination.hasMore || !ordersPagination.nextCursor || loadingMoreOrders) {
+      return;
+    }
+    setLoadingMoreOrders(true);
+    try {
+      const res = await adminApi.getOrders(
+        { limit: ORDERS_PAGE_SIZE, cursor: ordersPagination.nextCursor },
+        token
+      );
+      const olderOrders = res?.data || [];
+      setOrders((prev) => {
+        const existingIds = new Set(prev.map((o) => o.id));
+        return [...prev, ...olderOrders.filter((o) => !existingIds.has(o.id))];
+      });
+      setOrdersPagination({
+        hasMore: Boolean(res?.pagination?.has_more),
+        nextCursor: res?.pagination?.next_cursor || null
+      });
+    } catch (err) {
+      setGlobalError(err.message || 'Unable to load older orders.');
+    } finally {
+      setLoadingMoreOrders(false);
+    }
+  }, [loadingMoreOrders, ordersPagination.hasMore, ordersPagination.nextCursor]);
 
   useEffect(() => {
     setOnSessionExpired((msg) => {
@@ -151,13 +244,30 @@ export default function App() {
     });
   }, [loadDashboardData]);
 
-  // Poll every 30 seconds for live Raspberry Pi 4 heartbeat connectivity & fleet orders
+  // Poll every 30s for live machine connectivity (only while tab is visible);
+  // refresh bounded recent orders & today's KPIs on every 60s cycle.
   useEffect(() => {
     if (!user) return undefined;
     const interval = setInterval(() => {
-      loadDashboardData(true);
-    }, 30000);
-    return () => clearInterval(interval);
+      if (document.visibilityState === 'hidden') return;
+      pollTickRef.current += 1;
+      loadDashboardData(true, { includeOrders: pollTickRef.current % 2 === 0 });
+    }, PORTAL_POLL_INTERVAL_MS);
+
+    const handleVisibilityChange = () => {
+      if (
+        document.visibilityState === 'visible' &&
+        Date.now() - lastLiveSyncAtRef.current >= 15000
+      ) {
+        loadDashboardData(true, { includeOrders: true });
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, [user, loadDashboardData]);
 
   const handleAuthenticated = async (jwtToken, userData, remember = true) => {
@@ -188,17 +298,6 @@ export default function App() {
       await loadDashboardData(true);
     } catch (err) {
       setGlobalError(err.message || `Failed to update mode for ${machineId}`);
-      throw err;
-    }
-  };
-
-  const handleRefillInventory = async (machineId, ingredient) => {
-    setGlobalError('');
-    try {
-      await adminApi.refillMachineInventory(machineId, ingredient);
-      await loadDashboardData(true);
-    } catch (err) {
-      setGlobalError(err.message || `Failed to refill ${ingredient} on ${machineId}`);
       throw err;
     }
   };
@@ -368,7 +467,6 @@ export default function App() {
               selectedMachineId={selectedMachineId}
               onSelectMachineId={setSelectedMachineId}
               onToggleMode={handleToggleMachineMode}
-              onRefillInventory={handleRefillInventory}
               onNavigateToPricing={handleSelectMachineForPricing}
             />
           )}
@@ -382,7 +480,13 @@ export default function App() {
           )}
 
           {activeTab === 'orders' && (
-            <OrdersPage orders={orders} machines={machines} />
+            <OrdersPage
+              orders={orders}
+              machines={machines}
+              hasMoreOrders={ordersPagination.hasMore}
+              loadingMoreOrders={loadingMoreOrders}
+              onLoadMoreOrders={handleLoadMoreOrders}
+            />
           )}
 
           {activeTab === 'reports' && (

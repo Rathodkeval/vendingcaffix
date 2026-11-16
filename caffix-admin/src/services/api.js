@@ -229,14 +229,6 @@ export const adminApi = {
       baseUrl
     }),
 
-  refillMachineInventory: (machineId, ingredient, token, baseUrl) =>
-    apiFetch(`/machines/${encodeURIComponent(machineId)}/refill`, {
-      method: 'POST',
-      body: { ingredient },
-      token,
-      baseUrl
-    }),
-
   // Products & Per-Machine Pricing
   getMachineProducts: (machineId, token, baseUrl) =>
     apiFetch(`/machines/${encodeURIComponent(machineId)}/products`, {
@@ -257,8 +249,18 @@ export const adminApi = {
     }),
 
   // Global Orders & Historical Sales
-  getOrders: (machineId, token, baseUrl) => {
-    const query = machineId ? `?machine_id=${encodeURIComponent(machineId)}` : '';
+  getOrders: (paramsOrMachineId, token, baseUrl) => {
+    const qs = new URLSearchParams();
+    if (typeof paramsOrMachineId === 'string' && paramsOrMachineId.trim()) {
+      qs.append('machine_id', paramsOrMachineId.trim());
+    } else if (paramsOrMachineId && typeof paramsOrMachineId === 'object') {
+      if (paramsOrMachineId.machine_id) qs.append('machine_id', paramsOrMachineId.machine_id);
+      if (paramsOrMachineId.limit) qs.append('limit', String(paramsOrMachineId.limit));
+      if (paramsOrMachineId.start_date) qs.append('start_date', paramsOrMachineId.start_date);
+      if (paramsOrMachineId.end_date) qs.append('end_date', paramsOrMachineId.end_date);
+      if (paramsOrMachineId.cursor) qs.append('cursor', paramsOrMachineId.cursor);
+    }
+    const query = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch(`/orders${query}`, {
       method: 'GET',
       token,
@@ -286,18 +288,6 @@ export const adminApi = {
       token,
       baseUrl
     }),
-
-  getMachineInventoryLedger: (machineId, params, token, baseUrl) => {
-    const qs = new URLSearchParams();
-    if (params?.limit) qs.append('limit', params.limit);
-    if (params?.offset) qs.append('offset', params.offset);
-    const queryString = qs.toString() ? `?${qs.toString()}` : '';
-    return apiFetch(`/reconciliation/inventory/${encodeURIComponent(machineId)}${queryString}`, {
-      method: 'GET',
-      token,
-      baseUrl
-    });
-  },
 
   // Super Admin Fleet & Owner Management
   getOwners: (token, baseUrl) =>
@@ -370,16 +360,6 @@ export const adminApi = {
   getAnalyticsProducts: (params, tokenOrOptions, baseUrl, signal) => {
     const { token, bUrl, sig } = resolveRequestOptions(tokenOrOptions, baseUrl, signal);
     return apiFetch(`/analytics/products${buildAnalyticsQueryString(params)}`, {
-      method: 'GET',
-      token,
-      baseUrl: bUrl,
-      signal: sig
-    });
-  },
-
-  getAnalyticsInventory: (params, tokenOrOptions, baseUrl, signal) => {
-    const { token, bUrl, sig } = resolveRequestOptions(tokenOrOptions, baseUrl, signal);
-    return apiFetch(`/analytics/inventory${buildAnalyticsQueryString(params)}`, {
       method: 'GET',
       token,
       baseUrl: bUrl,

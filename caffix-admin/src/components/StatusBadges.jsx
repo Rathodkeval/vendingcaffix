@@ -153,29 +153,6 @@ export function RefundStatusBadge({ status }) {
   );
 }
 
-export function SoftwareEstimatedBadge() {
-  return (
-    <span
-      className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-50/90 text-[#8C6246] border border-[#C9A66B]/50"
-      title="Calculated by deducting standard recipe quantities per paid order. Not from physical tank sensors."
-    >
-      <Info className="w-3.5 h-3.5 text-[#C9A66B]" />
-      Software-Estimated (Per-Order Deduction)
-    </span>
-  );
-}
-
-export function UntrackedBadge() {
-  return (
-    <span
-      className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-500 border border-slate-200"
-      title="No inventory levels have been initialized or recorded for this machine."
-    >
-      Untracked
-    </span>
-  );
-}
-
 export function ReconciliationBadge({ result, reason }) {
   const r = String(result || 'MATCH').toUpperCase();
   if (r === 'MATCH') {
