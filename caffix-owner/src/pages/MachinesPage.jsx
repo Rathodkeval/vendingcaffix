@@ -3,7 +3,6 @@ import { MapPin, Clock, Wrench, PlayCircle, Sliders, Tag } from 'lucide-react';
 import {
   ConnectionBadge,
   ModeBadge,
-  SoftwareEstimatedBadge,
   ConfirmModal
 } from '../components/StatusBadges';
 import { formatDateTime, formatRelativeHeartbeat } from '../utils/formatters';
@@ -38,7 +37,6 @@ export default function MachinesPage({
             Operational mode is controlled independently by you.
           </p>
         </div>
-        <SoftwareEstimatedBadge />
       </div>
 
       {machines.length === 0 ? (

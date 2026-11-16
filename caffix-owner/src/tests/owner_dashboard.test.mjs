@@ -178,7 +178,7 @@ async function runStage5Tests() {
     assert.ok(adminMe.payload.data.assigned_machines.length >= 4, 'Admin must see all 4 machines');
     assert.ok(adminMe.payload.data.assigned_machines.includes('CFX-MC-04'), 'Admin must see CFX-MC-04');
 
-    // Ensure machines are RUNNING and refilled via admin API before testing owner workflows
+    // Ensure machines are RUNNING via admin API before testing owner workflows
     for (const machineId of ['CFX-MC-01', 'CFX-MC-02', 'CFX-MC-03', 'CFX-MC-04']) {
       const modeRes = await backendRequest(`/machines/${machineId}/status`, {
         method: 'PATCH',
@@ -186,14 +186,6 @@ async function runStage5Tests() {
         token: adminToken
       });
       assert.strictEqual(modeRes.status, 200);
-    }
-    for (const machineId of ['CFX-MC-01', 'CFX-MC-02', 'CFX-MC-04']) {
-      const refillRes = await backendRequest(`/machines/${machineId}/refill`, {
-        method: 'POST',
-        body: { ingredient: 'ALL' },
-        token: adminToken
-      });
-      assert.strictEqual(refillRes.status, 200);
     }
     console.log('   PASS: CORS allowlist, portal isolation (admin rejected on owner portal), and test fixture setup verified.');
 
@@ -314,12 +306,11 @@ async function runStage5Tests() {
     }
     assert.ok(blockedDetails, 'Owner A must receive 403 when querying Owner B machine CFX-MC-03');
 
-    // Verify Owner A is blocked (403) from changing Owner B's mode, reading/updating Owner B's products, refilling Owner B's inventory, querying Owner B's orders, or calling Admin endpoints
+    // Verify Owner A is blocked (403) from changing Owner B's mode, reading/updating Owner B's products, querying Owner B's orders, or calling Admin endpoints
     const crossTenantChecks = [
       () => ownerApi.updateMachineMode('CFX-MC-03', 'MAINTENANCE', tokenA, TEST_BASE_URL),
       () => ownerApi.getMachineProducts('CFX-MC-03', tokenA, TEST_BASE_URL),
       () => ownerApi.updateMachineProduct('CFX-MC-03', 1, { price: 999, is_available: false }, tokenA, TEST_BASE_URL),
-      () => ownerApi.refillMachineInventory('CFX-MC-03', 'ALL', tokenA, TEST_BASE_URL),
       () => ownerApi.getOrders('CFX-MC-03', tokenA, TEST_BASE_URL)
     ];
 
@@ -558,10 +549,11 @@ async function runStage5Tests() {
     assert.strictEqual(typeof ownerApi.getAnalyticsTimeSeries, 'function');
     assert.strictEqual(typeof ownerApi.getAnalyticsMachines, 'function');
     assert.strictEqual(typeof ownerApi.getAnalyticsProducts, 'function');
-    assert.strictEqual(typeof ownerApi.getAnalyticsInventory, 'function');
     assert.strictEqual(typeof ownerApi.getAnalyticsRefunds, 'function');
+    assert.strictEqual(ownerApi.getAnalyticsInventory, undefined);
+    assert.strictEqual(ownerApi.refillMachineInventory, undefined);
 
-    // 10.1 Call all 6 endpoints with Owner A token
+    // 10.1 Call all 5 active endpoints with Owner A token
     const ownerOverview = await ownerApi.getAnalyticsOverview({}, tokenA, TEST_BASE_URL);
     assert.strictEqual(ownerOverview.status, 'success');
     assert.ok(typeof ownerOverview.data.gross_sales_paise === 'number');
@@ -581,10 +573,6 @@ async function runStage5Tests() {
     const ownerProducts = await ownerApi.getAnalyticsProducts({}, tokenA, TEST_BASE_URL);
     assert.strictEqual(ownerProducts.status, 'success');
     assert.ok(Array.isArray(ownerProducts.data));
-
-    const ownerInventory = await ownerApi.getAnalyticsInventory({}, tokenA, TEST_BASE_URL);
-    assert.strictEqual(ownerInventory.status, 'success');
-    assert.ok(Array.isArray(ownerInventory.data));
 
     const ownerRefunds = await ownerApi.getAnalyticsRefunds({}, tokenA, TEST_BASE_URL);
     assert.strictEqual(ownerRefunds.status, 'success');
@@ -625,13 +613,12 @@ async function runStage5Tests() {
     assert.ok(ownerReportsSource.includes('ownerApi.getAnalyticsTimeSeries'), 'Must call ownerApi.getAnalyticsTimeSeries');
     assert.ok(ownerReportsSource.includes('ownerApi.getAnalyticsMachines'), 'Must call ownerApi.getAnalyticsMachines');
     assert.ok(ownerReportsSource.includes('ownerApi.getAnalyticsProducts'), 'Must call ownerApi.getAnalyticsProducts');
-    assert.ok(ownerReportsSource.includes('ownerApi.getAnalyticsInventory'), 'Must call ownerApi.getAnalyticsInventory');
+    assert.ok(!ownerReportsSource.includes('getAnalyticsInventory'), 'Must NOT call removed getAnalyticsInventory');
     assert.ok(ownerReportsSource.includes('ownerApi.getAnalyticsRefunds'), 'Must call ownerApi.getAnalyticsRefunds');
     assert.ok(ownerReportsSource.includes('AbortController'), 'Must use AbortController');
     assert.ok(ownerReportsSource.includes('No Machines Assigned'), 'Must have zero assigned machines empty state');
     assert.ok(ownerReportsSource.includes('Critical Financial Invariant Violation Detected'), 'Must display over-refund banner');
     assert.ok(ownerReportsSource.includes('Period Net Revenue Deficit'), 'Must display net deficit banner');
-    assert.ok(ownerReportsSource.includes('UntrackedBadge'), 'Must use UntrackedBadge');
     assert.ok(!ownerReportsSource.includes('computeSalesAnalytics('), 'Must not use client-side computeSalesAnalytics');
 
     console.log('   PASS: Owner analytics APIs, tenant isolation (403), signed currency, and UI invariants verified.');
@@ -658,13 +645,13 @@ async function runStage5Tests() {
     assert.ok(ownerTimeSeriesFailMsg.length > 0, 'Auxiliary endpoint must fail independently with validation error');
 
     // 11.2 Simulate multiple auxiliary sections failing independently while others succeed
-    let ownerInventoryFailMsg = '';
+    let ownerMachinesFailMsg = '';
     try {
-      await ownerApi.getAnalyticsInventory({ machine_id: 'INVALID$$ID' }, tokenA, TEST_BASE_URL);
+      await ownerApi.getAnalyticsMachines({ machine_id: 'INVALID$$ID' }, tokenA, TEST_BASE_URL);
     } catch (err) {
-      ownerInventoryFailMsg = err.message;
+      ownerMachinesFailMsg = err.message;
     }
-    assert.ok(ownerInventoryFailMsg.length > 0, 'Inventory query with invalid machine_id must fail independently');
+    assert.ok(ownerMachinesFailMsg.length > 0, 'Machines analytics query with invalid machine_id must fail independently');
     const ownerProductsSuccess = await ownerApi.getAnalyticsProducts({}, tokenA, TEST_BASE_URL);
     assert.strictEqual(ownerProductsSuccess.status, 'success');
 

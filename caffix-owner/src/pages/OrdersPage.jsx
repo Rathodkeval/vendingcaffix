@@ -178,7 +178,13 @@ export function evaluateOrderReconciliation(o) {
   };
 }
 
-export default function OrdersPage({ orders = [], machines = [] }) {
+export default function OrdersPage({
+  orders = [],
+  machines = [],
+  hasMoreOrders = false,
+  loadingMoreOrders = false,
+  onLoadMoreOrders = null
+}) {
   const [searchQuery, setSearchQuery] = useState('');
   const [machineFilter, setMachineFilter] = useState('ALL');
   const [paymentStatusFilter, setPaymentStatusFilter] = useState('ALL');
@@ -619,6 +625,18 @@ export default function OrdersPage({ orders = [], machines = [] }) {
                 })}
               </tbody>
             </table>
+          </div>
+        )}
+        {hasMoreOrders && onLoadMoreOrders && (
+          <div className="p-4 border-t border-[#EED9C4]/70 bg-[#FAF6F0]/40 flex justify-center">
+            <button
+              type="button"
+              onClick={onLoadMoreOrders}
+              disabled={loadingMoreOrders}
+              className="px-4 py-2 rounded-xl text-xs font-semibold bg-white hover:bg-[#FAF6F0] text-[#4E3629] border border-[#EED9C4] transition-colors disabled:opacity-60 cursor-pointer"
+            >
+              {loadingMoreOrders ? 'Loading Older Orders...' : 'Load Older Orders'}
+            </button>
           </div>
         )}
       </div>

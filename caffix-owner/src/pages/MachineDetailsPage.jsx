@@ -4,16 +4,13 @@ import {
   Clock,
   Wrench,
   PlayCircle,
-  RefreshCw,
   Tag,
   CheckCircle2,
-  XCircle,
-  Droplets
+  XCircle
 } from 'lucide-react';
 import {
   ConnectionBadge,
   ModeBadge,
-  SoftwareEstimatedBadge,
   ConfirmModal
 } from '../components/StatusBadges';
 import { formatINR, formatDateTime, formatRelativeHeartbeat } from '../utils/formatters';
@@ -24,7 +21,6 @@ export default function MachineDetailsPage({
   selectedMachineId,
   onSelectMachineId,
   onToggleMode,
-  onRefillInventory,
   onNavigateToPricing
 }) {
   const activeMachine =
@@ -32,10 +28,8 @@ export default function MachineDetailsPage({
 
   const [machineProducts, setMachineProducts] = useState([]);
   const [loadingProducts, setLoadingProducts] = useState(false);
-  const [refillingKey, setRefillingKey] = useState('');
   const [confirmMode, setConfirmMode] = useState(null);
   const [modeLoading, setModeLoading] = useState(false);
-  const [feedback, setFeedback] = useState('');
 
   useEffect(() => {
     if (!activeMachine) {
@@ -75,32 +69,6 @@ export default function MachineDetailsPage({
 
   const isMaintenance =
     String(activeMachine.desired_mode || '').toUpperCase() === 'MAINTENANCE';
-  const inv = activeMachine.estimated_inventory || {};
-
-  const ingredients = [
-    { key: 'water', field: 'water_level', label: 'Water Supply' },
-    { key: 'coffee', field: 'coffee_level', label: 'Arabica Coffee Beans' },
-    { key: 'milk', field: 'milk_level', label: 'Fresh Milk' },
-    { key: 'vanilla', field: 'vanilla_level', label: 'Vanilla Syrup' },
-    { key: 'hazelnut', field: 'hazelnut_level', label: 'Hazelnut Syrup' },
-    { key: 'irish', field: 'irish_level', label: 'Irish Cream Syrup' },
-    { key: 'mocha', field: 'mocha_level', label: 'Mocha Chocolate Syrup' }
-  ];
-
-  const handleRefill = async (ingredientKey) => {
-    setRefillingKey(ingredientKey);
-    setFeedback('');
-    try {
-      await onRefillInventory(activeMachine.id, ingredientKey);
-      setFeedback(
-        ingredientKey === 'ALL'
-          ? `Reset all software-estimated ingredient levels to 100% on ${activeMachine.id}.`
-          : `Reset ${ingredientKey} estimated level to 100% on ${activeMachine.id}.`
-      );
-    } finally {
-      setRefillingKey('');
-    }
-  };
 
   const handleConfirmModeToggle = async () => {
     if (!confirmMode) return;
@@ -146,12 +114,6 @@ export default function MachineDetailsPage({
           </select>
         </div>
       </div>
-
-      {feedback && (
-        <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold">
-          {feedback}
-        </div>
-      )}
 
       {/* Connectivity & Mode Cards */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
@@ -230,83 +192,6 @@ export default function MachineDetailsPage({
               )}
             </button>
           </div>
-        </div>
-      </div>
-
-      {/* Software-Estimated Inventory Section */}
-      <div className="bg-white rounded-2xl border border-[#EED9C4] p-6 shadow-xs space-y-5">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-[#EED9C4]">
-          <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <h3 className="font-display text-lg font-bold text-[#2C1E17]">
-                Estimated Ingredient Inventory
-              </h3>
-              <SoftwareEstimatedBadge />
-            </div>
-            <p className="text-xs text-slate-500 mt-1">
-              Levels are deducted in software per paid order. Click Refill after replenishing physical canisters.
-            </p>
-          </div>
-
-          <button
-            type="button"
-            disabled={refillingKey === 'ALL'}
-            onClick={() => handleRefill('ALL')}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-[#4E3629] hover:bg-[#2C1E17] text-white transition-colors disabled:opacity-60 cursor-pointer"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${refillingKey === 'ALL' ? 'animate-spin' : ''}`} />
-            Refill All to 100%
-          </button>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {ingredients.map((item) => {
-            const pct = Number(inv[item.field] ?? 100);
-            const isLow = pct <= 25;
-            return (
-              <div
-                key={item.key}
-                className="rounded-xl border border-[#EED9C4] bg-[#FAF6F0]/40 p-4 flex flex-col justify-between space-y-3"
-              >
-                <div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-[#2C1E17] flex items-center gap-1.5">
-                      <Droplets className="w-3.5 h-3.5 text-[#8C6246]" />
-                      {item.label}
-                    </span>
-                    <span
-                      className={`text-sm font-extrabold ${
-                        isLow ? 'text-red-600' : 'text-[#4E3629]'
-                      }`}
-                    >
-                      {pct}%
-                    </span>
-                  </div>
-                  <div className="mt-2 h-2 w-full bg-slate-200 rounded-full overflow-hidden">
-                    <div
-                      className={`h-full rounded-full transition-all ${
-                        isLow ? 'bg-red-500' : 'bg-[#4E3629]'
-                      }`}
-                      style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
-                    />
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  disabled={refillingKey === item.key || pct === 100}
-                  onClick={() => handleRefill(item.key)}
-                  className="w-full py-1.5 px-3 rounded-lg text-xs font-semibold border border-[#EED9C4] bg-white hover:bg-[#FAF6F0] text-[#4E3629] disabled:opacity-50 transition-colors cursor-pointer"
-                >
-                  {refillingKey === item.key
-                    ? 'Resetting...'
-                    : pct === 100
-                    ? 'Full (100%)'
-                    : 'Reset to 100%'}
-                </button>
-              </div>
-            );
-          })}
         </div>
       </div>
 
