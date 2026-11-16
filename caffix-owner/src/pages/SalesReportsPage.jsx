@@ -317,14 +317,12 @@ export default function SalesReportsPage({ machines = [] }) {
       setTimeSeries([]);
       setMachineAnalytics([]);
       setProductAnalytics([]);
-      setInventoryAnalytics([]);
       setRefundsAnalytics(null);
       setSectionLoading({
         overview: false,
         timeSeries: false,
         machines: false,
         products: false,
-        inventory: false,
         refunds: false
       });
       setLastFullSync(null);
@@ -635,7 +633,7 @@ export default function SalesReportsPage({ machines = [] }) {
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-0.5">
-            Verified financial KPIs, refund deductions, and ingredient consumption for your assigned vending machines.
+            Verified financial KPIs, revenue trends, and refund deductions for your assigned vending machines.
           </p>
         </div>
 

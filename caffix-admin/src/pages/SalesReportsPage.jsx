@@ -585,7 +585,7 @@ export default function SalesReportsPage({ machines = [] }) {
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-0.5">
-            Real-time multi-machine financial KPIs, refund accounting, and ingredient telemetry in Asia/Kolkata time.
+            Real-time multi-machine financial KPIs, revenue trends, and refund accounting in Asia/Kolkata time.
           </p>
         </div>
 
