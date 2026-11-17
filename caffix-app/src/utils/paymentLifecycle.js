@@ -304,8 +304,20 @@ export function classifyDispenseProgress(order) {
   const dispenseStatus = String(order.dispense_status || '').toUpperCase();
   const refundStatus = String(order.refund_status || '').toUpperCase();
   const orderStatus = String(order.status || '').toUpperCase();
+  const pendingRefundPaise = Number(order.pending_refund_amount_paise || 0);
+  const totalRefundedPaise = Number(order.total_refunded_amount_paise || 0);
 
-  if (dispenseStatus === 'FAILED' || dispenseStatus === 'CANCELLED' || refundStatus === 'FULL') {
+  if (
+    dispenseStatus === 'FAILED' ||
+    dispenseStatus === 'CANCELLED' ||
+    dispenseStatus === 'EXPIRED' ||
+    Boolean(order.expired_at) ||
+    refundStatus === 'FULL' ||
+    refundStatus === 'PENDING' ||
+    refundStatus === 'PARTIAL' ||
+    pendingRefundPaise > 0 ||
+    totalRefundedPaise > 0
+  ) {
     return 'DISPENSE_FAILED';
   }
 

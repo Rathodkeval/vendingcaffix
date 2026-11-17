@@ -2085,10 +2085,31 @@ async function hydrateLocalOrderFromAuthoritativeRecord(
       ]).catch(() => {});
     }
     if (
-      shouldReconcileRefunds &&
-      (remoteOrder.refund_status || remoteOrder.total_refunded_amount_paise !== undefined || remoteOrder.pending_refund_amount_paise !== undefined)
+      remoteOrder.refund_status ||
+      remoteOrder.total_refunded_amount_paise !== undefined ||
+      remoteOrder.pending_refund_amount_paise !== undefined
     ) {
-      await reconcileOrderRefundRecords(orderId, remoteOrder, db, firestore);
+      if (shouldReconcileRefunds) {
+        await reconcileOrderRefundRecords(orderId, remoteOrder, db, firestore);
+      } else {
+        await db
+          .run(
+            `UPDATE orders
+             SET pending_refund_amount_paise = ?,
+                 total_refunded_amount_paise = ?,
+                 last_refunded_at = ?,
+                 refund_status = ?
+             WHERE id = ?`,
+            [
+              Number(remoteOrder.pending_refund_amount_paise ?? 0),
+              Number(remoteOrder.total_refunded_amount_paise ?? remoteOrder.refunded_amount_paise ?? 0),
+              remoteOrder.last_refunded_at || null,
+              String(remoteOrder.refund_status || 'NONE').toUpperCase(),
+              orderId
+            ]
+          )
+          .catch(() => {});
+      }
     }
     if (remoteOrder.captured_amount_paise !== undefined && remoteOrder.captured_amount_paise !== null) {
       await db.run('UPDATE orders SET captured_amount_paise = ? WHERE id = ?', [
@@ -2144,6 +2165,33 @@ async function hydrateLocalOrderFromAuthoritativeRecord(
     // Reconcile individual refund documents and calculate authoritative balances (Parts B & C)
     if (shouldReconcileRefunds) {
       await reconcileOrderRefundRecords(orderId, remoteOrder, db, firestore);
+    } else if (
+      remoteOrder.refund_status ||
+      remoteOrder.total_refunded_amount_paise !== undefined ||
+      remoteOrder.pending_refund_amount_paise !== undefined
+    ) {
+      await db
+        .run(
+          `UPDATE orders
+           SET pending_refund_amount_paise = ?,
+               total_refunded_amount_paise = ?,
+               last_refunded_at = ?,
+               refund_status = ?
+           WHERE id = ?`,
+          [
+            Number(remoteOrder.pending_refund_amount_paise ?? existing.pending_refund_amount_paise ?? 0),
+            Number(
+              remoteOrder.total_refunded_amount_paise ??
+                remoteOrder.refunded_amount_paise ??
+                existing.total_refunded_amount_paise ??
+                0
+            ),
+            remoteOrder.last_refunded_at ?? existing.last_refunded_at ?? null,
+            String(remoteOrder.refund_status || existing.refund_status || 'NONE').toUpperCase(),
+            orderId
+          ]
+        )
+        .catch(() => {});
     }
   }
 
@@ -2616,6 +2664,75 @@ export async function getPendingOrdersFromFirebase(db: any): Promise<any[]> {
      ORDER BY o.created_at ASC`,
     ['PENDING']
   );
+}
+
+/**
+ * Bounded Firestore query for `runAutoRefundSweep`:
+ * Queries ONLY orders with `status == 'PAID'` (and optional `machine_id == machineId`),
+ * avoiding full-collection scans of historical CANCELLED/FAILED/PENDING/COMPLETED orders.
+ */
+export async function getPaidOrdersForAutoRefundFromFirebase(
+  db: any,
+  options?: { machineId?: string; limit?: number }
+): Promise<any[]> {
+  ensureFirebaseReady();
+
+  const targetMachineId = options?.machineId ? String(options.machineId).trim() : '';
+  const maxLimit =
+    options?.limit !== undefined && Number.isFinite(Number(options.limit)) && Number(options.limit) > 0
+      ? Math.min(200, Math.max(1, Math.floor(Number(options.limit))))
+      : 100;
+
+  if (firestore) {
+    const paidById = new Map<string, any>();
+    try {
+      let query: any = firestore.collection('orders').where('status', '==', 'PAID');
+      if (targetMachineId) {
+        query = firestore
+          .collection('orders')
+          .where('machine_id', '==', targetMachineId)
+          .where('status', '==', 'PAID');
+      }
+      if (typeof query.limit === 'function') {
+        query = query.limit(Math.min(500, maxLimit * 2));
+      }
+
+      const snap = await query.get();
+      snap.forEach((doc: any) => {
+        const data = doc.data();
+        if (!data) return;
+        const id = String(data.id || doc.id);
+        const rawOrder = { ...data, id };
+        syncedOrdersStore.set(id, rawOrder);
+        const enriched = enrichAuthoritativeOrderRecord(rawOrder);
+        if (enriched.is_malformed) return;
+        paidById.set(id, enriched);
+      });
+    } catch (error) {
+      handleFirestoreFailure('Failed to query PAID orders for auto-refund sweep from Firestore', error);
+    }
+
+    const candidates = Array.from(paidById.values());
+    candidates.sort((a, b) =>
+      String(a.created_at || '').localeCompare(String(b.created_at || ''))
+    );
+
+    const hydrated: any[] = [];
+    for (const remoteOrder of candidates.slice(0, maxLimit)) {
+      const row = await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db, {
+        reconcileRefunds: false
+      });
+      hydrated.push(enrichAuthoritativeOrderRecord({ ...(row || {}), ...remoteOrder }));
+    }
+    return hydrated;
+  }
+
+  const machineScope = targetMachineId ? [targetMachineId] : undefined;
+  const fallbackOrders = await getAuthoritativeOrders(db, machineScope);
+  return fallbackOrders
+    .filter((o) => String(o?.status || '').toUpperCase() === 'PAID')
+    .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')))
+    .slice(0, maxLimit);
 }
 
 /**

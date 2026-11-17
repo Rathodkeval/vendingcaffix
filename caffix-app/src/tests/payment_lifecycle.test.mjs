@@ -252,7 +252,11 @@ async function runTests() {
     assert.equal(classifyDispenseProgress({ status: 'PAID', dispense_status: 'DISPENSING' }), 'DISPENSING');
     assert.equal(classifyDispenseProgress({ status: 'PAID', dispense_status: 'DISPENSED', dispensed: true }), 'DISPENSED');
     assert.equal(classifyDispenseProgress({ status: 'PAID', dispense_status: 'FAILED' }), 'DISPENSE_FAILED');
+    assert.equal(classifyDispenseProgress({ status: 'PAID', dispense_status: 'EXPIRED' }), 'DISPENSE_FAILED');
+    assert.equal(classifyDispenseProgress({ status: 'PAID', dispense_status: 'QUEUED', expired_at: '2026-11-16T06:16:00Z' }), 'DISPENSE_FAILED');
     assert.equal(classifyDispenseProgress({ status: 'PAID', dispense_status: 'QUEUED', refund_status: 'FULL' }), 'DISPENSE_FAILED');
+    assert.equal(classifyDispenseProgress({ status: 'PAID', dispense_status: 'QUEUED', refund_status: 'PENDING' }), 'DISPENSE_FAILED');
+    assert.equal(classifyDispenseProgress({ status: 'PAID', dispense_status: 'QUEUED', pending_refund_amount_paise: 100 }), 'DISPENSE_FAILED');
     assert.equal(isOrderPaidOrActive({ status: 'PENDING', dispense_status: 'DISPENSING' }), true);
     assert.equal(isOrderPaidOrActive({ status: 'FAILED', dispense_status: 'FAILED' }), false);
 

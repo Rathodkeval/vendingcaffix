@@ -291,12 +291,23 @@ export default function App() {
     }
 
     const dispenseStatus = String(verifiedOrder?.dispense_status || '').toUpperCase();
+    const refundStatus = String(verifiedOrder?.refund_status || '').toUpperCase();
     if (verifiedOrder?.dispensed === true || dispenseStatus === 'DISPENSED' || String(verifiedOrder?.status || '').toUpperCase() === 'COMPLETED') {
       setScreen('SUCCESS');
       return;
     }
 
-    if (dispenseStatus === 'FAILED') {
+    if (
+      dispenseStatus === 'FAILED' ||
+      dispenseStatus === 'EXPIRED' ||
+      dispenseStatus === 'CANCELLED' ||
+      Boolean(verifiedOrder?.expired_at) ||
+      refundStatus === 'FULL' ||
+      refundStatus === 'PENDING' ||
+      refundStatus === 'PARTIAL' ||
+      Number(verifiedOrder?.pending_refund_amount_paise || 0) > 0 ||
+      Number(verifiedOrder?.total_refunded_amount_paise || 0) > 0
+    ) {
       setFailedDispenseOrder(verifiedOrder);
       setScreen('DISPENSE_FAILED');
       return;

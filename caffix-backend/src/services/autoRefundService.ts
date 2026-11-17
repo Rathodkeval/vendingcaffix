@@ -16,19 +16,26 @@ import {
   getAuthoritativeMachineState,
   getAuthoritativeOrderById,
   getAuthoritativeOrders,
+  getPaidOrdersForAutoRefundFromFirebase,
   getFirestoreInstance,
   isFirestoreActive,
   releaseReconciliationLeaseInFirebase,
   updateSyncedFirebaseOrder
 } from '../utils/firebase';
-import { executeGatewayRefund, GatewayRefundResponse } from '../utils/razorpayRefundClient';
+import {
+  executeGatewayRefund,
+  GatewayRefundResponse,
+  resolveRazorpayRefundConfig
+} from '../utils/razorpayRefundClient';
 import {
   RefundRecord,
   RefundSource,
   calculateRemainingRefundableBalance,
   createPendingRefundReservation,
+  getRefundsByOrderId,
   markRefundFailed,
-  markRefundProcessed
+  markRefundProcessed,
+  recordPendingRefundGatewayId
 } from '../utils/refunds';
 import logger from '../utils/logger';
 
@@ -93,6 +100,8 @@ export interface AutoRefundSweepSummary {
   refund_pending: number;
   refund_failed: number;
   replayed: number;
+  reconciled_pending_processed?: number;
+  reconciled_pending_failed?: number;
   skipped_dispensing: number;
   skipped_uncertain: number;
   skipped_dispensed: number;
@@ -199,9 +208,15 @@ export async function executeOrderRefundTransaction(
     logger.error(
       `[CRITICAL FINANCIAL EXCEPTION] Gateway refund discrepancy for order ${order.id} (refund: ${reservation.refund.id}): requested=${requestedPaise} INR, reportedAmount=${gatewayResult.amountPaise}, reportedCurrency=${gatewayResult.currency}, rpRefundId=${gatewayResult.razorpayRefundId || 'none'}`
     );
+    const updatedMismatchRefund = gatewayResult.razorpayRefundId
+      ? (await recordPendingRefundGatewayId(db, {
+          refundId: reservation.refund.id,
+          razorpay_refund_id: gatewayResult.razorpayRefundId
+        })) || reservation.refund
+      : reservation.refund;
     return {
       outcome: 'mismatch',
-      refund: reservation.refund,
+      refund: updatedMismatchRefund,
       order: reservation.order,
       gateway: gatewayResult
     };
@@ -223,9 +238,19 @@ export async function executeOrderRefundTransaction(
   }
 
   if (gatewayResult.success && gatewayResult.status === 'PENDING') {
+    const pendingRefundRecord = gatewayResult.razorpayRefundId
+      ? (await recordPendingRefundGatewayId(db, {
+          refundId: reservation.refund.id,
+          razorpay_refund_id: gatewayResult.razorpayRefundId
+        })) || {
+          ...reservation.refund,
+          razorpay_refund_id: gatewayResult.razorpayRefundId
+        }
+      : reservation.refund;
+
     return {
       outcome: 'pending',
-      refund: reservation.refund,
+      refund: pendingRefundRecord,
       order: reservation.order,
       gateway: gatewayResult
     };
@@ -329,11 +354,18 @@ export function evaluateAutoRefundEligibility(
     };
   }
 
-  // Financial verification (captured payment + no existing refund or pending hold)
+  // Financial verification (captured payment + no existing refund or pending/failed hold)
   const totalRefunded = Number(order.total_refunded_amount_paise || 0);
   const pendingRefund = Number(order.pending_refund_amount_paise || 0);
   const refundStatus = String(order.refund_status || 'NONE').toUpperCase();
-  if (totalRefunded > 0 || pendingRefund > 0 || refundStatus === 'FULL' || refundStatus === 'PENDING' || refundStatus === 'PARTIAL') {
+  if (
+    totalRefunded > 0 ||
+    pendingRefund > 0 ||
+    refundStatus === 'FULL' ||
+    refundStatus === 'PENDING' ||
+    refundStatus === 'PARTIAL' ||
+    refundStatus === 'FAILED'
+  ) {
     return {
       eligible: false,
       skipReason: 'ALREADY_REFUNDED_OR_PENDING',
@@ -832,9 +864,141 @@ export async function reportMachineDispenseOutcome(
 }
 
 /**
+ * Safely reconciles any `PENDING` refund reservations on an order against Razorpay's
+ * authoritative refund status (`refunds.fetch` or `payments.fetchRefunds`).
+ * Never initiates a new refund — only settles existing `PENDING` reservations once
+ * Razorpay reports a terminal `processed` or `failed` outcome.
+ */
+export async function reconcilePendingRefundsForOrder(
+  db: any,
+  order: any
+): Promise<{
+  settledProcessed: number;
+  settledFailed: number;
+  stillPending: number;
+}> {
+  const result = { settledProcessed: 0, settledFailed: 0, stillPending: 0 };
+  if (!order || !order.id || !order.razorpay_payment_id) {
+    return result;
+  }
+
+  const refundStatus = String(order.refund_status || '').toUpperCase();
+  const pendingPaise = Number(order.pending_refund_amount_paise || 0);
+  if (refundStatus !== 'PENDING' && pendingPaise <= 0) {
+    return result;
+  }
+
+  let razorpayClient: any = null;
+  try {
+    const cfg = resolveRazorpayRefundConfig();
+    razorpayClient = cfg.razorpayClient;
+  } catch {
+    return result;
+  }
+
+  if (!razorpayClient) {
+    return result;
+  }
+
+  const refunds = await getRefundsByOrderId(db, String(order.id));
+  const pendingRefunds = refunds.filter((r) => String(r.status || '').toUpperCase() === 'PENDING');
+  if (pendingRefunds.length === 0) {
+    return result;
+  }
+
+  for (const pendingRefund of pendingRefunds) {
+    try {
+      let gwRefund: any = null;
+
+      if (
+        pendingRefund.razorpay_refund_id &&
+        typeof razorpayClient.refunds?.fetch === 'function'
+      ) {
+        gwRefund = await razorpayClient.refunds.fetch(String(pendingRefund.razorpay_refund_id));
+      } else if (typeof razorpayClient.payments?.fetchRefunds === 'function') {
+        const listResp = await razorpayClient.payments.fetchRefunds(
+          String(order.razorpay_payment_id)
+        );
+        const items: any[] = Array.isArray(listResp)
+          ? listResp
+          : Array.isArray(listResp?.items)
+            ? listResp.items
+            : [];
+        gwRefund =
+          items.find(
+            (item) =>
+              String(item?.receipt || '').trim() === pendingRefund.id ||
+              String(item?.notes?.refund_id || '').trim() === pendingRefund.id
+          ) || null;
+      }
+
+      if (!gwRefund || typeof gwRefund !== 'object') {
+        result.stillPending += 1;
+        continue;
+      }
+
+      const gwPaymentId = String(gwRefund.payment_id || order.razorpay_payment_id).trim();
+      const gwAmount = Number(gwRefund.amount);
+      const gwCurrency = String(gwRefund.currency || 'INR').trim().toUpperCase();
+      if (
+        gwPaymentId !== String(order.razorpay_payment_id).trim() ||
+        gwAmount !== Number(pendingRefund.amount_paise) ||
+        gwCurrency !== 'INR'
+      ) {
+        logger.error(
+          `[Pending Refund Reconciliation] Gateway refund mismatch for ${pendingRefund.id} on order ${order.id}: expected=${pendingRefund.amount_paise} INR (${order.razorpay_payment_id}), got=${gwAmount} ${gwCurrency} (${gwPaymentId})`
+        );
+        result.stillPending += 1;
+        continue;
+      }
+
+      const gwStatus = String(gwRefund.status || '').trim().toLowerCase();
+      const gwRefundId = gwRefund.id ? String(gwRefund.id).trim() : null;
+
+      if (gwStatus === 'processed') {
+        const processedAtIso = gwRefund.created_at
+          ? new Date(Number(gwRefund.created_at) * 1000).toISOString()
+          : new Date().toISOString();
+        await markRefundProcessed(db, {
+          refundId: pendingRefund.id,
+          razorpay_refund_id: gwRefundId || pendingRefund.razorpay_refund_id,
+          processed_at: processedAtIso
+        });
+        result.settledProcessed += 1;
+      } else if (gwStatus === 'failed') {
+        await markRefundFailed(db, {
+          refundId: pendingRefund.id,
+          error_code: gwRefund.error_code ? String(gwRefund.error_code) : 'GATEWAY_REFUND_FAILED',
+          error_description: gwRefund.error_description
+            ? String(gwRefund.error_description)
+            : 'Pending refund failed at Razorpay gateway'
+        });
+        result.settledFailed += 1;
+      } else {
+        if (!pendingRefund.razorpay_refund_id && gwRefundId) {
+          await recordPendingRefundGatewayId(db, {
+            refundId: pendingRefund.id,
+            razorpay_refund_id: gwRefundId
+          });
+        }
+        result.stillPending += 1;
+      }
+    } catch (err: any) {
+      logger.warn(
+        `[Pending Refund Reconciliation] Lookup failed for pending refund ${pendingRefund.id} on order ${order.id}: ${err?.message || 'Unknown error'}`
+      );
+      result.stillPending += 1;
+    }
+  }
+
+  return result;
+}
+
+/**
  * Sweeps paid orders in Firestore / local mirror under a distributed lease, safely expiring
- * unclaimed stale QUEUED orders and initiating idempotent Razorpay refunds ONLY for confirmed
- * non-dispensed orders. Failures are isolated per order so one machine never blocks another.
+ * unclaimed stale QUEUED orders, reconciling pending gateway refunds, and initiating idempotent
+ * Razorpay refunds ONLY for confirmed non-dispensed orders. Failures are isolated per order so
+ * one machine never blocks another.
  */
 export async function runAutoRefundSweep(
   options: AutoRefundSweepOptions = {}
@@ -857,6 +1021,8 @@ export async function runAutoRefundSweep(
     refund_pending: 0,
     refund_failed: 0,
     replayed: 0,
+    reconciled_pending_processed: 0,
+    reconciled_pending_failed: 0,
     skipped_dispensing: 0,
     skipped_uncertain: 0,
     skipped_dispensed: 0,
@@ -876,16 +1042,38 @@ export async function runAutoRefundSweep(
   }
 
   try {
-    const machineScope = options.machineId ? [String(options.machineId).trim()] : undefined;
-    const candidateOrders = await getAuthoritativeOrders(db, machineScope);
-    const paidOrders = candidateOrders
-      .filter((o) => String(o?.status || '').toUpperCase() === 'PAID')
-      .slice(0, limit);
+    const paidOrders = await getPaidOrdersForAutoRefundFromFirebase(db, {
+      machineId: options.machineId ? String(options.machineId).trim() : undefined,
+      limit
+    });
 
     summary.scanned = paidOrders.length;
 
     for (const order of paidOrders) {
       try {
+        if (
+          String(order?.refund_status || '').toUpperCase() === 'PENDING' ||
+          Number(order?.pending_refund_amount_paise || 0) > 0
+        ) {
+          const pendingRecon = await reconcilePendingRefundsForOrder(db, order);
+          summary.reconciled_pending_processed =
+            (summary.reconciled_pending_processed || 0) + pendingRecon.settledProcessed;
+          summary.reconciled_pending_failed =
+            (summary.reconciled_pending_failed || 0) + pendingRecon.settledFailed;
+          if (pendingRecon.settledProcessed > 0) {
+            summary.refunded_processed += pendingRecon.settledProcessed;
+            continue;
+          }
+          if (pendingRecon.settledFailed > 0) {
+            summary.refund_failed += pendingRecon.settledFailed;
+            continue;
+          }
+          if (pendingRecon.stillPending > 0) {
+            summary.skipped_already_refunded += 1;
+            continue;
+          }
+        }
+
         const res = await processAutoRefundForOrder(db, order.id, {
           nowMs,
           queuedExpiryMs: expiryMs

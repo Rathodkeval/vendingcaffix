@@ -66,40 +66,6 @@
         { "fieldPath": "order_id", "order": "ASCENDING" },
         { "fieldPath": "status", "order": "ASCENDING" }
       ]
-    },
-    {
-      "collectionGroup": "inventory_ledger",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "machine_id", "order": "ASCENDING" },
-        { "fieldPath": "created_at", "order": "ASCENDING" }
-      ]
-    },
-    {
-      "collectionGroup": "inventory_ledger",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "machine_id", "order": "ASCENDING" },
-        { "fieldPath": "created_at", "order": "DESCENDING" }
-      ]
-    },
-    {
-      "collectionGroup": "inventory_ledger",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "machine_id", "order": "ASCENDING" },
-        { "fieldPath": "ingredient", "order": "ASCENDING" },
-        { "fieldPath": "created_at", "order": "ASCENDING" }
-      ]
-    },
-    {
-      "collectionGroup": "inventory_ledger",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "machine_id", "order": "ASCENDING" },
-        { "fieldPath": "movement_type", "order": "ASCENDING" },
-        { "fieldPath": "created_at", "order": "ASCENDING" }
-      ]
     }
   ],
   "fieldOverrides": []

@@ -29,9 +29,42 @@ MACHINE_ID_PATTERN = re.compile(r"^CFX-MC-\d{2,4}$")
 ELIGIBLE_ORDER_STATUSES = {"QUEUED", "PAID", "PREPARING", "COMPLETED"}
 # Dispense lifecycle states that indicate an order has already been claimed or completed
 CLAIMED_DISPENSE_STATES = {"CLAIMING", "DISPENSING", "DISPENSED", "COMPLETED"}
-# Failed/cancelled dispense states that must never be automatically re-dispensed
-FAILED_DISPENSE_STATES = {"FAILED", "CANCELLED"}
+# Failed/cancelled/expired dispense states that must never be automatically re-dispensed
+FAILED_DISPENSE_STATES = {"FAILED", "CANCELLED", "EXPIRED"}
 NON_PROCESSABLE_DISPENSE_STATES = CLAIMED_DISPENSE_STATES | FAILED_DISPENSE_STATES
+# Default stale QUEUED claim expiry window (15 minutes, aligned with backend auto-refund policy)
+ORDER_MAX_CLAIM_AGE_SECONDS = int(os.getenv("ORDER_MAX_CLAIM_AGE_SECONDS", "900"))
+
+
+def _parse_utc_iso(value: Any) -> Optional[datetime]:
+    if not value or not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _is_order_expired(order_data: Dict[str, Any], max_claim_age_seconds: int = ORDER_MAX_CLAIM_AGE_SECONDS) -> bool:
+    if order_data.get("expired_at"):
+        return True
+    now_utc = datetime.now(timezone.utc)
+    expires_dt = _parse_utc_iso(order_data.get("expires_at"))
+    if expires_dt is not None:
+        return now_utc >= expires_dt
+    if max_claim_age_seconds > 0:
+        created_dt = _parse_utc_iso(order_data.get("created_at"))
+        if created_dt is not None:
+            return (now_utc - created_dt).total_seconds() >= max_claim_age_seconds
+    return False
 
 
 def validate_machine_id(machine_id: str) -> str:
@@ -94,6 +127,14 @@ class MachineOrderProcessor:
 
         dispense_status = str(order_data.get("dispense_status") or "").strip().upper()
         if dispense_status in NON_PROCESSABLE_DISPENSE_STATES:
+            return False
+
+        # Reject expired orders or orders marked with uncertain outcome
+        if _is_order_expired(order_data):
+            self.logger.info("Ignoring expired order %s on machine %s", order_id, self.machine_id)
+            return False
+
+        if str(order_data.get("dispense_outcome") or "").strip().upper() == "UNCERTAIN":
             return False
 
         # Reject fully refunded orders or orders with active pending refund reservations
@@ -176,26 +217,32 @@ class MachineOrderProcessor:
 
         # Mark order as DISPENSED or FAILED in Firestore after hardware command finishes
         now_iso = datetime.now(timezone.utc).isoformat()
+        post_updates = (
+            {
+                "dispense_status": "DISPENSED",
+                "dispensed": True,
+                "dispense_outcome": "DISPENSED",
+                "dispensed_by": self.machine_id,
+                "dispensed_at": now_iso,
+                "updated_at": now_iso,
+            }
+            if success
+            else {
+                "dispense_status": "FAILED",
+                "dispensed": False,
+                "dispense_outcome": "UNCERTAIN",
+                "failure_stage": "DURING_DISPENSE",
+                "dispensed_by": self.machine_id,
+                "updated_at": now_iso,
+            }
+        )
         if doc_ref is not None:
             try:
-                doc_ref.set(
-                    {
-                        "dispense_status": "DISPENSED" if success else "FAILED",
-                        "dispensed": bool(success),
-                        "dispensed_by": self.machine_id,
-                        "dispensed_at": now_iso,
-                        "updated_at": now_iso,
-                    },
-                    merge=True,
-                )
+                doc_ref.set(post_updates, merge=True)
             except Exception as exc:
                 self.logger.error("Failed to update post-dispense status for %s: %s", order_id, exc)
         elif order_snapshot_data is not None:
-            order_snapshot_data["dispense_status"] = "DISPENSED" if success else "FAILED"
-            order_snapshot_data["dispensed"] = bool(success)
-            order_snapshot_data["dispensed_by"] = self.machine_id
-            order_snapshot_data["dispensed_at"] = now_iso
-            order_snapshot_data["updated_at"] = now_iso
+            order_snapshot_data.update(post_updates)
 
         return success
 
@@ -224,6 +271,7 @@ class MachineOrderProcessor:
                 "dispense_status": "DISPENSING",
                 "claimed_by": self.machine_id,
                 "claimed_at": now_iso,
+                "dispense_started_at": now_iso,
                 "updated_at": now_iso,
             }
             tx.set(doc_ref, updates, merge=True)

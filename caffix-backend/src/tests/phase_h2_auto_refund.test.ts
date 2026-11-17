@@ -171,7 +171,8 @@ async function runTests() {
 
   // Seed mock Razorpay refund counter tracker
   let gatewayRefundCalls: Array<{ paymentId: string; payload: any }> = [];
-  let gatewayBehavior: 'processed' | 'pending' | 'timeout' | 'reject' = 'processed';
+  let gatewayBehavior: 'processed' | 'pending' | 'pending_to_failed' | 'timeout' | 'reject' = 'processed';
+  const createdGatewayRefunds = new Map<string, any>();
 
   setRazorpayRefundClientForTesting({
     payments: {
@@ -187,14 +188,37 @@ async function runTests() {
           err.error = { code: 'BAD_REQUEST_ERROR', description: 'Payment already refunded or rejected' };
           throw err;
         }
-        return {
-          id: `rfnd_h2_${crypto.randomBytes(4).toString('hex')}`,
+        const rpId = `rfnd_h2_${crypto.randomBytes(4).toString('hex')}`;
+        const entity = {
+          id: rpId,
           payment_id: paymentId,
           amount: payload.amount,
           currency: 'INR',
           status: gatewayBehavior === 'pending' ? 'pending' : 'processed',
           receipt: payload.receipt,
           created_at: Math.floor(Date.now() / 1000)
+        };
+        createdGatewayRefunds.set(rpId, entity);
+        return entity;
+      }
+    },
+    refunds: {
+      fetch: async (refundId: string) => {
+        const existing = createdGatewayRefunds.get(refundId);
+        if (!existing) {
+          throw new Error(`Refund ${refundId} not found`);
+        }
+        if (gatewayBehavior === 'pending_to_failed') {
+          return {
+            ...existing,
+            status: 'failed',
+            error_code: 'BAD_REQUEST_ERROR',
+            error_description: 'UPI bank settlement failed asynchronously'
+          };
+        }
+        return {
+          ...existing,
+          status: gatewayBehavior === 'pending' ? 'pending' : 'processed'
         };
       }
     }
@@ -551,8 +575,84 @@ async function runTests() {
     const pendOutcome = await processAutoRefundForOrder(db, 'CFX-H2-RP-PEND', { nowMs });
     assert.strictEqual(pendOutcome.status, 'pending');
     assert.strictEqual(pendOutcome.refund?.status, 'PENDING');
+    assert.ok(
+      pendOutcome.refund?.razorpay_refund_id && pendOutcome.refund.razorpay_refund_id.startsWith('rfnd_h2_'),
+      'PENDING gateway response must persist razorpay_refund_id onto refund record'
+    );
+    const fsPendRefundDoc = (
+      await firestore.collection('refunds').doc(pendOutcome.refund!.id).get()
+    ).data();
+    assert.strictEqual(
+      fsPendRefundDoc?.razorpay_refund_id,
+      pendOutcome.refund?.razorpay_refund_id,
+      'Firestore refunds doc must persist razorpay_refund_id on PENDING response'
+    );
     assert.strictEqual(pendOutcome.order?.pending_refund_amount_paise, 10000);
     assert.strictEqual(pendOutcome.order?.total_refunded_amount_paise, 0);
+
+    // Reconcile pending refund once Razorpay settles it to processed (zero new payments.refund calls)
+    gatewayBehavior = 'processed';
+    const callsBeforePendRecon = gatewayRefundCalls.length;
+    const pendReconSweep = await runAutoRefundSweep({ nowMs });
+    assert.strictEqual(
+      gatewayRefundCalls.length,
+      callsBeforePendRecon,
+      'Pending refund reconciliation must NOT issue a duplicate payments.refund call'
+    );
+    assert.strictEqual(pendReconSweep.reconciled_pending_processed, 1);
+    const settledPendOrder = await getAuthoritativeOrderById('CFX-H2-RP-PEND', db);
+    assert.strictEqual(settledPendOrder?.refund_status, 'FULL');
+    assert.strictEqual(settledPendOrder?.total_refunded_amount_paise, 10000);
+    assert.strictEqual(settledPendOrder?.pending_refund_amount_paise, 0);
+
+    // PENDING -> FAILED reconciliation path (zero duplicate payments.refund calls)
+    await seedPaidOrder(firestore, {
+      id: 'CFX-H2-RP-PEND-FAIL',
+      machine_id: 'CFX-MC-01',
+      product_id: 1,
+      amount: 100,
+      captured_amount_paise: 10000,
+      status: 'PAID',
+      dispense_status: 'FAILED',
+      dispensed: false,
+      dispense_outcome: 'NOT_DISPENSED',
+      failure_stage: 'PRE_DISPENSE',
+      refund_status: 'NONE',
+      total_refunded_amount_paise: 0,
+      pending_refund_amount_paise: 0,
+      razorpay_order_id: 'order_h2_rppendfail',
+      razorpay_payment_id: 'pay_h2_rppendfail',
+      created_at: freshCreatedIso,
+      updated_at: freshCreatedIso
+    });
+    gatewayBehavior = 'pending';
+    const pendFailInit = await processAutoRefundForOrder(db, 'CFX-H2-RP-PEND-FAIL', { nowMs });
+    assert.strictEqual(pendFailInit.status, 'pending');
+    assert.strictEqual(pendFailInit.order?.pending_refund_amount_paise, 10000);
+
+    gatewayBehavior = 'pending_to_failed';
+    const callsBeforePendFailRecon = gatewayRefundCalls.length;
+    const pendFailSweep = await runAutoRefundSweep({ nowMs });
+    assert.strictEqual(
+      gatewayRefundCalls.length,
+      callsBeforePendFailRecon,
+      'PENDING -> FAILED reconciliation must NOT issue another payments.refund call'
+    );
+    assert.strictEqual(pendFailSweep.reconciled_pending_failed, 1);
+    const settledPendFailOrder = await getAuthoritativeOrderById('CFX-H2-RP-PEND-FAIL', db);
+    assert.strictEqual(settledPendFailOrder?.refund_status, 'FAILED');
+    assert.strictEqual(settledPendFailOrder?.pending_refund_amount_paise, 0);
+    assert.strictEqual(settledPendFailOrder?.total_refunded_amount_paise, 0);
+
+    // Subsequent sweep also skips FAILED refund order without calling payments.refund
+    gatewayBehavior = 'processed';
+    const afterPendFailSweep = await runAutoRefundSweep({ nowMs });
+    assert.strictEqual(
+      gatewayRefundCalls.length,
+      callsBeforePendFailRecon,
+      'Subsequent sweep must NOT auto-retry an order whose refund failed at gateway'
+    );
+    assert.strictEqual(afterPendFailSweep.refunded_processed, 0);
 
     // Timeout case
     await seedPaidOrder(firestore, {

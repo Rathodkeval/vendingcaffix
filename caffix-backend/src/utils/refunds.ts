@@ -1892,6 +1892,114 @@ export async function markRefundFailed(
   return await markSqliteRefundFailed(db, params);
 }
 
+/**
+ * Persists a gateway-assigned `razorpay_refund_id` (`rfnd_...`) onto an active `PENDING`
+ * refund reservation (root `refunds`, `orders/{id}/refunds`, `refund_idempotency`, and SQLite)
+ * when Razorpay returns `status: "pending"` synchronously (e.g. UPI refunds).
+ * Never overwrites a reservation that has already settled to `PROCESSED` or `FAILED`.
+ */
+export async function recordPendingRefundGatewayId(
+  db: any,
+  params: { refundId: string; razorpay_refund_id: string }
+): Promise<RefundRecord | null> {
+  const refundId = String(params.refundId || '').trim();
+  const rpRefundId = String(params.razorpay_refund_id || '').trim();
+  if (!refundId || !rpRefundId) {
+    return refundId ? await getRefundById(db, refundId) : null;
+  }
+
+  const nowIso = new Date().toISOString();
+  const mode = getEffectiveRefundPersistenceMode();
+
+  if (mode === 'firestore') {
+    const firestore = getFirestoreInstance()!;
+    const updatedRecord = await firestore.runTransaction(async (tx) => {
+      const rootRefundRef = firestore.collection('refunds').doc(refundId);
+      const snap = await tx.get(rootRefundRef);
+      if (!snap.exists) {
+        return null;
+      }
+
+      const current = mapFirestoreRefundToRecord(snap.data(), refundId);
+      if (current.status !== 'PENDING' || current.razorpay_refund_id === rpRefundId) {
+        return current;
+      }
+
+      const nextRecord: RefundRecord = {
+        ...current,
+        razorpay_refund_id: rpRefundId,
+        updated_at: nowIso
+      };
+      const payload = mapRefundRecordToFirestore(nextRecord);
+
+      tx.set(rootRefundRef, { razorpay_refund_id: rpRefundId, updated_at: nowIso }, { merge: true });
+      const subRef = firestore
+        .collection('orders')
+        .doc(current.order_id)
+        .collection('refunds')
+        .doc(refundId);
+      tx.set(subRef, { razorpay_refund_id: rpRefundId, updated_at: nowIso }, { merge: true });
+
+      if (current.idempotency_key) {
+        const idemRef = firestore.collection('refund_idempotency').doc(current.idempotency_key);
+        tx.set(
+          idemRef,
+          {
+            refund: payload,
+            updated_at: nowIso
+          },
+          { merge: true }
+        );
+      }
+
+      return nextRecord;
+    });
+
+    if (updatedRecord) {
+      syncedRefundsStore.set(updatedRecord.id, updatedRecord);
+      if (db?.run) {
+        await db
+          .run('UPDATE refunds SET razorpay_refund_id = ?, updated_at = ? WHERE id = ?', [
+            updatedRecord.razorpay_refund_id,
+            updatedRecord.updated_at,
+            updatedRecord.id
+          ])
+          .catch(() => {});
+      }
+    }
+    return updatedRecord;
+  }
+
+  const release = await refundTransactionMutex.acquire();
+  try {
+    const existing = await getSqliteRefundById(db, refundId);
+    if (!existing) {
+      return null;
+    }
+    if (existing.status !== 'PENDING' || existing.razorpay_refund_id === rpRefundId) {
+      return existing;
+    }
+    const updated: RefundRecord = {
+      ...existing,
+      razorpay_refund_id: rpRefundId,
+      updated_at: nowIso
+    };
+    if (db?.run) {
+      await db
+        .run('UPDATE refunds SET razorpay_refund_id = ?, updated_at = ? WHERE id = ?', [
+          rpRefundId,
+          nowIso,
+          refundId
+        ])
+        .catch(() => {});
+    }
+    syncedRefundsStore.set(refundId, updated);
+    return updated;
+  } finally {
+    release();
+  }
+}
+
 export async function getRefundById(db: any, refundId: string): Promise<RefundRecord | null> {
   const normalizedId = String(refundId).trim();
   const mode = getEffectiveRefundPersistenceMode();

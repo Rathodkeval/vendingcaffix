@@ -276,6 +276,61 @@ class TestRpiOrderProcessorSafety(unittest.TestCase):
         )
         self.assertEqual(attempts, [order_id])
 
+    def test_rejects_expired_queued_and_refunded_orders_and_marks_uncertain_failure(self):
+        from datetime import datetime, timedelta, timezone
+
+        old_created = (datetime.now(timezone.utc) - timedelta(minutes=25)).isoformat()
+        fresh_created = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        past_expires = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
+
+        db = FakeFirestoreDB(
+            docs={
+                "ORD-EXP-AGE": {
+                    "id": "ORD-EXP-AGE",
+                    "machine_id": "CFX-MC-01",
+                    "status": "PAID",
+                    "dispense_status": "QUEUED",
+                    "created_at": old_created,
+                },
+                "ORD-EXP-TS": {
+                    "id": "ORD-EXP-TS",
+                    "machine_id": "CFX-MC-01",
+                    "status": "PAID",
+                    "dispense_status": "QUEUED",
+                    "created_at": fresh_created,
+                    "expires_at": past_expires,
+                },
+                "ORD-EXPIRED-STATE": {
+                    "id": "ORD-EXPIRED-STATE",
+                    "machine_id": "CFX-MC-01",
+                    "status": "PAID",
+                    "dispense_status": "EXPIRED",
+                    "created_at": fresh_created,
+                },
+            }
+        )
+        proc = MachineOrderProcessor(
+            machine_id="CFX-MC-01",
+            firestore_db=db,
+            arduino_dispense_callback=lambda o: False,
+        )
+        self.assertFalse(proc.claim_and_process_order("ORD-EXP-AGE", doc_ref=db.doc_ref("ORD-EXP-AGE")))
+        self.assertFalse(proc.claim_and_process_order("ORD-EXP-TS", doc_ref=db.doc_ref("ORD-EXP-TS")))
+        self.assertFalse(proc.claim_and_process_order("ORD-EXPIRED-STATE", doc_ref=db.doc_ref("ORD-EXPIRED-STATE")))
+
+        # Mid-dispense failure sets dispense_outcome=UNCERTAIN without stamped dispensed_at
+        db.docs["ORD-FRESH-FAIL"] = {
+            "id": "ORD-FRESH-FAIL",
+            "machine_id": "CFX-MC-01",
+            "status": "PAID",
+            "dispense_status": "QUEUED",
+            "created_at": fresh_created,
+        }
+        self.assertFalse(proc.claim_and_process_order("ORD-FRESH-FAIL", doc_ref=db.doc_ref("ORD-FRESH-FAIL")))
+        self.assertEqual(db.docs["ORD-FRESH-FAIL"]["dispense_status"], "FAILED")
+        self.assertEqual(db.docs["ORD-FRESH-FAIL"]["dispense_outcome"], "UNCERTAIN")
+        self.assertIsNone(db.docs["ORD-FRESH-FAIL"].get("dispensed_at"))
+
 
 if __name__ == "__main__":
     unittest.main()
