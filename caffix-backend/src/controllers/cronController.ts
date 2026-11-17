@@ -479,6 +479,11 @@ export const reconcileAutoRefunds = async (
     const expiryMinutes = req.query?.queuedExpiryMinutes
       ? Number(req.query.queuedExpiryMinutes)
       : undefined;
+    const rawLimit = req.query?.limit ? Number(req.query.limit) : NaN;
+    const boundedLimit =
+      Number.isFinite(rawLimit) && rawLimit > 0
+        ? Math.min(20, Math.max(1, Math.floor(rawLimit)))
+        : 20;
     const summary = await runAutoRefundSweep({
       queuedExpiryMs:
         expiryMinutes && Number.isFinite(expiryMinutes) && expiryMinutes > 0
@@ -488,7 +493,7 @@ export const reconcileAutoRefunds = async (
         typeof req.query?.machine_id === 'string' && req.query.machine_id.trim()
           ? req.query.machine_id.trim()
           : undefined,
-      limit: req.query?.limit ? Number(req.query.limit) : undefined
+      limit: boundedLimit
     });
 
     res.status(200).json({

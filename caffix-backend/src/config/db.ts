@@ -1285,6 +1285,8 @@ export async function initDB(): Promise<any> {
       pending_refund_amount_paise INTEGER DEFAULT 0,
       last_refunded_at TEXT,
       captured_amount_paise INTEGER DEFAULT NULL,
+      paid_at TEXT,
+      expires_at TEXT,
       FOREIGN KEY (product_id) REFERENCES products(id),
       FOREIGN KEY (machine_id) REFERENCES machines(id)
     )
@@ -1357,6 +1359,16 @@ export async function initDB(): Promise<any> {
     if (!tableInfo.some((col: any) => col.name === 'captured_amount_paise')) {
       await db.exec(
         "ALTER TABLE orders ADD COLUMN captured_amount_paise INTEGER DEFAULT NULL;"
+      );
+    }
+    if (!tableInfo.some((col: any) => col.name === 'paid_at')) {
+      await db.exec(
+        "ALTER TABLE orders ADD COLUMN paid_at TEXT;"
+      );
+    }
+    if (!tableInfo.some((col: any) => col.name === 'expires_at')) {
+      await db.exec(
+        "ALTER TABLE orders ADD COLUMN expires_at TEXT;"
       );
     }
   } catch (err) {

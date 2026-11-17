@@ -115,7 +115,8 @@ export function DispenseStatusBadge({ status }) {
     DISPENSING: 'bg-amber-50 text-amber-800 border-amber-300',
     DISPENSED: 'bg-teal-50 text-teal-800 border-teal-200',
     PENDING: 'bg-slate-100 text-slate-600 border-slate-200',
-    FAILED: 'bg-rose-50 text-rose-700 border-rose-200'
+    FAILED: 'bg-rose-50 text-rose-700 border-rose-200',
+    EXPIRED: 'bg-rose-50 text-rose-700 border-rose-200'
   };
 
   return (

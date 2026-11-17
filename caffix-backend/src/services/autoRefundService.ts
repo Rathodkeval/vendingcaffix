@@ -17,6 +17,7 @@ import {
   getAuthoritativeOrderById,
   getAuthoritativeOrders,
   getPaidOrdersForAutoRefundFromFirebase,
+  getPendingRefundOrdersFromFirebase,
   getFirestoreInstance,
   isFirestoreActive,
   releaseReconciliationLeaseInFirebase,
@@ -430,18 +431,22 @@ export function evaluateAutoRefundEligibility(
     }
 
     const explicitExpiresMs = order.expires_at ? Date.parse(String(order.expires_at)) : NaN;
+    const paidMs = order.paid_at ? Date.parse(String(order.paid_at)) : NaN;
     const createdMs = order.created_at ? Date.parse(String(order.created_at)) : NaN;
+    const anchorMs = !Number.isNaN(paidMs) ? paidMs : createdMs;
+    const expiresAlignedWithPaidAt =
+      !Number.isNaN(explicitExpiresMs) && (Number.isNaN(paidMs) || explicitExpiresMs >= paidMs);
 
     let isExpired = false;
-    if (!Number.isNaN(explicitExpiresMs) && queuedExpiryMs === resolveAutoRefundQueuedExpiryMs()) {
+    if (expiresAlignedWithPaidAt && queuedExpiryMs === resolveAutoRefundQueuedExpiryMs()) {
       isExpired = nowMs >= explicitExpiresMs;
-    } else if (!Number.isNaN(createdMs)) {
-      isExpired = nowMs - createdMs >= queuedExpiryMs;
+    } else if (!Number.isNaN(anchorMs)) {
+      isExpired = nowMs - anchorMs >= queuedExpiryMs;
     } else {
       return {
         eligible: false,
         skipReason: 'INVALID_TIMESTAMP',
-        details: 'Order lacks a valid created_at timestamp for safe expiry evaluation.'
+        details: 'Order lacks a valid paid_at or created_at timestamp for safe expiry evaluation.'
       };
     }
 
@@ -1009,9 +1014,9 @@ export async function runAutoRefundSweep(
   const expiryMs = resolveAutoRefundQueuedExpiryMs(options.queuedExpiryMs);
   const cutoffIso = new Date(nowMs - expiryMs).toISOString();
   const limit =
-    options.limit && Number.isFinite(options.limit) && options.limit > 0
-      ? Math.min(200, Math.floor(options.limit))
-      : 100;
+    options.limit !== undefined && Number.isFinite(Number(options.limit)) && Number(options.limit) > 0
+      ? Math.min(200, Math.max(1, Math.floor(Number(options.limit))))
+      : 20;
 
   const summary: AutoRefundSweepSummary = {
     scanned: 0,
@@ -1042,14 +1047,49 @@ export async function runAutoRefundSweep(
   }
 
   try {
+    const machineIdFilter = options.machineId ? String(options.machineId).trim() : undefined;
+    const pendingOrders = await getPendingRefundOrdersFromFirebase(db, {
+      machineId: machineIdFilter,
+      limit
+    });
     const paidOrders = await getPaidOrdersForAutoRefundFromFirebase(db, {
-      machineId: options.machineId ? String(options.machineId).trim() : undefined,
+      machineId: machineIdFilter,
       limit
     });
 
-    summary.scanned = paidOrders.length;
+    const scannedIds = new Set<string>();
+    const handledOrderIds = new Set<string>();
+
+    for (const order of pendingOrders) {
+      if (order?.id) scannedIds.add(String(order.id));
+      try {
+        const pendingRecon = await reconcilePendingRefundsForOrder(db, order);
+        summary.reconciled_pending_processed =
+          (summary.reconciled_pending_processed || 0) + pendingRecon.settledProcessed;
+        summary.reconciled_pending_failed =
+          (summary.reconciled_pending_failed || 0) + pendingRecon.settledFailed;
+        if (pendingRecon.settledProcessed > 0) {
+          summary.refunded_processed += pendingRecon.settledProcessed;
+          if (order?.id) handledOrderIds.add(String(order.id));
+        } else if (pendingRecon.settledFailed > 0) {
+          summary.refund_failed += pendingRecon.settledFailed;
+          if (order?.id) handledOrderIds.add(String(order.id));
+        } else if (pendingRecon.stillPending > 0) {
+          summary.skipped_already_refunded += 1;
+          if (order?.id) handledOrderIds.add(String(order.id));
+        }
+      } catch (err) {
+        summary.errors += 1;
+        if (order?.id) handledOrderIds.add(String(order.id));
+        logger.error(`[Auto-Refund Sweep] Error reconciling pending refund for order ${order?.id}:`, err);
+      }
+    }
 
     for (const order of paidOrders) {
+      if (order?.id) scannedIds.add(String(order.id));
+      if (order?.id && handledOrderIds.has(String(order.id))) {
+        continue;
+      }
       try {
         if (
           String(order?.refund_status || '').toUpperCase() === 'PENDING' ||
@@ -1105,6 +1145,7 @@ export async function runAutoRefundSweep(
       }
     }
 
+    summary.scanned = scannedIds.size;
     return summary;
   } finally {
     await releaseReconciliationLeaseInFirebase(lease.lockId);

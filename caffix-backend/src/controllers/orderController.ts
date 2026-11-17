@@ -427,7 +427,11 @@ export const createOrder = async (
         status: 'PENDING',
         machine_id: resolvedMachineId,
         created_at: todayStr,
+        paid_at: null,
         expires_at: computeOrderExpiresAtIso(todayStr),
+        refund_status: 'NONE',
+        total_refunded_amount_paise: 0,
+        pending_refund_amount_paise: 0,
         razorpay_order_id: rpOrderId,
         extra_sugar: 1,
         base: base || 'water'
@@ -652,6 +656,12 @@ async function performOrderStatusUpdateInternal(
     }
   }
 
+  const isPromotingToPaid = eligibleForActivePromotion && newStatus === 'PAID';
+  const paidAtIso = isPromotingToPaid
+    ? (order.paid_at ? String(order.paid_at) : new Date().toISOString())
+    : null;
+  const anchoredExpiresAtIso = paidAtIso ? computeOrderExpiresAtIso(paidAtIso) : null;
+
   // 3. Execute atomic Firestore transaction first (authoritative cross-instance guard)
   const firebaseTransition = await commitOrderTransitionInFirebase({
     order: {
@@ -664,6 +674,8 @@ async function performOrderStatusUpdateInternal(
     razorpayPaymentId: paymentMetadata?.razorpayPaymentId,
     razorpaySignature: paymentMetadata?.razorpaySignature,
     capturedAmountPaise: paymentMetadata?.capturedAmountPaise,
+    paidAtIso,
+    expiresAtIso: anchoredExpiresAtIso,
     allowPaidOrderRecovery: paymentMetadata?.allowPaidOrderRecovery,
     webhookFencing: paymentMetadata?.webhookFencing
   });
@@ -729,7 +741,12 @@ async function performOrderStatusUpdateInternal(
         id
       ]);
     }
-    await db.run('UPDATE orders SET status = ? WHERE id = ?', [newStatus, id]);
+    const syncedPaidAt = firebaseTransition.authoritativeOrder?.paid_at || paidAtIso || null;
+    const syncedExpiresAt = firebaseTransition.authoritativeOrder?.expires_at || anchoredExpiresAtIso || null;
+    await db.run(
+      'UPDATE orders SET status = ?, paid_at = COALESCE(?, paid_at), expires_at = COALESCE(?, expires_at) WHERE id = ?',
+      [newStatus, syncedPaidAt, syncedExpiresAt, id]
+    );
     const syncedDispenseStatus = firebaseTransition.authoritativeOrder?.dispense_status
       ? String(firebaseTransition.authoritativeOrder.dispense_status).toUpperCase()
       : null;
@@ -751,14 +768,16 @@ async function performOrderStatusUpdateInternal(
       ? Number(paymentMetadata.capturedAmountPaise)
       : null;
     const claimSql = paymentMetadata?.allowPaidOrderRecovery
-      ? `UPDATE orders SET status = ?, razorpay_payment_id = COALESCE(razorpay_payment_id, ?), razorpay_signature = COALESCE(razorpay_signature, ?), captured_amount_paise = COALESCE(?, captured_amount_paise) WHERE id = ? AND status IN ('PENDING', 'CANCELLED', 'FAILED')`
-      : `UPDATE orders SET status = ?, razorpay_payment_id = COALESCE(razorpay_payment_id, ?), razorpay_signature = COALESCE(razorpay_signature, ?), captured_amount_paise = COALESCE(?, captured_amount_paise) WHERE id = ? AND status = 'PENDING'`;
+      ? `UPDATE orders SET status = ?, razorpay_payment_id = COALESCE(razorpay_payment_id, ?), razorpay_signature = COALESCE(razorpay_signature, ?), captured_amount_paise = COALESCE(?, captured_amount_paise), paid_at = COALESCE(paid_at, ?), expires_at = COALESCE(?, expires_at) WHERE id = ? AND status IN ('PENDING', 'CANCELLED', 'FAILED')`
+      : `UPDATE orders SET status = ?, razorpay_payment_id = COALESCE(razorpay_payment_id, ?), razorpay_signature = COALESCE(razorpay_signature, ?), captured_amount_paise = COALESCE(?, captured_amount_paise), paid_at = COALESCE(paid_at, ?), expires_at = COALESCE(?, expires_at) WHERE id = ? AND status = 'PENDING'`;
 
     const claimResult = await db.run(claimSql, [
       newStatus,
       paymentMetadata?.razorpayPaymentId || null,
       paymentMetadata?.razorpaySignature || null,
       claimCapPaise,
+      paidAtIso,
+      anchoredExpiresAtIso,
       id
     ]);
 
@@ -836,7 +855,10 @@ async function performOrderStatusUpdateInternal(
         throw new ConflictError(`Cannot transition order ${id} from ${currentStatus} to ${newStatus}`);
       }
     } else {
-      await db.run('UPDATE orders SET status = ? WHERE id = ?', [newStatus, id]);
+      await db.run(
+        'UPDATE orders SET status = ?, paid_at = COALESCE(paid_at, ?), expires_at = COALESCE(?, expires_at) WHERE id = ?',
+        [newStatus, paidAtIso, anchoredExpiresAtIso, id]
+      );
       const localDispenseStatus =
         newStatus === 'PAID'
           ? 'QUEUED'

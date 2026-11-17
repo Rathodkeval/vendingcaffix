@@ -500,6 +500,8 @@ export interface AtomicOrderTransitionInput {
   razorpayPaymentId?: string | null;
   razorpaySignature?: string | null;
   capturedAmountPaise?: number | null;
+  paidAtIso?: string | null;
+  expiresAtIso?: string | null;
   allowPaidOrderRecovery?: boolean;
   webhookFencing?: { provider: string; eventId: string; claimCount: number } | null;
 }
@@ -699,8 +701,21 @@ export async function commitOrderTransitionInFirebase(
       const payloadToWrite: any = {
         ...sanitizedOrder,
         status: targetStatus,
+        refund_status: existingData.refund_status || sanitizedOrder.refund_status || 'NONE',
         updated_at: nowIso
       };
+
+      if (didTransitionFromPendingToActive && targetStatus === 'PAID') {
+        const resolvedPaidAt = existingData.paid_at || input.paidAtIso || nowIso;
+        payloadToWrite.paid_at = resolvedPaidAt;
+        if (!alreadyClaimedOrDispensed) {
+          payloadToWrite.expires_at =
+            input.expiresAtIso ||
+            existingData.expires_at ||
+            sanitizedOrder.expires_at ||
+            null;
+        }
+      }
 
       if (existingData.razorpay_payment_id) {
         payloadToWrite.razorpay_payment_id = existingData.razorpay_payment_id;
@@ -2354,6 +2369,7 @@ export function enrichAuthoritativeOrderRecord(o: any): any {
     dispensed_at: o.dispensed_at || synced?.dispensed_at || null,
     dispense_started_at: o.dispense_started_at || synced?.dispense_started_at || null,
     claimed_at: o.claimed_at || synced?.claimed_at || null,
+    paid_at: o.paid_at || synced?.paid_at || null,
     expires_at: o.expires_at || synced?.expires_at || null,
     expired_at: o.expired_at || synced?.expired_at || null,
     dispense_outcome: o.dispense_outcome || synced?.dispense_outcome || null,
@@ -2671,6 +2687,28 @@ export async function getPendingOrdersFromFirebase(db: any): Promise<any[]> {
  * Queries ONLY orders with `status == 'PAID'` (and optional `machine_id == machineId`),
  * avoiding full-collection scans of historical CANCELLED/FAILED/PENDING/COMPLETED orders.
  */
+function isPaidOrderActionableForAutoRefund(order: any): boolean {
+  if (!order || order.is_malformed) return false;
+  const status = String(order.status || '').toUpperCase();
+  const refundStatus = String(order.refund_status || 'NONE').toUpperCase();
+  const dispenseStatus = String(order.dispense_status || 'QUEUED').toUpperCase();
+  const dispenseOutcome = String(order.dispense_outcome || '').toUpperCase();
+  const pendingPaise = Number(order.pending_refund_amount_paise ?? 0);
+
+  if (status !== 'PAID') return false;
+  if (pendingPaise > 0) return true;
+  if (refundStatus === 'FULL' || refundStatus === 'PARTIAL') return false;
+  if (order.dispensed === true || dispenseStatus === 'DISPENSED') return false;
+  if (dispenseOutcome === 'UNCERTAIN' || dispenseStatus === 'DISPENSING') return false;
+  if (dispenseStatus === 'QUEUED' && (order.claimed_at || order.dispense_started_at)) return false;
+
+  return (
+    dispenseStatus === 'QUEUED' ||
+    dispenseStatus === 'FAILED' ||
+    dispenseStatus === 'EXPIRED'
+  );
+}
+
 export async function getPaidOrdersForAutoRefundFromFirebase(
   db: any,
   options?: { machineId?: string; limit?: number }
@@ -2681,39 +2719,156 @@ export async function getPaidOrdersForAutoRefundFromFirebase(
   const maxLimit =
     options?.limit !== undefined && Number.isFinite(Number(options.limit)) && Number(options.limit) > 0
       ? Math.min(200, Math.max(1, Math.floor(Number(options.limit))))
-      : 100;
+      : 20;
 
   if (firestore) {
-    const paidById = new Map<string, any>();
+    const actionableById = new Map<string, any>();
+    const skippedById = new Map<string, any>();
+    const pageSize = Math.min(100, Math.max(25, maxLimit * 3));
+    const maxScanDocs = Math.max(1000, maxLimit * 25);
+
     try {
-      let query: any = firestore.collection('orders').where('status', '==', 'PAID');
+      let baseQuery: any = firestore
+        .collection('orders')
+        .where('status', '==', 'PAID')
+        .where('refund_status', 'in', ['NONE', 'PARTIAL', 'FAILED'])
+        .orderBy('created_at', 'asc');
+      if (targetMachineId) {
+        baseQuery = firestore
+          .collection('orders')
+          .where('machine_id', '==', targetMachineId)
+          .where('status', '==', 'PAID')
+          .where('refund_status', 'in', ['NONE', 'PARTIAL', 'FAILED'])
+          .orderBy('created_at', 'asc');
+      }
+
+      let lastDoc: any = null;
+      let scannedDocs = 0;
+
+      while (actionableById.size < maxLimit && scannedDocs < maxScanDocs) {
+        let pageQuery = baseQuery;
+        if (lastDoc && typeof pageQuery.startAfter === 'function') {
+          pageQuery = pageQuery.startAfter(lastDoc);
+        }
+        if (typeof pageQuery.limit === 'function') {
+          pageQuery = pageQuery.limit(pageSize);
+        }
+
+        const snap = await pageQuery.get();
+        const docs = Array.isArray(snap?.docs) ? snap.docs : [];
+        if (docs.length === 0) break;
+
+        for (const doc of docs) {
+          scannedDocs += 1;
+          const data = typeof doc.data === 'function' ? doc.data() : doc.data;
+          if (!data) continue;
+          const id = String(data.id || doc.id);
+          const rawOrder = { ...data, id };
+          syncedOrdersStore.set(id, rawOrder);
+          const enriched = enrichAuthoritativeOrderRecord(rawOrder);
+          if (enriched.is_malformed) continue;
+
+          if (isPaidOrderActionableForAutoRefund(enriched)) {
+            if (!actionableById.has(id)) {
+              actionableById.set(id, enriched);
+            }
+          } else if (skippedById.size < maxLimit && !skippedById.has(id)) {
+            skippedById.set(id, enriched);
+          }
+
+          if (actionableById.size >= maxLimit) break;
+        }
+
+        if (docs.length < pageSize || typeof baseQuery.startAfter !== 'function') {
+          break;
+        }
+        lastDoc = docs[docs.length - 1];
+      }
+    } catch (error) {
+      handleFirestoreFailure('Failed to query PAID orders for auto-refund sweep from Firestore', error);
+    }
+
+    const actionable = Array.from(actionableById.values()).sort((a, b) =>
+      String(a.created_at || '').localeCompare(String(b.created_at || ''))
+    );
+    const remainingSlots = Math.max(0, maxLimit - actionable.length);
+    const skippedSample = remainingSlots > 0
+      ? Array.from(skippedById.values())
+          .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')))
+          .slice(0, remainingSlots)
+      : [];
+    const selected = [...actionable.slice(0, maxLimit), ...skippedSample];
+
+    const hydrated: any[] = [];
+    for (const remoteOrder of selected) {
+      const row = await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db, {
+        reconcileRefunds: false
+      });
+      hydrated.push(enrichAuthoritativeOrderRecord({ ...(row || {}), ...remoteOrder }));
+    }
+    return hydrated;
+  }
+
+  const machineScope = targetMachineId ? [targetMachineId] : undefined;
+  const fallbackOrders = await getAuthoritativeOrders(db, machineScope);
+  const eligiblePaid = fallbackOrders
+    .filter((o) => {
+      const status = String(o?.status || '').toUpperCase();
+      const refundStatus = String(o?.refund_status || 'NONE').toUpperCase();
+      return status === 'PAID' && refundStatus !== 'FULL' && refundStatus !== 'PENDING';
+    })
+    .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
+  const actionable = eligiblePaid.filter((o) => isPaidOrderActionableForAutoRefund(o));
+  const nonActionable = eligiblePaid.filter((o) => !isPaidOrderActionableForAutoRefund(o));
+  return [...actionable.slice(0, maxLimit), ...nonActionable.slice(0, Math.max(0, maxLimit - actionable.length))];
+}
+
+export async function getPendingRefundOrdersFromFirebase(
+  db: any,
+  options?: { machineId?: string; limit?: number }
+): Promise<any[]> {
+  ensureFirebaseReady();
+
+  const targetMachineId = options?.machineId ? String(options.machineId).trim() : '';
+  const maxLimit =
+    options?.limit !== undefined && Number.isFinite(Number(options.limit)) && Number(options.limit) > 0
+      ? Math.min(200, Math.max(1, Math.floor(Number(options.limit))))
+      : 20;
+
+  if (firestore) {
+    const pendingById = new Map<string, any>();
+    try {
+      let query: any = firestore
+        .collection('orders')
+        .where('pending_refund_amount_paise', '>', 0)
+        .orderBy('pending_refund_amount_paise', 'asc');
       if (targetMachineId) {
         query = firestore
           .collection('orders')
           .where('machine_id', '==', targetMachineId)
-          .where('status', '==', 'PAID');
+          .where('pending_refund_amount_paise', '>', 0)
+          .orderBy('pending_refund_amount_paise', 'asc');
       }
       if (typeof query.limit === 'function') {
-        query = query.limit(Math.min(500, maxLimit * 2));
+        query = query.limit(maxLimit);
       }
 
       const snap = await query.get();
       snap.forEach((doc: any) => {
-        const data = doc.data();
+        const data = typeof doc.data === 'function' ? doc.data() : doc.data;
         if (!data) return;
         const id = String(data.id || doc.id);
         const rawOrder = { ...data, id };
         syncedOrdersStore.set(id, rawOrder);
         const enriched = enrichAuthoritativeOrderRecord(rawOrder);
         if (enriched.is_malformed) return;
-        paidById.set(id, enriched);
+        pendingById.set(id, enriched);
       });
     } catch (error) {
-      handleFirestoreFailure('Failed to query PAID orders for auto-refund sweep from Firestore', error);
+      handleFirestoreFailure('Failed to query orders with pending refunds from Firestore', error);
     }
 
-    const candidates = Array.from(paidById.values());
-    candidates.sort((a, b) =>
+    const candidates = Array.from(pendingById.values()).sort((a, b) =>
       String(a.created_at || '').localeCompare(String(b.created_at || ''))
     );
 
@@ -2730,7 +2885,11 @@ export async function getPaidOrdersForAutoRefundFromFirebase(
   const machineScope = targetMachineId ? [targetMachineId] : undefined;
   const fallbackOrders = await getAuthoritativeOrders(db, machineScope);
   return fallbackOrders
-    .filter((o) => String(o?.status || '').toUpperCase() === 'PAID')
+    .filter((o) => {
+      const pendingPaise = Number(o?.pending_refund_amount_paise ?? 0);
+      const refundStatus = String(o?.refund_status || '').toUpperCase();
+      return pendingPaise > 0 || refundStatus === 'PENDING';
+    })
     .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')))
     .slice(0, maxLimit);
 }

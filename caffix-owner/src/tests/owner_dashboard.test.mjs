@@ -829,6 +829,17 @@ async function runStage5Tests() {
     assert.strictEqual(ownerOverviewCalc.totalOrders, 1);
     console.log('   PASS: Owner Overview financial consistency & malformed record exclusion verified.');
 
+    // 14. Verify Phase H.4: EXPIRED dispensing status support in OrdersPage & StatusBadges
+    console.log('14. Verifying Phase H.4 EXPIRED dispensing status filter, badge, and reconciliation consistency...');
+    const statusBadgesPath = new URL('../components/StatusBadges.jsx', import.meta.url);
+    const statusBadgesSrc = fsOwnerModule.readFileSync(statusBadgesPath, 'utf8');
+    assert.ok(ownerOrdersPageSrc.includes("dispenseStatus === 'EXPIRED'"), 'OrdersPage evaluateOrderReconciliation must treat EXPIRED consistently with FAILED');
+    assert.ok(ownerOrdersPageSrc.includes("reason: isExpired ? 'DISPENSE_EXPIRED_UNREFUNDED' : 'DISPENSE_FAILED_UNREFUNDED'"), 'OrdersPage must flag unrefunded EXPIRED orders with DISPENSE_EXPIRED_UNREFUNDED discrepancy');
+    assert.ok(ownerOrdersPageSrc.includes('<option value="EXPIRED">Dispense: EXPIRED</option>'), 'OrdersPage must include Dispense: EXPIRED filter option');
+    assert.ok(ownerOrdersPageSrc.includes("selectedOrder.dispense_status === 'EXPIRED'"), 'OrdersPage detail drawer must describe EXPIRED dispensing status');
+    assert.ok(/DispenseStatusBadge[\s\S]*EXPIRED:\s*'bg-rose-50/.test(statusBadgesSrc), 'StatusBadges DispenseStatusBadge must define EXPIRED badge style');
+    console.log('   PASS: Owner Dashboard EXPIRED reconciliation, filter, and badge verified.');
+
     // Cleanup test state
     for (const machineId of ['CFX-MC-01', 'CFX-MC-02', 'CFX-MC-03', 'CFX-MC-04']) {
       await backendRequest(`/machines/${machineId}/owner`, {

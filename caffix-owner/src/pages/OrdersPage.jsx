@@ -129,14 +129,17 @@ export function evaluateOrderReconciliation(o) {
     };
   }
 
-  const isFailed = dispenseStatus === 'FAILED' || orderStatus === 'FAILED';
+  const isExpired = dispenseStatus === 'EXPIRED';
+  const isFailed = dispenseStatus === 'FAILED' || isExpired || orderStatus === 'FAILED';
   const isPaid = (capturedPaise !== null && capturedPaise > 0) || Boolean(o.razorpay_payment_id);
   if (isFailed && isPaid && totalRefunded === 0 && pendingRefund === 0) {
     return {
       result: 'DISCREPANCY',
-      reason: 'DISPENSE_FAILED_UNREFUNDED',
+      reason: isExpired ? 'DISPENSE_EXPIRED_UNREFUNDED' : 'DISPENSE_FAILED_UNREFUNDED',
       action: 'INITIATE_REFUND',
-      details: 'Dispense failed after payment was captured, but no refund has been initiated.'
+      details: isExpired
+        ? 'Order expired before dispensing after payment was captured, and no refund has been initiated.'
+        : 'Dispense failed after payment was captured, but no refund has been initiated.'
     };
   }
 
@@ -410,6 +413,7 @@ export default function OrdersPage({
               <option value="DISPENSING">Dispense: DISPENSING</option>
               <option value="DISPENSED">Dispense: DISPENSED</option>
               <option value="FAILED">Dispense: FAILED</option>
+              <option value="EXPIRED">Dispense: EXPIRED</option>
             </select>
           </div>
 
@@ -708,6 +712,8 @@ export default function OrdersPage({
                     ? 'Queued on hardware'
                     : selectedOrder.dispense_status === 'FAILED'
                     ? 'Hardware error'
+                    : selectedOrder.dispense_status === 'EXPIRED'
+                    ? 'Expired before dispense'
                     : 'Awaiting payment'}
                 </div>
               </div>
