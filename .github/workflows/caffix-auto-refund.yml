@@ -1,3 +1,4 @@
+# Scheduled auto-refund sweep registered for 5-minute production execution
 name: CAFFIX Auto-Refund Cron
 
 on:
