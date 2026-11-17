@@ -562,13 +562,7 @@ export const handleRazorpayWebhook = async (
               targetRefund = await getRefundById(db, receiptRefundId);
             }
             if (!targetRefund && rpRefundId) {
-              if (db && db.get) {
-                const row = await db.get('SELECT * FROM refunds WHERE razorpay_refund_id = ?', [rpRefundId]);
-                if (row) {
-                  targetRefund = mapFirestoreRefundToRecord(row, row.id);
-                }
-              }
-              if (!targetRefund && isFirestoreActive()) {
+              if (isFirestoreActive()) {
                 const firestore = getFirestoreInstance()!;
                 const snap = await firestore
                   .collection('refunds')
@@ -578,17 +572,49 @@ export const handleRazorpayWebhook = async (
                 if (!snap.empty) {
                   targetRefund = mapFirestoreRefundToRecord(snap.docs[0].data(), snap.docs[0].id);
                 }
+              } else if (db && db.get) {
+                const row = await db.get('SELECT * FROM refunds WHERE razorpay_refund_id = ?', [rpRefundId]);
+                if (row) {
+                  targetRefund = mapFirestoreRefundToRecord(row, row.id);
+                }
               }
             }
             if (!targetRefund && rpPaymentId) {
-              if (db && db.all) {
+              let pendingMatches: any[] = [];
+              if (isFirestoreActive()) {
+                const firestore = getFirestoreInstance()!;
+                const snap = await firestore
+                  .collection('refunds')
+                  .where('razorpay_payment_id', '==', rpPaymentId)
+                  .get();
+                if (!snap.empty) {
+                  pendingMatches = snap.docs
+                    .map((doc: any) => mapFirestoreRefundToRecord(doc.data(), doc.id))
+                    .filter(
+                      (record: any) =>
+                        String(record.status || '').toUpperCase() === 'PENDING' &&
+                        (!rpRefundId || !record.razorpay_refund_id || record.razorpay_refund_id === rpRefundId)
+                    );
+                }
+              } else if (db && db.all) {
                 const rows = await db.all(
                   'SELECT * FROM refunds WHERE razorpay_payment_id = ? AND status = ?',
                   [rpPaymentId, 'PENDING']
                 );
-                if (rows.length === 1) {
-                  targetRefund = mapFirestoreRefundToRecord(rows[0], rows[0].id);
-                }
+                pendingMatches = rows
+                  .map((row: any) => mapFirestoreRefundToRecord(row, row.id))
+                  .filter(
+                    (record: any) =>
+                      !rpRefundId || !record.razorpay_refund_id || record.razorpay_refund_id === rpRefundId
+                  );
+              }
+
+              if (pendingMatches.length === 1) {
+                targetRefund = pendingMatches[0];
+              } else if (pendingMatches.length > 1) {
+                logger.warn(
+                  `Ambiguous refund.failed event for payment ${rpPaymentId}: found ${pendingMatches.length} PENDING refund records without unique receipt/razorpay_refund_id match. Preserving all reservations.`
+                );
               }
             }
 

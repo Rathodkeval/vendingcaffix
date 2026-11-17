@@ -469,12 +469,31 @@ class MockDatabase {
 
     if (query.includes('from refunds')) {
       let filtered = mockStore.refunds;
-      if (query.includes('where order_id = ?')) {
-        filtered = filtered.filter(r => r.order_id === params[0]);
-      } else if (query.includes('where machine_id = ?')) {
-        filtered = filtered.filter(r => r.machine_id === params[0]);
-      } else if (query.includes('where status = ?')) {
-        filtered = filtered.filter(r => String(r.status).toUpperCase() === String(params[0]).toUpperCase());
+      const whereMatch = query.match(/where\s+(.+?)(?:\s+order\s+by|\s+limit|\s*$)/);
+      if (whereMatch) {
+        const clauses = whereMatch[1].split(/\s+and\s+/);
+        let paramIdx = 0;
+        for (const clause of clauses) {
+          const trimmed = clause.trim();
+          if (trimmed.includes('order_id = ?')) {
+            const val = params[paramIdx++];
+            filtered = filtered.filter(r => r.order_id === val);
+          } else if (trimmed.includes('machine_id = ?')) {
+            const val = params[paramIdx++];
+            filtered = filtered.filter(r => r.machine_id === val);
+          } else if (trimmed.includes('razorpay_payment_id = ?')) {
+            const val = params[paramIdx++];
+            filtered = filtered.filter(r => r.razorpay_payment_id === val);
+          } else if (trimmed.includes('razorpay_refund_id = ?')) {
+            const val = params[paramIdx++];
+            filtered = filtered.filter(r => r.razorpay_refund_id === val);
+          } else if (trimmed.includes('status = ?')) {
+            const val = params[paramIdx++];
+            filtered = filtered.filter(r => String(r.status).toUpperCase() === String(val).toUpperCase());
+          } else if (trimmed.includes('?')) {
+            paramIdx++;
+          }
+        }
       }
       return filtered.slice().sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
     }
