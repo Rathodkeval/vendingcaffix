@@ -160,6 +160,200 @@ export function resetMockDatabaseForColdStartSimulation(): void {
   }
 }
 
+const ORDER_NUMERIC_ZERO_COLS = new Set([
+  'pending_refund_amount_paise',
+  'total_refunded_amount_paise',
+  'amount',
+  'product_id',
+  'extra_sugar',
+  'refund_version'
+]);
+
+const ORDER_NULLABLE_NUMERIC_COLS = new Set(['captured_amount_paise']);
+
+const ORDER_UPPERCASE_COLS = new Set([
+  'status',
+  'dispense_status',
+  'refund_status',
+  'failure_stage'
+]);
+
+function splitTopLevelSqlList(clause: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let depth = 0;
+  let inSingleQuote = false;
+
+  for (let i = 0; i < clause.length; i += 1) {
+    const ch = clause[i];
+    if (ch === "'" && clause[i - 1] !== '\\') {
+      inSingleQuote = !inSingleQuote;
+      current += ch;
+      continue;
+    }
+    if (!inSingleQuote) {
+      if (ch === '(') depth += 1;
+      else if (ch === ')' && depth > 0) depth -= 1;
+      else if (ch === ',' && depth === 0) {
+        if (current.trim()) parts.push(current.trim());
+        current = '';
+        continue;
+      }
+    }
+    current += ch;
+  }
+
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+function normalizeOrderFieldValue(col: string, rawVal: any): any {
+  if (ORDER_NUMERIC_ZERO_COLS.has(col)) {
+    return rawVal === null || rawVal === undefined ? 0 : Number(rawVal);
+  }
+  if (ORDER_NULLABLE_NUMERIC_COLS.has(col)) {
+    return rawVal === null || rawVal === undefined ? null : Number(rawVal);
+  }
+  if (ORDER_UPPERCASE_COLS.has(col)) {
+    return rawVal === null || rawVal === undefined ? null : String(rawVal).toUpperCase();
+  }
+  return rawVal === undefined ? null : rawVal;
+}
+
+function applyMockOrdersUpdate(sql: string, params: any[], orders: any[]): { changes: number } {
+  const normalizedSql = sql.replace(/\s+/g, ' ').trim();
+  const match = normalizedSql.match(/^update\s+orders\s+set\s+(.+?)\s+where\s+(.+?);?\s*$/i);
+  if (!match) {
+    return { changes: 0 };
+  }
+
+  const [, setClause, whereClause] = match;
+  const assignments = splitTopLevelSqlList(setClause);
+  let paramIdx = 0;
+
+  const stagedMutations: Array<(order: any) => void> = [];
+
+  for (const assignment of assignments) {
+    const eqIdx = assignment.indexOf('=');
+    if (eqIdx <= 0) {
+      return { changes: 0 };
+    }
+    const col = assignment.slice(0, eqIdx).trim().toLowerCase().replace(/^["'`]|["'`]$/g, '');
+    const rhs = assignment.slice(eqIdx + 1).trim();
+
+    if (rhs === '?') {
+      const val = params[paramIdx++];
+      stagedMutations.push((order) => {
+        order[col] = normalizeOrderFieldValue(col, val);
+      });
+    } else if (/^coalesce\s*\(/i.test(rhs)) {
+      const innerMatch = rhs.match(/^coalesce\s*\((.+)\)$/i);
+      if (!innerMatch) return { changes: 0 };
+      const coalesceArgs = splitTopLevelSqlList(innerMatch[1]).map((a) => a.trim());
+      if (coalesceArgs.length !== 2) return { changes: 0 };
+
+      const [arg1, arg2] = coalesceArgs;
+      if (arg1 === '?' && arg2.toLowerCase().replace(/^["'`]|["'`]$/g, '') === col) {
+        const val = params[paramIdx++];
+        stagedMutations.push((order) => {
+          if (val !== null && val !== undefined) {
+            order[col] = normalizeOrderFieldValue(col, val);
+          }
+        });
+      } else if (arg1.toLowerCase().replace(/^["'`]|["'`]$/g, '') === col && arg2 === '?') {
+        const val = params[paramIdx++];
+        stagedMutations.push((order) => {
+          if (order[col] === null || order[col] === undefined) {
+            order[col] = normalizeOrderFieldValue(col, val);
+          }
+        });
+      } else {
+        return { changes: 0 };
+      }
+    } else if (/^'(.*)'$/.test(rhs)) {
+      const literalVal = rhs.slice(1, -1);
+      stagedMutations.push((order) => {
+        order[col] = ORDER_UPPERCASE_COLS.has(col) ? literalVal.toUpperCase() : literalVal;
+      });
+    } else if (/^null$/i.test(rhs)) {
+      stagedMutations.push((order) => {
+        order[col] = null;
+      });
+    } else if (/^-?\d+(\.\d+)?$/.test(rhs)) {
+      const numVal = Number(rhs);
+      stagedMutations.push((order) => {
+        order[col] = numVal;
+      });
+    } else {
+      return { changes: 0 };
+    }
+  }
+
+  const whereLower = whereClause.toLowerCase().trim();
+  const idMatch = whereLower.match(/^(?:orders\.)?id\s*=\s*\?(.*)$/i);
+  if (!idMatch) {
+    return { changes: 0 };
+  }
+
+  if (paramIdx >= params.length) {
+    return { changes: 0 };
+  }
+  const orderId = params[paramIdx++];
+  if (orderId === undefined || orderId === null || String(orderId).trim() === '') {
+    return { changes: 0 };
+  }
+
+  const order = orders.find((o) => o.id === orderId);
+  if (!order) {
+    return { changes: 0 };
+  }
+
+  const extraWhere = idMatch[1].trim();
+  if (extraWhere) {
+    const orderStatus = String(order.status || '').toUpperCase();
+    const dispenseStatus = String(order.dispense_status || '').toUpperCase();
+    const refundStatus = order.refund_status ? String(order.refund_status).toUpperCase() : null;
+    const pendingRefund = Number(order.pending_refund_amount_paise || 0);
+
+    if (extraWhere.includes("status in ('pending', 'cancelled', 'failed')")) {
+      if (!['PENDING', 'CANCELLED', 'FAILED'].includes(orderStatus)) return { changes: 0 };
+    } else if (extraWhere.includes("status = 'pending'")) {
+      if (orderStatus !== 'PENDING') return { changes: 0 };
+    } else if (extraWhere.includes("status = 'paid'")) {
+      if (orderStatus !== 'PAID') return { changes: 0 };
+    }
+
+    if (extraWhere.includes("dispense_status = 'queued'") && dispenseStatus !== 'QUEUED') {
+      return { changes: 0 };
+    }
+    if (
+      extraWhere.includes('dispense_started_at is null') &&
+      order.dispense_started_at !== null &&
+      order.dispense_started_at !== undefined
+    ) {
+      return { changes: 0 };
+    }
+    if (
+      extraWhere.includes('dispensed_at is null') &&
+      order.dispensed_at !== null &&
+      order.dispensed_at !== undefined
+    ) {
+      return { changes: 0 };
+    }
+    if (extraWhere.includes("refund_status != 'full'") && refundStatus === 'FULL') {
+      return { changes: 0 };
+    }
+    if (extraWhere.includes('pending_refund_amount_paise = 0') && pendingRefund !== 0) {
+      return { changes: 0 };
+    }
+  }
+
+  for (const mutate of stagedMutations) {
+    mutate(order);
+  }
+  return { changes: 1 };
+}
+
 class MockDatabase {
   async exec(sql: string) {
     return;
@@ -513,139 +707,7 @@ class MockDatabase {
     }
     
     if (query.includes('update orders set')) {
-      const isPendingOnly = query.includes("where id = ? and status = 'pending'");
-      const isUnpaidOrigin = query.includes("where id = ? and status in ('pending', 'cancelled', 'failed')");
-      if (query.includes("status = ?") && (isPendingOnly || isUnpaidOrigin)) {
-        const eligibleStatuses = isUnpaidOrigin ? ['PENDING', 'CANCELLED', 'FAILED'] : ['PENDING'];
-        const orderId = params[params.length - 1];
-        const status = params[0];
-        const order = mockStore.orders.find(o => o.id === orderId);
-        if (!order || !eligibleStatuses.includes(String(order.status || '').toUpperCase())) {
-          return { changes: 0 };
-        }
-        order.status = String(status).toUpperCase();
-
-        if (query.includes('razorpay_payment_id')) {
-          const paymentId = params[1];
-          const signature = params[2];
-          if (paymentId !== undefined && paymentId !== null && !order.razorpay_payment_id) {
-            order.razorpay_payment_id = paymentId;
-          }
-          if (signature !== undefined && signature !== null && !order.razorpay_signature) {
-            order.razorpay_signature = signature;
-          }
-        }
-        if (query.includes('captured_amount_paise')) {
-          // If query has captured_amount_paise, cap is param at index 3 in 5-param update
-          const capIdx = query.includes('razorpay_payment_id') ? 3 : 1;
-          const capPaise = params[capIdx];
-          if (capPaise !== undefined && capPaise !== null && (order.captured_amount_paise === null || order.captured_amount_paise === undefined)) {
-            order.captured_amount_paise = Number(capPaise);
-          }
-        }
-        return { changes: 1 };
-      }
-
-      if (query.includes('pending_refund_amount_paise = ?') && query.includes('total_refunded_amount_paise = ?')) {
-        const [pendingPaise, totalRefundedPaise, lastRefundedAt, refundStatus, updatedAt, orderId] = params;
-        const order = mockStore.orders.find(o => o.id === orderId);
-        if (order) {
-          order.pending_refund_amount_paise = Number(pendingPaise);
-          order.total_refunded_amount_paise = Number(totalRefundedPaise);
-          order.last_refunded_at = lastRefundedAt;
-          order.refund_status = refundStatus;
-          order.updated_at = updatedAt;
-          return { changes: 1 };
-        }
-        return { changes: 0 };
-      } else if (query.includes('pending_refund_amount_paise = ?') && query.includes('refund_status = ?')) {
-        const [pendingPaise, refundStatus, updatedAt, orderId] = params;
-        const order = mockStore.orders.find(o => o.id === orderId);
-        if (order) {
-          order.pending_refund_amount_paise = Number(pendingPaise);
-          order.refund_status = refundStatus;
-          order.updated_at = updatedAt;
-          return { changes: 1 };
-        }
-        return { changes: 0 };
-      } else if (query.includes('captured_amount_paise =') || query.includes('captured_amount_paise = coalesce')) {
-        const orderId = params[params.length - 1];
-        const order = mockStore.orders.find(o => o.id === orderId);
-        if (order) {
-          // Find capAmount in params
-          for (const p of params.slice(0, params.length - 1)) {
-            if (typeof p === 'number' && Number.isInteger(p) && p > 0) {
-              if (order.captured_amount_paise === null || order.captured_amount_paise === undefined) {
-                order.captured_amount_paise = p;
-              }
-            } else if (typeof p === 'string' && (p.startsWith('pay_') || p.startsWith('pay_mock_'))) {
-              if (!order.razorpay_payment_id) order.razorpay_payment_id = p;
-            }
-          }
-          return { changes: 1 };
-        }
-        return { changes: 0 };
-      } else if (query.includes('razorpay_payment_id = ?')) {
-        let paymentId: any;
-        let signature: any = null;
-        let orderId: any;
-        if (query.includes('razorpay_signature = ?')) {
-          [paymentId, signature, orderId] = params;
-        } else {
-          [paymentId, orderId] = params;
-        }
-        const order = mockStore.orders.find(o => o.id === orderId);
-        if (order) {
-          order.razorpay_payment_id = paymentId;
-          if (signature !== undefined) {
-            order.razorpay_signature = signature;
-          }
-        }
-        return { changes: order ? 1 : 0 };
-      } else if (query.includes('razorpay_order_id = ?')) {
-        const [rpOrderId, orderId] = params;
-        const order = mockStore.orders.find(o => o.id === orderId);
-        if (order) {
-          order.razorpay_order_id = rpOrderId;
-        }
-        return { changes: order ? 1 : 0 };
-      } else if (query.includes('customer_name = ?') && query.includes('customer_email = ?')) {
-        const [customerName, customerEmail, orderId] = params;
-        const order = mockStore.orders.find(o => o.id === orderId);
-        if (order) {
-          order.customer_name = customerName ?? null;
-          order.customer_email = customerEmail ?? null;
-        }
-        return { changes: order ? 1 : 0 };
-      } else if (
-        query.includes('updated_at = ?') &&
-        query.includes('dispensed_at = ?') &&
-        query.includes('dispense_started_at = ?')
-      ) {
-        const [updatedAt, dispensedAt, dispenseStartedAt, orderId] = params;
-        const order = mockStore.orders.find(o => o.id === orderId);
-        if (order) {
-          order.updated_at = updatedAt ?? null;
-          order.dispensed_at = dispensedAt ?? null;
-          order.dispense_started_at = dispenseStartedAt ?? null;
-        }
-        return { changes: order ? 1 : 0 };
-      } else if (query.includes('dispense_status = ?')) {
-        const [dispenseStatus, orderId] = params;
-        const order = mockStore.orders.find(o => o.id === orderId);
-        if (order) {
-          order.dispense_status = String(dispenseStatus).toUpperCase();
-        }
-        return { changes: order ? 1 : 0 };
-      } else if (!query.includes('dispense_status') && query.includes('status = ?')) {
-        const [status, orderId] = params;
-        const order = mockStore.orders.find(o => o.id === orderId);
-        if (order) {
-          order.status = status.toUpperCase();
-        }
-        return { changes: order ? 1 : 0 };
-      }
-      return { changes: 0 };
+      return applyMockOrdersUpdate(sql, params, mockStore.orders);
     }
 
     if (query.includes('delete from orders')) {
