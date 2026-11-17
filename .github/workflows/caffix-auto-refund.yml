@@ -1,0 +1,55 @@
+name: CAFFIX Auto-Refund Cron
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: caffix-auto-refund-production
+  cancel-in-progress: false
+
+jobs:
+  auto-refund:
+    name: Trigger Production Auto-Refund Sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Execute Production Auto-Refund Sweep (GET /api/cron/auto-refund?limit=20)
+        shell: bash
+        env:
+          CAFFIX_CRON_SECRET: ${{ secrets.CAFFIX_CRON_SECRET }}
+          TARGET_URL: https://vendingcaffix.vercel.app/api/cron/auto-refund?limit=20
+        run: |
+          set -euo pipefail
+          if [ -z "${CAFFIX_CRON_SECRET:-}" ]; then
+            echo "::error::CAFFIX_CRON_SECRET is not configured in GitHub Actions repository secrets."
+            exit 1
+          fi
+
+          RESPONSE_FILE="$(mktemp)"
+          trap 'rm -f "${RESPONSE_FILE}"' EXIT
+
+          HTTP_STATUS="$(
+            printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/json"\n' "${CAFFIX_CRON_SECRET}" | \
+            curl --silent --show-error \
+              --connect-timeout 15 \
+              --max-time 65 \
+              --request GET \
+              --config - \
+              --output "${RESPONSE_FILE}" \
+              --write-out "%{http_code}" \
+              "${TARGET_URL}"
+          )"
+
+          echo "HTTP Status: ${HTTP_STATUS}"
+          cat "${RESPONSE_FILE}"
+          echo ""
+
+          if [ "${HTTP_STATUS}" -ne 200 ]; then
+            echo "::error::Auto-refund cron request failed with HTTP ${HTTP_STATUS}."
+            exit 1
+          fi
