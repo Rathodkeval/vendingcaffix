@@ -91,11 +91,47 @@ export interface AutoRefundSweepOptions {
   nowMs?: number;
   machineId?: string;
   limit?: number;
+  dryRun?: boolean;
+}
+
+export interface AutoRefundDryRunOrderReport {
+  order_id: string;
+  machine_id: string | null;
+  status: string;
+  dispense_status: string;
+  refund_status: string;
+  eligible: boolean;
+  eligibility_reason: AutoRefundTriggerReason | null;
+  skip_reason: AutoRefundSkipReason | null;
+  refund_amount_paise: number;
+  captured_amount_paise: number | null;
+  total_refunded_amount_paise: number;
+  pending_refund_amount_paise: number;
+  paid_at: string | null;
+  expires_at: string | null;
+  would_expire_to_expired: boolean;
+  details: string;
+}
+
+export interface AutoRefundDryRunPendingCandidateReport {
+  order_id: string;
+  machine_id: string | null;
+  status: string;
+  dispense_status: string;
+  refund_status: string;
+  pending_refund_amount_paise: number;
+  total_refunded_amount_paise: number;
+  captured_amount_paise: number | null;
+  razorpay_payment_id: string | null;
+  reason: 'PENDING_REFUND_RECONCILIATION';
 }
 
 export interface AutoRefundSweepSummary {
+  dry_run?: boolean;
+  limit?: number;
   scanned: number;
   eligible: number;
+  skipped?: number;
   expired_queued: number;
   refunded_processed: number;
   refund_pending: number;
@@ -103,6 +139,7 @@ export interface AutoRefundSweepSummary {
   replayed: number;
   reconciled_pending_processed?: number;
   reconciled_pending_failed?: number;
+  pending_reconciliation_count?: number;
   skipped_dispensing: number;
   skipped_uncertain: number;
   skipped_dispensed: number;
@@ -114,6 +151,21 @@ export interface AutoRefundSweepSummary {
   skipped_due_to_active_run?: boolean;
   expiry_ms: number;
   cutoff_iso: string;
+  orders?: AutoRefundDryRunOrderReport[];
+  pending_reconciliation_candidates?: AutoRefundDryRunPendingCandidateReport[];
+}
+
+function recordAutoRefundSkipReason(
+  summary: AutoRefundSweepSummary,
+  skipReason?: AutoRefundSkipReason
+): void {
+  if (skipReason === 'UNCERTAIN_DISPENSE_IN_PROGRESS') summary.skipped_dispensing += 1;
+  else if (skipReason === 'UNCERTAIN_DISPENSE_OUTCOME') summary.skipped_uncertain += 1;
+  else if (skipReason === 'ALREADY_DISPENSED') summary.skipped_dispensed += 1;
+  else if (skipReason === 'UNVERIFIED_PAYMENT') summary.skipped_unverified += 1;
+  else if (skipReason === 'ALREADY_REFUNDED_OR_PENDING') summary.skipped_already_refunded += 1;
+  else if (skipReason === 'NOT_EXPIRED_YET') summary.skipped_not_expired += 1;
+  else summary.skipped_other += 1;
 }
 
 export function buildAutoRefundIdempotencyKey(orderId: string): string {
@@ -1040,6 +1092,112 @@ export async function runAutoRefundSweep(
     cutoff_iso: cutoffIso
   };
 
+  const dryRun = options.dryRun === true;
+  const machineIdFilter = options.machineId ? String(options.machineId).trim() : undefined;
+
+  if (dryRun) {
+    // Strictly read-only dry-run: zero lease locks, zero Firestore writes, zero Razorpay calls
+    const pendingOrders = await getPendingRefundOrdersFromFirebase(db, {
+      machineId: machineIdFilter,
+      limit,
+      hydrateLocal: false
+    });
+    const paidOrders = await getPaidOrdersForAutoRefundFromFirebase(db, {
+      machineId: machineIdFilter,
+      limit,
+      hydrateLocal: false
+    });
+
+    const scannedIds = new Set<string>();
+    const pendingByOrderId = new Map<string, AutoRefundDryRunPendingCandidateReport>();
+
+    const toPendingCandidateReport = (order: any): AutoRefundDryRunPendingCandidateReport => ({
+      order_id: String(order.id),
+      machine_id: order.machine_id ? String(order.machine_id) : null,
+      status: String(order.status || 'UNKNOWN').toUpperCase(),
+      dispense_status: String(order.dispense_status || 'PENDING').toUpperCase(),
+      refund_status: String(order.refund_status || 'NONE').toUpperCase(),
+      pending_refund_amount_paise: Number(order.pending_refund_amount_paise || 0),
+      total_refunded_amount_paise: Number(order.total_refunded_amount_paise || 0),
+      captured_amount_paise:
+        order.captured_amount_paise !== undefined && order.captured_amount_paise !== null
+          ? Number(order.captured_amount_paise)
+          : null,
+      razorpay_payment_id: order.razorpay_payment_id ? String(order.razorpay_payment_id) : null,
+      reason: 'PENDING_REFUND_RECONCILIATION'
+    });
+
+    for (const order of pendingOrders) {
+      if (!order?.id) continue;
+      const orderId = String(order.id);
+      scannedIds.add(orderId);
+      if (!pendingByOrderId.has(orderId)) {
+        pendingByOrderId.set(orderId, toPendingCandidateReport(order));
+      }
+    }
+
+    const dryRunOrders: AutoRefundDryRunOrderReport[] = [];
+    for (const order of paidOrders) {
+      if (!order?.id) continue;
+      const orderId = String(order.id);
+      scannedIds.add(orderId);
+
+      const isPendingOrder =
+        String(order?.refund_status || '').toUpperCase() === 'PENDING' ||
+        Number(order?.pending_refund_amount_paise || 0) > 0;
+      if (isPendingOrder && !pendingByOrderId.has(orderId) && pendingByOrderId.size < limit) {
+        pendingByOrderId.set(orderId, toPendingCandidateReport(order));
+      }
+
+      const evaluation = evaluateAutoRefundEligibility(order, nowMs, expiryMs);
+      const balance = calculateRemainingRefundableBalance(order);
+      const willRefundPaise =
+        evaluation.eligible && balance.isExactCaptureKnown ? balance.remainingRefundablePaise : 0;
+      const wouldExpire = Boolean(evaluation.eligible && evaluation.needsExpiryTransition);
+
+      if (evaluation.eligible) {
+        summary.eligible += 1;
+        if (wouldExpire) {
+          summary.expired_queued += 1;
+        }
+      } else {
+        recordAutoRefundSkipReason(summary, evaluation.skipReason);
+      }
+
+      dryRunOrders.push({
+        order_id: orderId,
+        machine_id: order.machine_id ? String(order.machine_id) : null,
+        status: String(order.status || 'UNKNOWN').toUpperCase(),
+        dispense_status: String(order.dispense_status || 'PENDING').toUpperCase(),
+        refund_status: String(order.refund_status || 'NONE').toUpperCase(),
+        eligible: evaluation.eligible,
+        eligibility_reason: evaluation.eligible ? (evaluation.triggerReason || null) : null,
+        skip_reason: evaluation.eligible ? null : (evaluation.skipReason || null),
+        refund_amount_paise: willRefundPaise,
+        captured_amount_paise:
+          order.captured_amount_paise !== undefined && order.captured_amount_paise !== null
+            ? Number(order.captured_amount_paise)
+            : null,
+        total_refunded_amount_paise: Number(order.total_refunded_amount_paise || 0),
+        pending_refund_amount_paise: Number(order.pending_refund_amount_paise || 0),
+        paid_at: order.paid_at ? String(order.paid_at) : null,
+        expires_at: order.expires_at ? String(order.expires_at) : null,
+        would_expire_to_expired: wouldExpire,
+        details: evaluation.details
+      });
+    }
+
+    const pendingCandidates = Array.from(pendingByOrderId.values());
+    summary.dry_run = true;
+    summary.limit = limit;
+    summary.scanned = scannedIds.size;
+    summary.skipped = dryRunOrders.filter((entry) => !entry.eligible).length;
+    summary.pending_reconciliation_count = pendingCandidates.length;
+    summary.orders = dryRunOrders;
+    summary.pending_reconciliation_candidates = pendingCandidates;
+    return summary;
+  }
+
   const lease = await acquireReconciliationLeaseInFirebase();
   if (!lease.acquired) {
     summary.skipped_due_to_active_run = true;
@@ -1047,7 +1205,6 @@ export async function runAutoRefundSweep(
   }
 
   try {
-    const machineIdFilter = options.machineId ? String(options.machineId).trim() : undefined;
     const pendingOrders = await getPendingRefundOrdersFromFirebase(db, {
       machineId: machineIdFilter,
       limit
@@ -1124,13 +1281,7 @@ export async function runAutoRefundSweep(
         }
 
         if (res.status === 'skipped') {
-          if (res.skipReason === 'UNCERTAIN_DISPENSE_IN_PROGRESS') summary.skipped_dispensing += 1;
-          else if (res.skipReason === 'UNCERTAIN_DISPENSE_OUTCOME') summary.skipped_uncertain += 1;
-          else if (res.skipReason === 'ALREADY_DISPENSED') summary.skipped_dispensed += 1;
-          else if (res.skipReason === 'UNVERIFIED_PAYMENT') summary.skipped_unverified += 1;
-          else if (res.skipReason === 'ALREADY_REFUNDED_OR_PENDING') summary.skipped_already_refunded += 1;
-          else if (res.skipReason === 'NOT_EXPIRED_YET') summary.skipped_not_expired += 1;
-          else summary.skipped_other += 1;
+          recordAutoRefundSkipReason(summary, res.skipReason);
           continue;
         }
 

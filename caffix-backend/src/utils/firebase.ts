@@ -2711,10 +2711,11 @@ function isPaidOrderActionableForAutoRefund(order: any): boolean {
 
 export async function getPaidOrdersForAutoRefundFromFirebase(
   db: any,
-  options?: { machineId?: string; limit?: number }
+  options?: { machineId?: string; limit?: number; hydrateLocal?: boolean }
 ): Promise<any[]> {
   ensureFirebaseReady();
 
+  const shouldHydrateLocal = options?.hydrateLocal !== false;
   const targetMachineId = options?.machineId ? String(options.machineId).trim() : '';
   const maxLimit =
     options?.limit !== undefined && Number.isFinite(Number(options.limit)) && Number(options.limit) > 0
@@ -2764,7 +2765,9 @@ export async function getPaidOrdersForAutoRefundFromFirebase(
           if (!data) continue;
           const id = String(data.id || doc.id);
           const rawOrder = { ...data, id };
-          syncedOrdersStore.set(id, rawOrder);
+          if (shouldHydrateLocal) {
+            syncedOrdersStore.set(id, rawOrder);
+          }
           const enriched = enrichAuthoritativeOrderRecord(rawOrder);
           if (enriched.is_malformed) continue;
 
@@ -2799,6 +2802,10 @@ export async function getPaidOrdersForAutoRefundFromFirebase(
       : [];
     const selected = [...actionable.slice(0, maxLimit), ...skippedSample];
 
+    if (!shouldHydrateLocal) {
+      return selected;
+    }
+
     const hydrated: any[] = [];
     for (const remoteOrder of selected) {
       const row = await hydrateLocalOrderFromAuthoritativeRecord(remoteOrder, db, {
@@ -2825,10 +2832,11 @@ export async function getPaidOrdersForAutoRefundFromFirebase(
 
 export async function getPendingRefundOrdersFromFirebase(
   db: any,
-  options?: { machineId?: string; limit?: number }
+  options?: { machineId?: string; limit?: number; hydrateLocal?: boolean }
 ): Promise<any[]> {
   ensureFirebaseReady();
 
+  const shouldHydrateLocal = options?.hydrateLocal !== false;
   const targetMachineId = options?.machineId ? String(options.machineId).trim() : '';
   const maxLimit =
     options?.limit !== undefined && Number.isFinite(Number(options.limit)) && Number(options.limit) > 0
@@ -2859,7 +2867,9 @@ export async function getPendingRefundOrdersFromFirebase(
         if (!data) return;
         const id = String(data.id || doc.id);
         const rawOrder = { ...data, id };
-        syncedOrdersStore.set(id, rawOrder);
+        if (shouldHydrateLocal) {
+          syncedOrdersStore.set(id, rawOrder);
+        }
         const enriched = enrichAuthoritativeOrderRecord(rawOrder);
         if (enriched.is_malformed) return;
         pendingById.set(id, enriched);
@@ -2871,6 +2881,10 @@ export async function getPendingRefundOrdersFromFirebase(
     const candidates = Array.from(pendingById.values()).sort((a, b) =>
       String(a.created_at || '').localeCompare(String(b.created_at || ''))
     );
+
+    if (!shouldHydrateLocal) {
+      return candidates.slice(0, maxLimit);
+    }
 
     const hydrated: any[] = [];
     for (const remoteOrder of candidates.slice(0, maxLimit)) {

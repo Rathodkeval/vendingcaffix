@@ -484,6 +484,12 @@ export const reconcileAutoRefunds = async (
       Number.isFinite(rawLimit) && rawLimit > 0
         ? Math.min(20, Math.max(1, Math.floor(rawLimit)))
         : 20;
+    const rawDryRun =
+      req.query?.dry_run ??
+      (req.body && typeof req.body === 'object' ? (req.body as any).dry_run : undefined);
+    const dryRun =
+      rawDryRun === true ||
+      String(rawDryRun ?? '').trim().toLowerCase() === 'true';
     const summary = await runAutoRefundSweep({
       queuedExpiryMs:
         expiryMinutes && Number.isFinite(expiryMinutes) && expiryMinutes > 0
@@ -493,7 +499,8 @@ export const reconcileAutoRefunds = async (
         typeof req.query?.machine_id === 'string' && req.query.machine_id.trim()
           ? req.query.machine_id.trim()
           : undefined,
-      limit: boundedLimit
+      limit: boundedLimit,
+      dryRun
     });
 
     res.status(200).json({
