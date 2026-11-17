@@ -1,6 +1,12 @@
 {
   "version": 2,
   "outputDirectory": "caffix-app/dist",
+  "crons": [
+    {
+      "path": "/api/cron/auto-refund?limit=20",
+      "schedule": "*/5 * * * *"
+    }
+  ],
   "functions": {
     "api/index.ts": {
       "maxDuration": 60
