@@ -145,12 +145,12 @@ export function evaluateOrderReconciliation(o) {
 
   if (orderStatus === 'PAID' && dispenseStatus === 'QUEUED') {
     const ageMs = Date.now() - (o.created_at ? new Date(o.created_at).getTime() : Date.now());
-    if (ageMs > 15 * 60 * 1000) {
+    if (ageMs > 5 * 60 * 1000) {
       return {
         result: 'DISCREPANCY',
         reason: 'DISPENSING_STUCK_QUEUED',
         action: 'CHECK_MACHINE_CONNECTIVITY',
-        details: 'Order has been queued for more than 15 minutes.'
+        details: 'Order has been queued for more than 5 minutes.'
       };
     }
   }

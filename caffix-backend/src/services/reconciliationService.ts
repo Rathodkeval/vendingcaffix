@@ -80,7 +80,7 @@ export interface ReconciliationReport {
 
 export interface ReconcileOrderOptions {
   now?: Date;
-  queuedTimeoutMs?: number;       // default: 15 minutes (900000 ms)
+  queuedTimeoutMs?: number;       // default: 5 minutes (300000 ms)
   dispensingTimeoutMs?: number;   // default: 10 minutes (600000 ms)
   pendingRefundTimeoutMs?: number;// default: 30 minutes (1800000 ms)
   gatewayEvidence?: GatewayPaymentEvidence;
@@ -99,7 +99,7 @@ export function reconcileOrderRecord(
   }
 ): OrderReconciliationItem {
   const now = context.options?.now || new Date();
-  const queuedTimeout = context.options?.queuedTimeoutMs ?? 15 * 60 * 1000;
+  const queuedTimeout = context.options?.queuedTimeoutMs ?? 5 * 60 * 1000;
   const dispensingTimeout = context.options?.dispensingTimeoutMs ?? 10 * 60 * 1000;
   const pendingRefundTimeout = context.options?.pendingRefundTimeoutMs ?? 30 * 60 * 1000;
   const gateway = context.options?.gatewayEvidence;

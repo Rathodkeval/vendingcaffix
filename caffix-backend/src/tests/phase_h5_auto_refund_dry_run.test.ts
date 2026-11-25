@@ -189,9 +189,9 @@ async function runTests(): Promise<void> {
     });
 
     const oldPaidIso = new Date(Date.now() - 30 * 60_000).toISOString();
-    const oldExpIso = new Date(Date.now() - 15 * 60_000).toISOString();
+    const oldExpIso = new Date(Date.now() - 5 * 60_000).toISOString();
     const freshPaidIso = new Date(Date.now() - 2 * 60_000).toISOString();
-    const freshExpIso = new Date(Date.now() + 13 * 60_000).toISOString();
+    const freshExpIso = new Date(Date.now() + 3 * 60_000).toISOString();
 
     await seedOrdersBatch(firestore, [
       {
@@ -484,7 +484,7 @@ async function runTests(): Promise<void> {
         razorpay_payment_id: `pay_dry_lim_${i}`,
         created_at: ts,
         paid_at: ts,
-        expires_at: new Date(Date.parse(ts) + 15 * 60_000).toISOString(),
+        expires_at: new Date(Date.parse(ts) + 5 * 60_000).toISOString(),
         updated_at: ts
       });
     }

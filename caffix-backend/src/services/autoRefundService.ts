@@ -40,7 +40,7 @@ import {
 } from '../utils/refunds';
 import logger from '../utils/logger';
 
-export const DEFAULT_AUTO_REFUND_QUEUED_EXPIRY_MINUTES = 15;
+export const DEFAULT_AUTO_REFUND_QUEUED_EXPIRY_MINUTES = 5;
 export const MIN_AUTO_REFUND_QUEUED_EXPIRY_MINUTES = 1;
 export const MAX_AUTO_REFUND_QUEUED_EXPIRY_MINUTES = 1440; // 24 hours
 

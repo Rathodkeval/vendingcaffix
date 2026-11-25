@@ -249,8 +249,9 @@ async function runTests() {
     console.log('1. Testing offline machine order guard & configurable expiry policy...');
     delete process.env.AUTO_REFUND_QUEUED_EXPIRY_MINUTES;
     assert.strictEqual(resolveAutoRefundQueuedExpiryMs(), DEFAULT_AUTO_REFUND_QUEUED_EXPIRY_MINUTES * 60_000);
-    process.env.AUTO_REFUND_QUEUED_EXPIRY_MINUTES = '5';
-    assert.strictEqual(resolveAutoRefundQueuedExpiryMs(), 5 * 60_000);
+    assert.strictEqual(resolveAutoRefundQueuedExpiryMs(), 300_000);
+    process.env.AUTO_REFUND_QUEUED_EXPIRY_MINUTES = '10';
+    assert.strictEqual(resolveAutoRefundQueuedExpiryMs(), 10 * 60_000);
     delete process.env.AUTO_REFUND_QUEUED_EXPIRY_MINUTES;
 
     process.env.BLOCK_OFFLINE_MACHINE_ORDERS = 'true';

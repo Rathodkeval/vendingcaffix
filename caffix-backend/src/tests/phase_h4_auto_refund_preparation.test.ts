@@ -217,7 +217,7 @@ async function runTests(): Promise<void> {
         razorpay_payment_id: `pay_full_${i}`,
         created_at: ts,
         paid_at: ts,
-        expires_at: new Date(Date.parse(ts) + 15 * 60_000).toISOString(),
+        expires_at: new Date(Date.parse(ts) + 5 * 60_000).toISOString(),
         updated_at: ts
       });
     }
@@ -243,7 +243,7 @@ async function runTests(): Promise<void> {
         razorpay_payment_id: `pay_disp_${i}`,
         created_at: ts,
         paid_at: ts,
-        expires_at: new Date(Date.parse(ts) + 15 * 60_000).toISOString(),
+        expires_at: new Date(Date.parse(ts) + 5 * 60_000).toISOString(),
         updated_at: ts
       });
     }
@@ -272,7 +272,7 @@ async function runTests(): Promise<void> {
         razorpay_payment_id: `pay_elig_${i}`,
         created_at: ts,
         paid_at: ts,
-        expires_at: new Date(Date.parse(ts) + 15 * 60_000).toISOString(),
+        expires_at: new Date(Date.parse(ts) + 5 * 60_000).toISOString(),
         updated_at: ts
       });
     }
@@ -472,7 +472,7 @@ async function runTests(): Promise<void> {
     const anchoredExpiresMs = Date.parse(String(slowPaidSnap?.expires_at));
     assert.ok(
       Math.abs((anchoredExpiresMs - paidMs) - DEFAULT_AUTO_REFUND_QUEUED_EXPIRY_MINUTES * 60_000) < 2000,
-      'expires_at must be re-anchored to paid_at + 15 minutes'
+      'expires_at must be re-anchored to paid_at + 5 minutes'
     );
 
     setRazorpayRefundClientForTesting({
@@ -573,7 +573,7 @@ async function runTests(): Promise<void> {
       razorpay_payment_id: leasePaymentId,
       created_at: oldPaidIso,
       paid_at: oldPaidIso,
-      expires_at: new Date(Date.parse(oldPaidIso) + 15 * 60_000).toISOString(),
+      expires_at: new Date(Date.parse(oldPaidIso) + 5 * 60_000).toISOString(),
       updated_at: oldPaidIso
     });
 
@@ -630,7 +630,7 @@ async function runTests(): Promise<void> {
       razorpay_payment_id: timeoutPaymentId,
       created_at: oldPaidIso,
       paid_at: oldPaidIso,
-      expires_at: new Date(Date.parse(oldPaidIso) + 15 * 60_000).toISOString(),
+      expires_at: new Date(Date.parse(oldPaidIso) + 5 * 60_000).toISOString(),
       updated_at: oldPaidIso
     });
 
