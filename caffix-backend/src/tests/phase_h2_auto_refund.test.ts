@@ -369,12 +369,18 @@ async function runTests() {
     assert.strictEqual(duringFailRes.body.data.order.refund_status, 'NONE');
     assert.strictEqual(gatewayRefundCalls.length, 1);
 
-    // Manual Super Admin refund STILL works after human investigation (partial or full)
+    // Manual Super Admin refund STILL works after physical inspection (partial or full)
     const manualRes = await api(
       'POST',
       '/orders/CFX-H2-UNCERTAIN/refund',
       adminToken,
-      { amount_paise: 5000, reason: 'manual_customer_support_partial' }
+      {
+        amount_paise: 5000,
+        reason: 'manual_customer_support_partial',
+        physical_inspection_confirmed: true,
+        inspection_result: 'PARTIAL_DISPENSE',
+        inspection_notes: 'Verified partial dispense during serial disconnect'
+      }
     );
     assert.strictEqual(manualRes.status, 200);
     assert.strictEqual(manualRes.body.data.order.refund_status, 'PARTIAL');

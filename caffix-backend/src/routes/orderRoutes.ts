@@ -49,7 +49,13 @@ const refundOrderSchema = z.object({
       amount_inr: z.number().positive('amount_inr must be positive').optional(),
       reason: z.string().min(3, 'Reason must be at least 3 characters').optional(),
       notes: z.string().optional().nullable(),
-      idempotency_key: z.string().optional()
+      idempotency_key: z.string().optional(),
+      physical_inspection_confirmed: z.boolean().optional(),
+      inspection_result: z
+        .enum(['NOT_DISPENSED', 'PARTIAL_DISPENSE', 'HARDWARE_FAULT_CONFIRMED'])
+        .optional(),
+      dispensed_quantity_confirmed: z.enum(['NONE', 'PARTIAL', 'FULL']).optional(),
+      inspection_notes: z.string().trim().max(500).optional().nullable()
     })
     .optional()
     .default({})

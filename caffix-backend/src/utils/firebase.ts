@@ -2371,7 +2371,16 @@ export function enrichAuthoritativeOrderRecord(o: any): any {
     claimed_at: o.claimed_at || synced?.claimed_at || null,
     paid_at: o.paid_at || synced?.paid_at || null,
     expires_at: o.expires_at || synced?.expires_at || null,
+    dispense_expires_at: o.dispense_expires_at || synced?.dispense_expires_at || null,
     expired_at: o.expired_at || synced?.expired_at || null,
+    ...(o.command_transmitted !== undefined
+      ? { command_transmitted: o.command_transmitted }
+      : synced?.command_transmitted !== undefined
+        ? { command_transmitted: synced.command_transmitted }
+        : {}),
+    command_transmitted_at: o.command_transmitted_at || synced?.command_transmitted_at || null,
+    late_dispense_reported_at: o.late_dispense_reported_at || synced?.late_dispense_reported_at || null,
+    late_dispense_signal: o.late_dispense_signal || synced?.late_dispense_signal || null,
     dispense_outcome: o.dispense_outcome || synced?.dispense_outcome || null,
     failure_stage: o.failure_stage || synced?.failure_stage || null,
     failure_reason: o.failure_reason || synced?.failure_reason || null,
@@ -2699,7 +2708,10 @@ function isPaidOrderActionableForAutoRefund(order: any): boolean {
   if (pendingPaise > 0) return true;
   if (refundStatus === 'FULL' || refundStatus === 'PARTIAL' || refundStatus === 'FAILED') return false;
   if (order.dispensed === true || dispenseStatus === 'DISPENSED') return false;
-  if (dispenseOutcome === 'UNCERTAIN' || dispenseStatus === 'DISPENSING') return false;
+  if (dispenseOutcome === 'UNCERTAIN' || dispenseStatus === 'CLAIMING') return false;
+  if (dispenseStatus === 'DISPENSING') {
+    return Boolean(order.dispense_started_at || order.dispense_expires_at);
+  }
   if (dispenseStatus === 'QUEUED' && (order.claimed_at || order.dispense_started_at)) return false;
 
   return (

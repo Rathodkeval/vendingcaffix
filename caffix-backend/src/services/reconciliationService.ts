@@ -81,7 +81,7 @@ export interface ReconciliationReport {
 export interface ReconcileOrderOptions {
   now?: Date;
   queuedTimeoutMs?: number;       // default: 5 minutes (300000 ms)
-  dispensingTimeoutMs?: number;   // default: 10 minutes (600000 ms)
+  dispensingTimeoutMs?: number;   // default: 5 minutes (300000 ms)
   pendingRefundTimeoutMs?: number;// default: 30 minutes (1800000 ms)
   gatewayEvidence?: GatewayPaymentEvidence;
 }
@@ -100,7 +100,7 @@ export function reconcileOrderRecord(
 ): OrderReconciliationItem {
   const now = context.options?.now || new Date();
   const queuedTimeout = context.options?.queuedTimeoutMs ?? 5 * 60 * 1000;
-  const dispensingTimeout = context.options?.dispensingTimeoutMs ?? 10 * 60 * 1000;
+  const dispensingTimeout = context.options?.dispensingTimeoutMs ?? 5 * 60 * 1000;
   const pendingRefundTimeout = context.options?.pendingRefundTimeoutMs ?? 30 * 60 * 1000;
   const gateway = context.options?.gatewayEvidence;
 
@@ -261,6 +261,33 @@ export function reconcileOrderRecord(
     dispenseStatus === 'FAILED' || dispenseStatus === 'EXPIRED' || orderStatus === 'FAILED';
   const hasCapturedPayment = (capturedPaise !== null && capturedPaise > 0) || Boolean(order.razorpay_payment_id);
   if (isDispenseFailed && hasCapturedPayment && totalRefundedPaise === 0 && pendingRefundPaise === 0) {
+    const dispenseOutcome = String(order.dispense_outcome || '').toUpperCase();
+    const failureStage = String(order.failure_stage || '').toUpperCase();
+    const isUncertainOutcome = dispenseOutcome === 'UNCERTAIN' || failureStage === 'DURING_DISPENSE';
+
+    if (isUncertainOutcome) {
+      const lateDoneNote = order.late_dispense_reported_at
+        ? ` Late Arduino DONE was reported at ${order.late_dispense_reported_at} after expiry.`
+        : '';
+      return {
+        order_id: orderId,
+        machine_id: machineId,
+        payment_status: orderStatus,
+        dispense_status: dispenseStatus,
+        order_amount_inr: orderAmountInr,
+        captured_amount_paise: capturedPaise,
+        total_refunded_paise: totalRefundedPaise,
+        pending_refund_paise: pendingRefundPaise,
+        inventory_movement_status: inventoryStatus,
+        reconciliation_result: 'DISCREPANCY',
+        discrepancy_reason: 'UNCERTAIN_DISPENSE_OUTCOME',
+        recommended_action: 'INVESTIGATE_HARDWARE_DISPENSE',
+        details: `Order ${dispenseStatus} with uncertain physical dispensing outcome.${lateDoneNote} Physical inspection is required before Super Admin manual refund.`,
+        created_at: order.created_at,
+        updated_at: order.updated_at
+      };
+    }
+
     const hasFailedRefundAttempt =
       String(order.refund_status || '').toUpperCase() === 'FAILED' ||
       refunds.some((r) => String(r?.status || '').toUpperCase() === 'FAILED');

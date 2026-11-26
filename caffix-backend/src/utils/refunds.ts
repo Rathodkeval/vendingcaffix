@@ -6,6 +6,8 @@ import logger from './logger';
 export type RefundStatus = 'PENDING' | 'PROCESSED' | 'FAILED';
 export type OrderRefundStatus = 'NONE' | 'PENDING' | 'PARTIAL' | 'FULL' | 'FAILED';
 export type RefundSource = 'SUPER_ADMIN_PORTAL' | 'RAZORPAY_DASHBOARD' | 'RECONCILIATION';
+export type InspectionResult = 'NOT_DISPENSED' | 'PARTIAL_DISPENSE' | 'HARDWARE_FAULT_CONFIRMED';
+export type DispensedQuantityConfirmed = 'NONE' | 'PARTIAL' | 'FULL';
 
 export interface RefundRecord {
   id: string;
@@ -26,6 +28,13 @@ export interface RefundRecord {
   created_at: string;
   updated_at: string;
   processed_at: string | null;
+  physical_inspection_confirmed?: boolean | null;
+  inspection_result?: InspectionResult | null;
+  dispensed_quantity_confirmed?: DispensedQuantityConfirmed | null;
+  inspected_by_admin_id?: string | null;
+  inspected_by_admin_email?: string | null;
+  inspected_at?: string | null;
+  inspection_notes?: string | null;
 }
 
 export interface RefundableBalanceSummary {
@@ -55,6 +64,13 @@ export interface CreateRefundReservationParams {
   idempotency_key: string;
   customRefundId?: string;
   razorpay_refund_id?: string | null;
+  physical_inspection_confirmed?: boolean | null;
+  inspection_result?: InspectionResult | null;
+  dispensed_quantity_confirmed?: DispensedQuantityConfirmed | null;
+  inspected_by_admin_id?: string | null;
+  inspected_by_admin_email?: string | null;
+  inspected_at?: string | null;
+  inspection_notes?: string | null;
 }
 
 export interface MarkRefundProcessedParams {
@@ -210,7 +226,18 @@ export function mapRefundRecordToFirestore(refund: RefundRecord): any {
     error_description: refund.error_description || null,
     created_at: refund.created_at,
     updated_at: refund.updated_at,
-    processed_at: refund.processed_at || null
+    processed_at: refund.processed_at || null,
+    ...(refund.physical_inspection_confirmed !== undefined && refund.physical_inspection_confirmed !== null
+      ? {
+          physical_inspection_confirmed: Boolean(refund.physical_inspection_confirmed),
+          inspection_result: refund.inspection_result || null,
+          dispensed_quantity_confirmed: refund.dispensed_quantity_confirmed || null,
+          inspected_by_admin_id: refund.inspected_by_admin_id || null,
+          inspected_by_admin_email: refund.inspected_by_admin_email || null,
+          inspected_at: refund.inspected_at || null,
+          inspection_notes: refund.inspection_notes || null
+        }
+      : {})
   };
 }
 
@@ -230,14 +257,25 @@ export function mapFirestoreRefundToRecord(data: any, fallbackId?: string): Refu
     status: (String(data?.status || 'PENDING').toUpperCase() as RefundStatus),
     reason: String(data?.reason || 'unspecified').trim(),
     notes: data?.notes ? String(data.notes).trim() : null,
-    initiated_by: String(data?.initiated_by || 'system').trim(),
+    initiated_by: String(data?.initiated_by || 'admin').trim(),
     source: (String(data?.source || 'SUPER_ADMIN_PORTAL').toUpperCase() as RefundSource),
     idempotency_key: String(data?.idempotency_key || '').trim(),
     error_code: data?.error_code ? String(data.error_code).trim() : null,
     error_description: data?.error_description ? String(data.error_description).trim() : null,
     created_at: String(data?.created_at || new Date().toISOString()),
     updated_at: String(data?.updated_at || new Date().toISOString()),
-    processed_at: data?.processed_at ? String(data.processed_at) : null
+    processed_at: data?.processed_at ? String(data.processed_at) : null,
+    ...(data?.physical_inspection_confirmed !== undefined && data?.physical_inspection_confirmed !== null
+      ? {
+          physical_inspection_confirmed: Boolean(data.physical_inspection_confirmed),
+          inspection_result: data?.inspection_result || null,
+          dispensed_quantity_confirmed: data?.dispensed_quantity_confirmed || null,
+          inspected_by_admin_id: data?.inspected_by_admin_id || null,
+          inspected_by_admin_email: data?.inspected_by_admin_email || null,
+          inspected_at: data?.inspected_at || null,
+          inspection_notes: data?.inspection_notes || null
+        }
+      : {})
   };
 }
 
@@ -1049,7 +1087,18 @@ async function createFirestoreRefundReservation(
       error_description: null,
       created_at: nowIso,
       updated_at: nowIso,
-      processed_at: null
+      processed_at: null,
+      ...(params.physical_inspection_confirmed !== undefined && params.physical_inspection_confirmed !== null
+        ? {
+            physical_inspection_confirmed: Boolean(params.physical_inspection_confirmed),
+            inspection_result: params.inspection_result || null,
+            dispensed_quantity_confirmed: params.dispensed_quantity_confirmed || null,
+            inspected_by_admin_id: params.inspected_by_admin_id || null,
+            inspected_by_admin_email: params.inspected_by_admin_email || null,
+            inspected_at: params.inspected_at || null,
+            inspection_notes: params.inspection_notes || null
+          }
+        : {})
     };
 
     const currentPending = Number(orderData.pending_refund_amount_paise || 0);
@@ -1440,7 +1489,18 @@ async function createSqliteRefundReservation(
       error_description: null,
       created_at: nowIso,
       updated_at: nowIso,
-      processed_at: null
+      processed_at: null,
+      ...(params.physical_inspection_confirmed !== undefined && params.physical_inspection_confirmed !== null
+        ? {
+            physical_inspection_confirmed: Boolean(params.physical_inspection_confirmed),
+            inspection_result: params.inspection_result || null,
+            dispensed_quantity_confirmed: params.dispensed_quantity_confirmed || null,
+            inspected_by_admin_id: params.inspected_by_admin_id || null,
+            inspected_by_admin_email: params.inspected_by_admin_email || null,
+            inspected_at: params.inspected_at || null,
+            inspection_notes: params.inspection_notes || null
+          }
+        : {})
     };
 
     const nextPendingPaise = Number(order.pending_refund_amount_paise || 0) + requestedPaise;

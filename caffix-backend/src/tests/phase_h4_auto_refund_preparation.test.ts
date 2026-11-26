@@ -45,6 +45,7 @@ const {
   DEFAULT_CRON_LEASE_TTL_MS,
   ORDER_RECONCILIATION_LOCK_DOC_ID,
   acquireAutoRefundLeaseInFirebase,
+  enrichAuthoritativeOrderRecord,
   ensureFirebaseReady,
   getFirestoreInstance,
   getPaidOrdersForAutoRefundFromFirebase,
@@ -52,6 +53,8 @@ const {
   resetFirestoreSeedStateForTesting,
   setFirestoreForTesting
 } = require('../utils/firebase');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const jwt = require('jsonwebtoken');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { runPendingOrderReconciliation } = require('../controllers/cronController');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -899,6 +902,8 @@ async function runTests(): Promise<void> {
     await clearEmulatorDatabase();
     resetFirestoreSeedStateForTesting();
     clearSyncedRefundsStore();
+    await db.run("DELETE FROM refunds WHERE order_id LIKE 'CFX-P2-%'").catch(() => {});
+    await db.run("DELETE FROM orders WHERE id LIKE 'CFX-P2-%'").catch(() => {});
 
     assert.strictEqual(ORDER_RECONCILIATION_LOCK_DOC_ID, 'order_reconciliation');
     assert.strictEqual(AUTO_REFUND_CRON_LOCK_DOC_ID, 'auto_refund_cron_lease');
@@ -1192,6 +1197,568 @@ async function runTests(): Promise<void> {
     assert.strictEqual(overlapCalls, 1, 'Idempotent re-sweep must never issue duplicate gateway calls');
     setRazorpayClientForTesting(null);
     console.log('   PASS: Separate cron leases, 90s TTL, metadata preservation, post-lease timestamp & fencing verified.');
+
+    // =========================================================================
+    // TEST 8: Phase II — 5-Minute DISPENSING Timeout, Explicit command_transmitted,
+    //         Late DONE Audit Guard, Inspection Refund Gate & Legacy Values
+    // =========================================================================
+    console.log('8. Testing Phase II 5-minute DISPENSING timeout, inspection refund gate, late DONE & legacy values...');
+    await clearEmulatorDatabase();
+    resetFirestoreSeedStateForTesting();
+    clearSyncedRefundsStore();
+    await db.run("DELETE FROM refunds WHERE order_id LIKE 'CFX-P2-%'").catch(() => {});
+    await db.run("DELETE FROM orders WHERE id LIKE 'CFX-P2-%'").catch(() => {});
+
+    const adminToken = jwt.sign(
+      {
+        id: 'usr_super_admin_p2',
+        email: 'superadmin@caffix.test',
+        role: 'admin',
+        name: 'Super Admin',
+        portal: 'admin'
+      },
+      process.env.JWT_SECRET
+    );
+    await firestore.collection('machines').doc('CFX-MC-01').set({
+      id: 'CFX-MC-01',
+      machine_name: 'Caffix Demo 1',
+      location: 'Lab A',
+      desired_mode: 'RUNNING',
+      status: 'online',
+      kiosk_token: 'tok_mc01_h4',
+      last_seen: new Date().toISOString()
+    });
+    await firestore.collection('machines').doc('CFX-MC-02').set({
+      id: 'CFX-MC-02',
+      machine_name: 'Caffix Demo 2',
+      location: 'Lab B',
+      desired_mode: 'RUNNING',
+      status: 'online',
+      kiosk_token: 'tok_mc02_h4',
+      last_seen: new Date().toISOString()
+    });
+    await firestore.collection('products').doc('1').set({
+      id: 1,
+      name: 'Classic Crest',
+      price: 100,
+      available: true
+    });
+    const mc1JwtRes = await httpJson(baseUrl, 'GET', '/kiosk/verify?kiosk=tok_mc01_h4&machine_id=CFX-MC-01');
+    assert.strictEqual(mc1JwtRes.status, 200);
+    const mc1KioskJwt = mc1JwtRes.body.token;
+
+    // 8a: createOrder explicitly initializes command_transmitted = false;
+    // enrichAuthoritativeOrderRecord preserves missing/null/invalid legacy values without defaulting to false
+    const createdInitRes = await httpJson(baseUrl, 'POST', '/orders/create', {
+      token: mc1KioskJwt,
+      body: { product_id: 1, amount: 100, machine_id: 'CFX-MC-01', base: 'water' }
+    });
+    assert.strictEqual(createdInitRes.status, 201);
+    assert.strictEqual(createdInitRes.body.data.command_transmitted, false);
+    const createdInitSnap = (await firestore.collection('orders').doc(createdInitRes.body.data.id).get()).data();
+    assert.strictEqual(createdInitSnap?.command_transmitted, false);
+
+    const legacyEnriched = enrichAuthoritativeOrderRecord({
+      id: 'CFX-P2-LEG-ENRICH',
+      machine_id: 'CFX-MC-01',
+      product_id: 1,
+      status: 'PAID',
+      dispense_status: 'DISPENSING'
+    });
+    assert.strictEqual(legacyEnriched.command_transmitted, undefined, 'Legacy missing command_transmitted must NOT default to false');
+
+    // 8b: Scenario 1 & 2 — Normal <5m dispense & 4m-QUEUED + 3m-DISPENSING window
+    const t0Ms = Date.now() - 6 * 60_000;
+    const t0Iso = new Date(t0Ms).toISOString();
+    const lateClaimedStartIso = new Date(t0Ms + 4 * 60_000).toISOString(); // 2m ago (<5m dispensing!)
+    const lateClaimedDispExpIso = new Date(t0Ms + 9 * 60_000).toISOString();
+    await seedOrdersBatch(firestore, [
+      {
+        id: 'CFX-P2-NORMAL-DONE',
+        machine_id: 'CFX-MC-02',
+        product_id: 1,
+        amount: 100,
+        captured_amount_paise: 10000,
+        status: 'COMPLETED',
+        dispense_status: 'DISPENSED',
+        dispensed: true,
+        refund_status: 'NONE',
+        total_refunded_amount_paise: 0,
+        pending_refund_amount_paise: 0,
+        razorpay_order_id: 'ord_p2_norm',
+        razorpay_payment_id: 'pay_p2_norm',
+        created_at: t0Iso,
+        paid_at: t0Iso,
+        dispense_started_at: t0Iso,
+        dispensed_at: new Date(t0Ms + 90_000).toISOString(),
+        command_transmitted: true,
+        updated_at: t0Iso
+      },
+      {
+        id: 'CFX-P2-LATE-CLAIMED',
+        machine_id: 'CFX-MC-02',
+        product_id: 1,
+        amount: 100,
+        captured_amount_paise: 10000,
+        status: 'PAID',
+        dispense_status: 'DISPENSING',
+        dispensed: false,
+        refund_status: 'NONE',
+        total_refunded_amount_paise: 0,
+        pending_refund_amount_paise: 0,
+        razorpay_order_id: 'ord_p2_late_claim',
+        razorpay_payment_id: 'pay_p2_late_claim',
+        created_at: t0Iso,
+        paid_at: t0Iso,
+        expires_at: new Date(t0Ms + 5 * 60_000).toISOString(),
+        dispense_started_at: lateClaimedStartIso,
+        dispense_expires_at: lateClaimedDispExpIso,
+        command_transmitted: true,
+        updated_at: lateClaimedStartIso
+      }
+    ]);
+
+    let p2AutoRefundCount = 0;
+    setRazorpayRefundClientForTesting({
+      payments: {
+        refund: async (paymentId: string, payload: any) => {
+          p2AutoRefundCount += 1;
+          return {
+            id: `rfnd_p2_${p2AutoRefundCount}_${paymentId}`,
+            payment_id: paymentId,
+            amount: Number(payload.amount),
+            currency: 'INR',
+            status: 'processed',
+            receipt: payload.receipt,
+            created_at: Math.floor(Date.now() / 1000)
+          };
+        },
+        fetchRefunds: async () => ({ items: [] })
+      },
+      refunds: { fetch: async () => null }
+    });
+
+    // Sweep at t0 + 6m: CFX-P2-LATE-CLAIMED was claimed at t0 + 4m so must NOT expire!
+    const sweepAt6m = await runAutoRefundSweep({ machineId: 'CFX-MC-02', nowMs: t0Ms + 6 * 60_000 });
+    assert.strictEqual(p2AutoRefundCount, 0);
+    assert.strictEqual(sweepAt6m.refunded_processed, 0);
+    const lateClaimedSnap = (await firestore.collection('orders').doc('CFX-P2-LATE-CLAIMED').get()).data();
+    assert.strictEqual(lateClaimedSnap?.dispense_status, 'DISPENSING', 'QUEUED expiry must never expire active DISPENSING order');
+
+    // Scenario 7a: Completion immediately BEFORE 5m dispensing expiry succeeds
+    const mc2JwtRes = await httpJson(baseUrl, 'GET', '/kiosk/verify?kiosk=tok_mc02_h4&machine_id=CFX-MC-02');
+    assert.strictEqual(mc2JwtRes.status, 200);
+    const mc2KioskJwt = mc2JwtRes.body.token;
+    const beforeExpiryDone = await httpJson(baseUrl, 'POST', '/orders/CFX-P2-LATE-CLAIMED/dispense-result', {
+      token: mc2KioskJwt,
+      body: { dispense_status: 'DISPENSED', machine_id: 'CFX-MC-02' }
+    });
+    assert.strictEqual(beforeExpiryDone.status, 200);
+    assert.strictEqual(beforeExpiryDone.body.data.order.dispense_status, 'DISPENSED');
+
+    // 8c: Scenario 3, 4, 11 — DISPENSING 5m timeouts:
+    //   - command_transmitted === false -> EXPIRED + NOT_DISPENSED -> auto-refunded
+    //   - command_transmitted === true -> EXPIRED + UNCERTAIN -> 0 auto-refund
+    //   - command_transmitted === undefined / null / "false" / 0 / {} -> EXPIRED + UNCERTAIN -> 0 auto-refund
+    const dispBaseMs = Date.now() - 10 * 60_000;
+    const dispStartIso = new Date(dispBaseMs).toISOString();
+    const dispExpIso = new Date(dispBaseMs + 5 * 60_000).toISOString();
+    const makeDispTimeoutOrder = (id: string, cmdTx: any, extra: Record<string, any> = {}) => ({
+      id,
+      machine_id: 'CFX-MC-02',
+      product_id: 1,
+      amount: 100,
+      captured_amount_paise: 10000,
+      status: 'PAID',
+      dispense_status: 'DISPENSING',
+      dispensed: false,
+      refund_status: 'NONE',
+      total_refunded_amount_paise: 0,
+      pending_refund_amount_paise: 0,
+      razorpay_order_id: `ord_${id}`,
+      razorpay_payment_id: `pay_${id}`,
+      created_at: dispStartIso,
+      paid_at: dispStartIso,
+      expires_at: dispExpIso,
+      dispense_started_at: dispStartIso,
+      dispense_expires_at: dispExpIso,
+      ...(cmdTx !== undefined ? { command_transmitted: cmdTx } : {}),
+      updated_at: dispStartIso,
+      ...extra
+    });
+
+    await seedOrdersBatch(firestore, [
+      makeDispTimeoutOrder('CFX-P2-TMO-FALSE', false),
+      makeDispTimeoutOrder('CFX-P2-TMO-TRUE', true),
+      makeDispTimeoutOrder('CFX-P2-TMO-UNDEF', undefined),
+      makeDispTimeoutOrder('CFX-P2-TMO-NULL', null),
+      makeDispTimeoutOrder('CFX-P2-TMO-STR', 'false'),
+      makeDispTimeoutOrder('CFX-P2-TMO-ZERO', 0),
+      makeDispTimeoutOrder('CFX-P2-TMO-OBJ', {})
+    ]);
+
+    // At 4m59s: none may expire or refund
+    const sweep4m59 = await runAutoRefundSweep({
+      machineId: 'CFX-MC-02',
+      nowMs: dispBaseMs + 5 * 60_000 - 1000
+    });
+    assert.strictEqual(p2AutoRefundCount, 0);
+    assert.strictEqual(sweep4m59.refunded_processed, 0);
+
+    // At 5m01s: ONLY CFX-P2-TMO-FALSE is auto-refunded; ALL others become EXPIRED + UNCERTAIN with 0 auto-refund
+    const sweep5m01 = await runAutoRefundSweep({
+      machineId: 'CFX-MC-02',
+      nowMs: dispBaseMs + 5 * 60_000 + 1000
+    });
+    assert.strictEqual(p2AutoRefundCount, 1, 'Strictly command_transmitted === false may auto-refund');
+    assert.strictEqual(sweep5m01.refunded_processed, 1);
+
+    const tmoFalseAfter = (await firestore.collection('orders').doc('CFX-P2-TMO-FALSE').get()).data();
+    assert.strictEqual(tmoFalseAfter?.dispense_status, 'EXPIRED');
+    assert.strictEqual(tmoFalseAfter?.dispense_outcome, 'NOT_DISPENSED');
+    assert.strictEqual(tmoFalseAfter?.refund_status, 'FULL');
+
+    for (const uncId of [
+      'CFX-P2-TMO-TRUE',
+      'CFX-P2-TMO-UNDEF',
+      'CFX-P2-TMO-NULL',
+      'CFX-P2-TMO-STR',
+      'CFX-P2-TMO-ZERO',
+      'CFX-P2-TMO-OBJ'
+    ]) {
+      const snap = (await firestore.collection('orders').doc(uncId).get()).data();
+      assert.strictEqual(snap?.dispense_status, 'EXPIRED', `${uncId} must expire permanently`);
+      assert.strictEqual(snap?.dispense_outcome, 'UNCERTAIN', `${uncId} must be UNCERTAIN`);
+      assert.strictEqual(snap?.refund_status, 'NONE', `${uncId} must NEVER auto-refund`);
+    }
+
+    // 8d: Scenario 7b — Late DONE immediately AFTER backend 5m expiry is rejected (409) & records audit
+    const lateDoneAfterExpiry = await httpJson(baseUrl, 'POST', '/orders/CFX-P2-TMO-TRUE/dispense-result', {
+      token: mc2KioskJwt,
+      body: { dispense_status: 'DISPENSED', machine_id: 'CFX-MC-02' }
+    });
+    assert.strictEqual(lateDoneAfterExpiry.status, 409, 'Late DONE after EXPIRED must return 409 Conflict');
+    const tmoTrueAfterLateDone = (await firestore.collection('orders').doc('CFX-P2-TMO-TRUE').get()).data();
+    assert.strictEqual(tmoTrueAfterLateDone?.dispense_status, 'EXPIRED');
+    assert.strictEqual(tmoTrueAfterLateDone?.dispense_outcome, 'UNCERTAIN');
+    assert.ok(tmoTrueAfterLateDone?.late_dispense_reported_at);
+    assert.strictEqual(tmoTrueAfterLateDone?.late_dispense_signal, 'ARDUINO_DONE_AFTER_EXPIRY');
+
+    // reconciliationService reflects 5m dispensing timeout and UNCERTAIN_DISPENSE_OUTCOME with late DONE note
+    const recUncertain = reconcileOrderRecord(tmoTrueAfterLateDone, { refunds: [] });
+    assert.strictEqual(recUncertain.discrepancy_reason, 'UNCERTAIN_DISPENSE_OUTCOME');
+    assert.strictEqual(recUncertain.recommended_action, 'INVESTIGATE_HARDWARE_DISPENSE');
+    assert.ok(recUncertain.details.includes('Late Arduino DONE was reported'));
+
+    const rec5mDispTimeout = reconcileOrderRecord(
+      makeDispTimeoutOrder('CFX-P2-REC-5M', true),
+      { refunds: [], options: { now: new Date(dispBaseMs + 6 * 60_000) } }
+    );
+    assert.strictEqual(rec5mDispTimeout.discrepancy_reason, 'DISPENSING_IN_PROGRESS_TIMEOUT');
+
+    // 8e: Scenario 4 — Super Admin manual refund physical inspection gate & PARTIAL_DISPENSE / HARDWARE_FAULT_CONFIRMED guards
+    // Missing confirmation -> 400
+    const noInspectRes = await httpJson(baseUrl, 'POST', '/orders/CFX-P2-TMO-TRUE/refund', {
+      token: adminToken,
+      body: { reason: 'manual_check' }
+    });
+    assert.strictEqual(noInspectRes.status, 400);
+
+    // PARTIAL_DISPENSE without amount or with full amount -> 400
+    const partialDefaultRes = await httpJson(baseUrl, 'POST', '/orders/CFX-P2-TMO-TRUE/refund', {
+      token: adminToken,
+      body: {
+        physical_inspection_confirmed: true,
+        inspection_result: 'PARTIAL_DISPENSE',
+        inspection_notes: 'Cup half filled'
+      }
+    });
+    assert.strictEqual(partialDefaultRes.status, 400);
+
+    const partialFullAmtRes = await httpJson(baseUrl, 'POST', '/orders/CFX-P2-TMO-TRUE/refund', {
+      token: adminToken,
+      body: {
+        amount_paise: 10000,
+        physical_inspection_confirmed: true,
+        inspection_result: 'PARTIAL_DISPENSE',
+        inspection_notes: 'Cup half filled'
+      }
+    });
+    assert.strictEqual(partialFullAmtRes.status, 400);
+
+    // HARDWARE_FAULT_CONFIRMED without dispensed_quantity_confirmed/notes or with FULL -> 400
+    const hwNoQtyRes = await httpJson(baseUrl, 'POST', '/orders/CFX-P2-TMO-UNDEF/refund', {
+      token: adminToken,
+      body: {
+        physical_inspection_confirmed: true,
+        inspection_result: 'HARDWARE_FAULT_CONFIRMED'
+      }
+    });
+    assert.strictEqual(hwNoQtyRes.status, 400);
+
+    const hwFullQtyRes = await httpJson(baseUrl, 'POST', '/orders/CFX-P2-TMO-UNDEF/refund', {
+      token: adminToken,
+      body: {
+        physical_inspection_confirmed: true,
+        inspection_result: 'HARDWARE_FAULT_CONFIRMED',
+        dispensed_quantity_confirmed: 'FULL',
+        inspection_notes: 'Pump relay stuck but full drink poured'
+      }
+    });
+    assert.strictEqual(hwFullQtyRes.status, 400);
+
+    // Valid PARTIAL_DISPENSE (5000 < 10000) succeeds & derives admin identity from req.user
+    const validPartialRes = await httpJson(baseUrl, 'POST', '/orders/CFX-P2-TMO-TRUE/refund', {
+      token: adminToken,
+      body: {
+        amount_paise: 5000,
+        physical_inspection_confirmed: true,
+        inspection_result: 'PARTIAL_DISPENSE',
+        inspection_notes: 'Half cup poured before power cut',
+        inspected_by_admin_id: 'spoofed_client_id',
+        inspected_by_admin_email: 'spoofed@evil.com'
+      }
+    });
+    assert.strictEqual(validPartialRes.status, 200);
+    const partialRefundDoc = validPartialRes.body.data.refund;
+    assert.strictEqual(partialRefundDoc.amount_paise, 5000);
+    assert.strictEqual(partialRefundDoc.physical_inspection_confirmed, true);
+    assert.strictEqual(partialRefundDoc.inspection_result, 'PARTIAL_DISPENSE');
+    assert.strictEqual(partialRefundDoc.inspected_by_admin_id, 'usr_super_admin_p2');
+    assert.strictEqual(partialRefundDoc.inspected_by_admin_email, 'superadmin@caffix.test');
+    assert.ok(partialRefundDoc.inspected_at);
+
+    // Valid HARDWARE_FAULT_CONFIRMED with NONE + inspection_notes succeeds
+    const validHwNoneRes = await httpJson(baseUrl, 'POST', '/orders/CFX-P2-TMO-UNDEF/refund', {
+      token: adminToken,
+      body: {
+        physical_inspection_confirmed: true,
+        inspection_result: 'HARDWARE_FAULT_CONFIRMED',
+        dispensed_quantity_confirmed: 'NONE',
+        inspection_notes: 'Verified empty cup & dry nozzle after pump jam'
+      }
+    });
+    assert.strictEqual(validHwNoneRes.status, 200);
+    assert.strictEqual(validHwNoneRes.body.data.refund.amount_paise, 10000);
+    assert.strictEqual(validHwNoneRes.body.data.refund.dispensed_quantity_confirmed, 'NONE');
+
+    // 8f: Regression tests for Issue 1 (legacy already-DISPENSING missing command_transmitted vs QUEUED->DISPENSING)
+    //     and Issue 2 (already DISPENSED idempotency, late failure, & late DONE after refunded/expired)
+    const regCreatedIso = new Date(Date.now() - 8 * 60_000).toISOString();
+    const regDispStartedIso = new Date(Date.now() - 6 * 60_000).toISOString();
+    await seedOrdersBatch(firestore, [
+      {
+        id: 'CFX-P2-REG-QUEUED',
+        machine_id: 'CFX-MC-02',
+        product_id: 1,
+        amount: 100,
+        captured_amount_paise: 10000,
+        status: 'PAID',
+        dispense_status: 'QUEUED',
+        dispensed: false,
+        refund_status: 'NONE',
+        total_refunded_amount_paise: 0,
+        pending_refund_amount_paise: 0,
+        razorpay_order_id: 'order_reg_q',
+        razorpay_payment_id: 'pay_reg_q',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      },
+      {
+        id: 'CFX-P2-REG-LEG-DISP',
+        machine_id: 'CFX-MC-02',
+        product_id: 1,
+        amount: 100,
+        captured_amount_paise: 10000,
+        status: 'PAID',
+        dispense_status: 'DISPENSING',
+        dispensed: false,
+        dispense_started_at: regDispStartedIso,
+        refund_status: 'NONE',
+        total_refunded_amount_paise: 0,
+        pending_refund_amount_paise: 0,
+        razorpay_order_id: 'order_reg_ld',
+        razorpay_payment_id: 'pay_reg_ld',
+        created_at: regCreatedIso,
+        updated_at: regDispStartedIso
+      },
+      {
+        id: 'CFX-P2-REG-LEG-NULL',
+        machine_id: 'CFX-MC-02',
+        product_id: 1,
+        amount: 100,
+        captured_amount_paise: 10000,
+        status: 'PAID',
+        dispense_status: 'DISPENSING',
+        dispensed: false,
+        command_transmitted: null,
+        dispense_started_at: regDispStartedIso,
+        refund_status: 'NONE',
+        total_refunded_amount_paise: 0,
+        pending_refund_amount_paise: 0,
+        razorpay_order_id: 'order_reg_ln',
+        razorpay_payment_id: 'pay_reg_ln',
+        created_at: regCreatedIso,
+        updated_at: regDispStartedIso
+      },
+      {
+        id: 'CFX-P2-REG-LEG-INVALID',
+        machine_id: 'CFX-MC-02',
+        product_id: 1,
+        amount: 100,
+        captured_amount_paise: 10000,
+        status: 'PAID',
+        dispense_status: 'DISPENSING',
+        dispensed: false,
+        command_transmitted: 'false',
+        dispense_started_at: regDispStartedIso,
+        refund_status: 'NONE',
+        total_refunded_amount_paise: 0,
+        pending_refund_amount_paise: 0,
+        razorpay_order_id: 'order_reg_li',
+        razorpay_payment_id: 'pay_reg_li',
+        created_at: regCreatedIso,
+        updated_at: regDispStartedIso
+      },
+      {
+        id: 'CFX-P2-REG-LEG-TRUE',
+        machine_id: 'CFX-MC-02',
+        product_id: 1,
+        amount: 100,
+        captured_amount_paise: 10000,
+        status: 'PAID',
+        dispense_status: 'DISPENSING',
+        dispensed: false,
+        command_transmitted: true,
+        command_transmitted_at: '2026-11-26T10:00:00.000Z',
+        dispense_started_at: regDispStartedIso,
+        refund_status: 'NONE',
+        total_refunded_amount_paise: 0,
+        pending_refund_amount_paise: 0,
+        razorpay_order_id: 'order_reg_lt',
+        razorpay_payment_id: 'pay_reg_lt',
+        created_at: regCreatedIso,
+        updated_at: regDispStartedIso
+      },
+      {
+        id: 'CFX-P2-REG-DISPENSED',
+        machine_id: 'CFX-MC-02',
+        product_id: 1,
+        amount: 100,
+        captured_amount_paise: 10000,
+        status: 'PAID',
+        dispense_status: 'DISPENSED',
+        dispensed: true,
+        dispense_outcome: 'DISPENSED',
+        dispensed_by: 'CFX-MC-02',
+        dispensed_at: '2026-11-26T10:01:00.000Z',
+        refund_status: 'NONE',
+        total_refunded_amount_paise: 0,
+        pending_refund_amount_paise: 0,
+        razorpay_order_id: 'order_reg_done',
+        razorpay_payment_id: 'pay_reg_done',
+        created_at: regCreatedIso,
+        updated_at: '2026-11-26T10:01:00.000Z'
+      },
+      {
+        id: 'CFX-P2-REG-REFUNDED',
+        machine_id: 'CFX-MC-02',
+        product_id: 1,
+        amount: 100,
+        captured_amount_paise: 10000,
+        status: 'PAID',
+        dispense_status: 'DISPENSING',
+        dispensed: false,
+        refund_status: 'PARTIAL',
+        total_refunded_amount_paise: 5000,
+        pending_refund_amount_paise: 0,
+        razorpay_order_id: 'order_reg_rfnd',
+        razorpay_payment_id: 'pay_reg_rfnd',
+        created_at: regCreatedIso,
+        updated_at: regDispStartedIso
+      }
+    ]);
+
+    // QUEUED -> DISPENSING initializes explicit false + null
+    const regClaimQueued = await httpJson(baseUrl, 'POST', '/orders/CFX-P2-REG-QUEUED/dispense-result', {
+      token: mc2KioskJwt,
+      body: { dispense_status: 'DISPENSING', machine_id: 'CFX-MC-02' }
+    });
+    assert.strictEqual(regClaimQueued.status, 200);
+    assert.strictEqual(regClaimQueued.body.data.order.command_transmitted, false);
+    assert.strictEqual(regClaimQueued.body.data.order.command_transmitted_at, null);
+
+    // Repeated DISPENSING on legacy already-DISPENSING order with missing command_transmitted preserves missing (undefined)
+    const regRepeatMissing = await httpJson(baseUrl, 'POST', '/orders/CFX-P2-REG-LEG-DISP/dispense-result', {
+      token: mc2KioskJwt,
+      body: { dispense_status: 'DISPENSING', machine_id: 'CFX-MC-02' }
+    });
+    assert.strictEqual(regRepeatMissing.status, 200);
+    const legMissingSnap = (await firestore.collection('orders').doc('CFX-P2-REG-LEG-DISP').get()).data();
+    assert.strictEqual(legMissingSnap?.command_transmitted, undefined, 'Legacy missing command_transmitted must remain undefined on repeated DISPENSING');
+
+    // Repeated DISPENSING preserves null, invalid ("false"), and true
+    await httpJson(baseUrl, 'POST', '/orders/CFX-P2-REG-LEG-NULL/dispense-result', {
+      token: mc2KioskJwt,
+      body: { dispense_status: 'DISPENSING', machine_id: 'CFX-MC-02' }
+    });
+    assert.strictEqual((await firestore.collection('orders').doc('CFX-P2-REG-LEG-NULL').get()).data()?.command_transmitted, null);
+
+    await httpJson(baseUrl, 'POST', '/orders/CFX-P2-REG-LEG-INVALID/dispense-result', {
+      token: mc2KioskJwt,
+      body: { dispense_status: 'DISPENSING', machine_id: 'CFX-MC-02' }
+    });
+    assert.strictEqual((await firestore.collection('orders').doc('CFX-P2-REG-LEG-INVALID').get()).data()?.command_transmitted, 'false');
+
+    await httpJson(baseUrl, 'POST', '/orders/CFX-P2-REG-LEG-TRUE/dispense-result', {
+      token: mc2KioskJwt,
+      body: { dispense_status: 'DISPENSING', machine_id: 'CFX-MC-02' }
+    });
+    const legTrueSnap = (await firestore.collection('orders').doc('CFX-P2-REG-LEG-TRUE').get()).data();
+    assert.strictEqual(legTrueSnap?.command_transmitted, true);
+    assert.strictEqual(legTrueSnap?.command_transmitted_at, '2026-11-26T10:00:00.000Z');
+
+    // Legacy already-DISPENSING missing order expires as EXPIRED + UNCERTAIN with zero auto-refunds
+    const regBeforeRefundCount = refundCallReceipts.length;
+    const regSweep = await runAutoRefundSweep(db, { nowMs: Date.now() });
+    assert.strictEqual(refundCallReceipts.length, regBeforeRefundCount, 'Legacy missing/null/invalid/true DISPENSING orders must trigger zero auto-refunds');
+    const regExpiredMissing = (await firestore.collection('orders').doc('CFX-P2-REG-LEG-DISP').get()).data();
+    assert.strictEqual(regExpiredMissing?.dispense_status, 'EXPIRED');
+    assert.strictEqual(regExpiredMissing?.dispense_outcome, 'UNCERTAIN');
+    assert.ok(regSweep);
+
+    // Duplicate DONE on already DISPENSED order is idempotent (preserves dispensed_at without mutating)
+    const dupDoneRes = await httpJson(baseUrl, 'POST', '/orders/CFX-P2-REG-DISPENSED/dispense-result', {
+      token: mc2KioskJwt,
+      body: { dispense_status: 'DISPENSED', machine_id: 'CFX-MC-02' }
+    });
+    assert.strictEqual(dupDoneRes.status, 200);
+    assert.strictEqual(dupDoneRes.body.data.order.dispense_status, 'DISPENSED');
+    assert.strictEqual(dupDoneRes.body.data.order.dispensed_at, '2026-11-26T10:01:00.000Z');
+
+    // Late failure after already DISPENSED returns 409 and preserves DISPENSED
+    const lateFailOnDispensed = await httpJson(baseUrl, 'POST', '/orders/CFX-P2-REG-DISPENSED/dispense-result', {
+      token: mc2KioskJwt,
+      body: { dispense_status: 'FAILED', failure_stage: 'DURING_DISPENSE', machine_id: 'CFX-MC-02' }
+    });
+    assert.strictEqual(lateFailOnDispensed.status, 409);
+    const dispensedAfterFail = (await firestore.collection('orders').doc('CFX-P2-REG-DISPENSED').get()).data();
+    assert.strictEqual(dispensedAfterFail?.dispense_status, 'DISPENSED');
+    assert.strictEqual(dispensedAfterFail?.dispensed, true);
+
+    // Late DONE after refunded state (PARTIAL) returns 409 and records late_dispense audit signal
+    const lateDoneOnRefunded = await httpJson(baseUrl, 'POST', '/orders/CFX-P2-REG-REFUNDED/dispense-result', {
+      token: mc2KioskJwt,
+      body: { dispense_status: 'DISPENSED', machine_id: 'CFX-MC-02' }
+    });
+    assert.strictEqual(lateDoneOnRefunded.status, 409);
+    const refundedAfterLateDone = (await firestore.collection('orders').doc('CFX-P2-REG-REFUNDED').get()).data();
+    assert.strictEqual(refundedAfterLateDone?.dispense_status, 'DISPENSING');
+    assert.strictEqual(refundedAfterLateDone?.refund_status, 'PARTIAL');
+    assert.strictEqual(refundedAfterLateDone?.late_dispense_signal, 'ARDUINO_DONE_AFTER_EXPIRY');
+    assert.ok(refundedAfterLateDone?.late_dispense_reported_at);
+
+    console.log('   PASS: Phase II 5-min DISPENSING timeout, strict command_transmitted, late DONE audit, and inspection refund gate verified.');
 
     console.log('\nALL PHASE H.4 AUTOMATED REFUND PREPARATION TESTS PASSED SUCCESSFULLY!\n');
   } finally {

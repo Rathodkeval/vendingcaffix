@@ -432,6 +432,8 @@ export const createOrder = async (
         refund_status: 'NONE',
         total_refunded_amount_paise: 0,
         pending_refund_amount_paise: 0,
+        command_transmitted: false,
+        command_transmitted_at: null,
         razorpay_order_id: rpOrderId,
         extra_sugar: 1,
         base: base || 'water'
@@ -1249,6 +1251,108 @@ export const refundOrder = async (
       );
     }
 
+    // 5b. Physical inspection gate & amount rules for UNCERTAIN / DURING_DISPENSE orders
+    const dispenseOutcomeUpper = String(order.dispense_outcome || '').toUpperCase();
+    const failureStageUpper = String(order.failure_stage || '').toUpperCase();
+    const requiresPhysicalInspection =
+      dispenseOutcomeUpper === 'UNCERTAIN' || failureStageUpper === 'DURING_DISPENSE';
+
+    let inspectionAudit: {
+      physical_inspection_confirmed?: boolean;
+      inspection_result?: 'NOT_DISPENSED' | 'PARTIAL_DISPENSE' | 'HARDWARE_FAULT_CONFIRMED';
+      dispensed_quantity_confirmed?: 'NONE' | 'PARTIAL' | 'FULL';
+      inspected_by_admin_id?: string;
+      inspected_by_admin_email?: string;
+      inspected_at?: string;
+      inspection_notes?: string | null;
+    } = {};
+
+    if (requiresPhysicalInspection) {
+      if (req.body?.physical_inspection_confirmed !== true) {
+        return next(
+          new BadRequestError(
+            `Order ${orderId} has uncertain physical dispensing outcome and requires explicit physical_inspection_confirmed=true before refunding`
+          )
+        );
+      }
+
+      const inspectionResult = req.body?.inspection_result as
+        | 'NOT_DISPENSED'
+        | 'PARTIAL_DISPENSE'
+        | 'HARDWARE_FAULT_CONFIRMED'
+        | undefined;
+      if (
+        !inspectionResult ||
+        !['NOT_DISPENSED', 'PARTIAL_DISPENSE', 'HARDWARE_FAULT_CONFIRMED'].includes(inspectionResult)
+      ) {
+        return next(
+          new BadRequestError(
+            'Valid inspection_result (NOT_DISPENSED, PARTIAL_DISPENSE, or HARDWARE_FAULT_CONFIRMED) is required for UNCERTAIN orders'
+          )
+        );
+      }
+
+      const hasExplicitAmount =
+        (req.body?.amount_paise !== undefined && req.body?.amount_paise !== null) ||
+        (req.body?.amount_inr !== undefined && req.body?.amount_inr !== null);
+      const inspectionNotes =
+        typeof req.body?.inspection_notes === 'string' && req.body.inspection_notes.trim()
+          ? req.body.inspection_notes.trim()
+          : null;
+      const dispensedQuantityConfirmed = req.body?.dispensed_quantity_confirmed as
+        | 'NONE'
+        | 'PARTIAL'
+        | 'FULL'
+        | undefined;
+
+      if (inspectionResult === 'PARTIAL_DISPENSE') {
+        if (!hasExplicitAmount || requestedPaise >= balance.orderAmountPaise) {
+          return next(
+            new BadRequestError(
+              `PARTIAL_DISPENSE requires an explicit refund amount strictly less than the original order amount (${balance.orderAmountPaise} paise)`
+            )
+          );
+        }
+      } else if (inspectionResult === 'HARDWARE_FAULT_CONFIRMED') {
+        if (!dispensedQuantityConfirmed || !inspectionNotes) {
+          return next(
+            new BadRequestError(
+              'HARDWARE_FAULT_CONFIRMED requires dispensed_quantity_confirmed (NONE, PARTIAL, or FULL) and inspection_notes establishing the actual dispensed quantity before refunding'
+            )
+          );
+        }
+        if (dispensedQuantityConfirmed === 'FULL') {
+          return next(
+            new BadRequestError(
+              'Cannot authorize refund when physical inspection confirms a full drink was dispensed (dispensed_quantity_confirmed=FULL)'
+            )
+          );
+        }
+        if (
+          dispensedQuantityConfirmed === 'PARTIAL' &&
+          (!hasExplicitAmount || requestedPaise >= balance.orderAmountPaise)
+        ) {
+          return next(
+            new BadRequestError(
+              `HARDWARE_FAULT_CONFIRMED with partial dispensing requires an explicit refund amount strictly less than the original order amount (${balance.orderAmountPaise} paise)`
+            )
+          );
+        }
+      }
+
+      inspectionAudit = {
+        physical_inspection_confirmed: true,
+        inspection_result: inspectionResult,
+        dispensed_quantity_confirmed:
+          dispensedQuantityConfirmed ||
+          (inspectionResult === 'NOT_DISPENSED' ? 'NONE' : 'PARTIAL'),
+        inspected_by_admin_id: String(req.user.id),
+        inspected_by_admin_email: String(req.user.email || req.user.id).trim(),
+        inspected_at: new Date().toISOString(),
+        inspection_notes: inspectionNotes
+      };
+    }
+
     // 6. Idempotency key
     const rawIdempotencyKey = req.body?.idempotency_key || req.headers['idempotency-key'];
     const idempotencyKey = rawIdempotencyKey
@@ -1265,7 +1369,8 @@ export const refundOrder = async (
       notes,
       initiatedBy: String(req.user.email || 'admin').trim(),
       source: 'SUPER_ADMIN_PORTAL',
-      idempotencyKey
+      idempotencyKey,
+      ...inspectionAudit
     });
 
     if (txOutcome.outcome === 'replay') {

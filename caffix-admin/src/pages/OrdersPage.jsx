@@ -130,10 +130,24 @@ export function evaluateOrderReconciliation(o) {
   }
 
   const refundStatus = String(o.refund_status || 'NONE').toUpperCase();
+  const dispenseOutcome = String(o.dispense_outcome || '').toUpperCase();
+  const failureStage = String(o.failure_stage || '').toUpperCase();
+  const isUncertainOutcome = dispenseOutcome === 'UNCERTAIN' || failureStage === 'DURING_DISPENSE';
   const isExpired = dispenseStatus === 'EXPIRED';
   const isFailed = dispenseStatus === 'FAILED' || isExpired || orderStatus === 'FAILED';
   const isPaid = (capturedPaise !== null && capturedPaise > 0) || Boolean(o.razorpay_payment_id);
   if (isFailed && isPaid && totalRefunded === 0 && pendingRefund === 0) {
+    if (isUncertainOutcome) {
+      const lateDoneNote = o.late_dispense_reported_at
+        ? ` Late Arduino DONE was reported at ${o.late_dispense_reported_at} after expiry.`
+        : '';
+      return {
+        result: 'DISCREPANCY',
+        reason: 'UNCERTAIN_DISPENSE_OUTCOME',
+        action: 'INVESTIGATE_HARDWARE_DISPENSE',
+        details: `Order ${dispenseStatus} with uncertain physical dispensing outcome.${lateDoneNote} Physical inspection is required before Super Admin manual refund.`
+      };
+    }
     const refundAttemptFailed = refundStatus === 'FAILED';
     return {
       result: 'DISCREPANCY',
