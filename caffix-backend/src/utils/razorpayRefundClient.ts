@@ -21,6 +21,7 @@ export interface GatewayRefundResponse {
   success: boolean;
   isMock: boolean;
   isTimeout?: boolean;
+  httpStatusCode?: number;
   razorpayRefundId?: string;
   paymentId: string;
   amountPaise: number;
@@ -29,9 +30,18 @@ export interface GatewayRefundResponse {
   processedAt?: string;
   errorCode?: string;
   errorDescription?: string;
+  errorReason?: string;
+  errorSource?: string;
+  errorStep?: string;
   amountMismatch?: boolean;
   currencyMismatch?: boolean;
   rawResponse?: any;
+}
+
+function redactCredentialsFromErrorText(raw: string): string {
+  return raw
+    .replace(/\b(Basic|Bearer)\s+[A-Za-z0-9+/=_.-]+/gi, '$1 [REDACTED]')
+    .replace(/\brzp_(live|test)_[A-Za-z0-9]+\b/gi, 'rzp_$1_[REDACTED]');
 }
 
 let cachedRazorpayClient: any = null;
@@ -458,8 +468,33 @@ export async function executeGatewayRefund(params: GatewayRefundRequest): Promis
       rawResponse: rpResponse
     };
   } catch (error: any) {
-    const errorMsg = String(error?.message || error?.error?.description || error || '');
-    const errorCode = String(error?.code || error?.error?.code || 'GATEWAY_ERROR');
+    const rawStatus = error?.statusCode ?? error?.response?.status;
+    const httpStatusCode =
+      typeof rawStatus === 'number' && Number.isInteger(rawStatus) && rawStatus > 0
+        ? rawStatus
+        : undefined;
+    const rpErrObj = error?.error && typeof error.error === 'object' ? error.error : undefined;
+    const rawErrorMsg = String(
+      error?.message || rpErrObj?.description || (typeof error === 'string' ? error : '') || ''
+    );
+    const errorMsg = redactCredentialsFromErrorText(rawErrorMsg).trim();
+    const errorCode = String(error?.code || rpErrObj?.code || 'GATEWAY_ERROR');
+    const errorReason = rpErrObj?.reason
+      ? redactCredentialsFromErrorText(String(rpErrObj.reason)).trim()
+      : undefined;
+    const errorSource = rpErrObj?.source
+      ? redactCredentialsFromErrorText(String(rpErrObj.source)).trim()
+      : undefined;
+    const errorStep = rpErrObj?.step
+      ? redactCredentialsFromErrorText(String(rpErrObj.step)).trim()
+      : undefined;
+
+    const metaParts: string[] = [];
+    if (httpStatusCode !== undefined) metaParts.push(`http=${httpStatusCode}`);
+    if (errorReason) metaParts.push(`reason=${errorReason}`);
+    if (errorSource) metaParts.push(`source=${errorSource}`);
+    if (errorStep) metaParts.push(`step=${errorStep}`);
+    const metaSuffix = metaParts.length > 0 ? ` (${metaParts.join(', ')})` : '';
 
     // Detect network timeouts / interruption
     const isTimeout =
@@ -472,35 +507,52 @@ export async function executeGatewayRefund(params: GatewayRefundRequest): Promis
 
     if (isTimeout) {
       logger.warn(
-        `Razorpay refund API call timed out for payment ${paymentId} on order ${orderId}: ${errorMsg}`
+        `Razorpay refund API call timed out for payment ${paymentId} on order ${orderId}${metaSuffix}: ${errorMsg}`
       );
       return {
         success: false,
         isMock: false,
         isTimeout: true,
+        httpStatusCode,
         paymentId,
         amountPaise: requestedPaise,
         currency: 'INR',
         status: 'PENDING',
         errorCode: 'GATEWAY_TIMEOUT',
-        errorDescription: `Gateway request timed out: ${errorMsg}`
+        errorReason,
+        errorSource,
+        errorStep,
+        errorDescription: `Gateway request timed out: ${errorMsg}${metaSuffix}`
       };
     }
 
     logger.error(
-      `Razorpay refund API rejected request for payment ${paymentId} on order ${orderId} [${errorCode}]: ${errorMsg}`
+      `Razorpay refund API rejected request for payment ${paymentId} on order ${orderId} [${errorCode}]${metaSuffix}: ${errorMsg}`,
+      {
+        order_id: orderId,
+        payment_id: paymentId,
+        http_status: httpStatusCode ?? null,
+        error_code: errorCode,
+        error_reason: errorReason ?? null,
+        error_source: errorSource ?? null,
+        error_step: errorStep ?? null
+      }
     );
 
     return {
       success: false,
       isMock: false,
       isTimeout: false,
+      httpStatusCode,
       paymentId,
       amountPaise: requestedPaise,
       currency: 'INR',
       status: 'FAILED',
       errorCode,
-      errorDescription: errorMsg || 'Payment gateway rejected refund request'
+      errorReason,
+      errorSource,
+      errorStep,
+      errorDescription: `${errorMsg || 'Payment gateway rejected refund request'}${metaSuffix}`
     };
   }
 }

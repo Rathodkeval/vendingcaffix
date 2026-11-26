@@ -835,6 +835,8 @@ async function runStage5Tests() {
     const statusBadgesSrc = fsOwnerModule.readFileSync(statusBadgesPath, 'utf8');
     assert.ok(ownerOrdersPageSrc.includes("dispenseStatus === 'EXPIRED'"), 'OrdersPage evaluateOrderReconciliation must treat EXPIRED consistently with FAILED');
     assert.ok(ownerOrdersPageSrc.includes("reason: isExpired ? 'DISPENSE_EXPIRED_UNREFUNDED' : 'DISPENSE_FAILED_UNREFUNDED'"), 'OrdersPage must flag unrefunded EXPIRED orders with DISPENSE_EXPIRED_UNREFUNDED discrepancy');
+    assert.ok(ownerOrdersPageSrc.includes("const refundAttemptFailed = refundStatus === 'FAILED'"), 'OrdersPage must distinguish FAILED refund attempts from uninitiated refunds');
+    assert.ok(ownerOrdersPageSrc.includes('a refund was attempted, but the payment gateway rejected the refund'), 'OrdersPage must accurately report rejected refund attempts');
     assert.ok(ownerOrdersPageSrc.includes('<option value="EXPIRED">Dispense: EXPIRED</option>'), 'OrdersPage must include Dispense: EXPIRED filter option');
     assert.ok(ownerOrdersPageSrc.includes("selectedOrder.dispense_status === 'EXPIRED'"), 'OrdersPage detail drawer must describe EXPIRED dispensing status');
     assert.ok(/DispenseStatusBadge[\s\S]*EXPIRED:\s*'bg-rose-50/.test(statusBadgesSrc), 'StatusBadges DispenseStatusBadge must define EXPIRED badge style');

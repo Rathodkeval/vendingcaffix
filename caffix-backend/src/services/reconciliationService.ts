@@ -261,6 +261,9 @@ export function reconcileOrderRecord(
     dispenseStatus === 'FAILED' || dispenseStatus === 'EXPIRED' || orderStatus === 'FAILED';
   const hasCapturedPayment = (capturedPaise !== null && capturedPaise > 0) || Boolean(order.razorpay_payment_id);
   if (isDispenseFailed && hasCapturedPayment && totalRefundedPaise === 0 && pendingRefundPaise === 0) {
+    const hasFailedRefundAttempt =
+      String(order.refund_status || '').toUpperCase() === 'FAILED' ||
+      refunds.some((r) => String(r?.status || '').toUpperCase() === 'FAILED');
     return {
       order_id: orderId,
       machine_id: machineId,
@@ -274,7 +277,11 @@ export function reconcileOrderRecord(
       reconciliation_result: 'DISCREPANCY',
       discrepancy_reason: 'DISPENSE_FAILED_UNREFUNDED',
       recommended_action: 'INITIATE_REFUND',
-      details: 'Dispense failed or was aborted after payment was captured, but no refund has been initiated.',
+      details: hasFailedRefundAttempt
+        ? dispenseStatus === 'EXPIRED'
+          ? 'Order expired before dispensing after payment was captured; a refund was attempted, but the payment gateway rejected the refund.'
+          : 'Dispense failed or was aborted after payment was captured; a refund was attempted, but the payment gateway rejected the refund.'
+        : 'Dispense failed or was aborted after payment was captured, but no refund has been initiated.',
       created_at: order.created_at,
       updated_at: order.updated_at
     };

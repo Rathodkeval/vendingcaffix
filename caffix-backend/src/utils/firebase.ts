@@ -2697,7 +2697,7 @@ function isPaidOrderActionableForAutoRefund(order: any): boolean {
 
   if (status !== 'PAID') return false;
   if (pendingPaise > 0) return true;
-  if (refundStatus === 'FULL' || refundStatus === 'PARTIAL') return false;
+  if (refundStatus === 'FULL' || refundStatus === 'PARTIAL' || refundStatus === 'FAILED') return false;
   if (order.dispensed === true || dispenseStatus === 'DISPENSED') return false;
   if (dispenseOutcome === 'UNCERTAIN' || dispenseStatus === 'DISPENSING') return false;
   if (dispenseStatus === 'QUEUED' && (order.claimed_at || order.dispense_started_at)) return false;
@@ -2732,14 +2732,14 @@ export async function getPaidOrdersForAutoRefundFromFirebase(
       let baseQuery: any = firestore
         .collection('orders')
         .where('status', '==', 'PAID')
-        .where('refund_status', 'in', ['NONE', 'PARTIAL', 'FAILED'])
+        .where('refund_status', 'in', ['NONE', 'PARTIAL'])
         .orderBy('created_at', 'asc');
       if (targetMachineId) {
         baseQuery = firestore
           .collection('orders')
           .where('machine_id', '==', targetMachineId)
           .where('status', '==', 'PAID')
-          .where('refund_status', 'in', ['NONE', 'PARTIAL', 'FAILED'])
+          .where('refund_status', 'in', ['NONE', 'PARTIAL'])
           .orderBy('created_at', 'asc');
       }
 
@@ -2822,7 +2822,12 @@ export async function getPaidOrdersForAutoRefundFromFirebase(
     .filter((o) => {
       const status = String(o?.status || '').toUpperCase();
       const refundStatus = String(o?.refund_status || 'NONE').toUpperCase();
-      return status === 'PAID' && refundStatus !== 'FULL' && refundStatus !== 'PENDING';
+      return (
+        status === 'PAID' &&
+        refundStatus !== 'FULL' &&
+        refundStatus !== 'PENDING' &&
+        refundStatus !== 'FAILED'
+      );
     })
     .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
   const actionable = eligiblePaid.filter((o) => isPaidOrderActionableForAutoRefund(o));

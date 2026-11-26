@@ -43,10 +43,17 @@ const {
 const {
   ensureFirebaseReady,
   getFirestoreInstance,
-  resetFirestoreSeedStateForTesting
+  getPaidOrdersForAutoRefundFromFirebase,
+  resetFirestoreSeedStateForTesting,
+  setFirestoreForTesting
 } = require('../utils/firebase');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { setRazorpayRefundClientForTesting } = require('../utils/razorpayRefundClient');
+const {
+  executeGatewayRefund,
+  setRazorpayRefundClientForTesting
+} = require('../utils/razorpayRefundClient');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { reconcileOrderRecord } = require('../services/reconciliationService');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { clearSyncedRefundsStore } = require('../utils/refunds');
 
@@ -248,7 +255,40 @@ async function runTests(): Promise<void> {
       });
     }
 
-    // 25 newer eligible expired QUEUED orders sitting beyond the 220 blocking docs
+    // 50 older PAID + EXPIRED orders whose prior auto-refund FAILED at gateway (refund_status=FAILED)
+    const failedRefundIds: string[] = [];
+    for (let i = 0; i < 50; i++) {
+      const ts = new Date(baseTimeMs + (300 + i) * 1000).toISOString();
+      const id = `CFX-H4-RFFAIL-${String(i).padStart(3, '0')}`;
+      failedRefundIds.push(id);
+      blockingOrders.push({
+        id,
+        machine_id: 'CFX-MC-02',
+        product_id: 1,
+        product_name: 'Classic Crest',
+        coffee: 'Classic Crest',
+        amount: 100,
+        captured_amount_paise: 10000,
+        status: 'PAID',
+        dispense_status: 'EXPIRED',
+        dispense_outcome: 'NOT_DISPENSED',
+        failure_stage: 'PRE_DISPENSE',
+        failure_reason: 'QUEUED_ORDER_EXPIRED_UNCLAIMED',
+        dispensed: false,
+        refund_status: 'FAILED',
+        total_refunded_amount_paise: 0,
+        pending_refund_amount_paise: 0,
+        razorpay_order_id: `order_rffail_${i}`,
+        razorpay_payment_id: `pay_rffail_${i}`,
+        created_at: ts,
+        paid_at: ts,
+        expires_at: new Date(Date.parse(ts) + 5 * 60_000).toISOString(),
+        expired_at: new Date(Date.parse(ts) + 6 * 60_000).toISOString(),
+        updated_at: ts
+      });
+    }
+
+    // 25 newer eligible expired QUEUED orders sitting beyond the 270 blocking docs
     const eligibleExpiredIds: string[] = [];
     for (let i = 0; i < 25; i++) {
       const ts = new Date(baseTimeMs + (400 + i) * 1000).toISOString();
@@ -285,7 +325,7 @@ async function runTests(): Promise<void> {
     });
     assert.strictEqual(cronRun1.status, 200);
     assert.strictEqual(cronRun1.body.data.scanned, 20, 'Bounded cron sweep must cap scanned/processed batch to 20');
-    assert.strictEqual(cronRun1.body.data.eligible, 20, 'Starvation fix must discover 20 eligible orders past 220 blocking docs');
+    assert.strictEqual(cronRun1.body.data.eligible, 20, 'Starvation fix must discover 20 eligible orders past 270 FULL/DISPENSED/FAILED docs');
     assert.strictEqual(cronRun1.body.data.refunded_processed, 20);
     assert.strictEqual(cronRun1.body.data.expired_queued, 20);
 
@@ -303,7 +343,11 @@ async function runTests(): Promise<void> {
       assert.strictEqual(snap.data()?.refund_status, 'FULL', `${id} must be FULL refunded`);
       assert.strictEqual(snap.data()?.dispense_status, 'EXPIRED', `${id} must be marked EXPIRED`);
     }
-    console.log('   PASS: 25 eligible orders behind 220 FULL/DISPENSED orders refunded across bounded batches of 20.');
+    for (const id of failedRefundIds.slice(0, 5)) {
+      const snap = await firestore.collection('orders').doc(id).get();
+      assert.strictEqual(snap.data()?.refund_status, 'FAILED', `${id} must remain FAILED without consuming batch slots`);
+    }
+    console.log('   PASS: 25 eligible orders behind 270 FULL/DISPENSED/FAILED orders refunded across bounded batches of 20.');
 
     // =========================================================================
     // TEST 2: Pending refund on COMPLETED order reconciled across all statuses
@@ -695,6 +739,149 @@ async function runTests(): Promise<void> {
     assert.strictEqual(recoveredTimeoutOrder?.pending_refund_amount_paise, 0);
     assert.strictEqual(recoveredTimeoutOrder?.total_refunded_amount_paise, 10000);
     console.log('   PASS: Duplicate cron lease lock, ETIMEDOUT PENDING hold, and receipt reconciliation verified.');
+
+    // =========================================================================
+    // TEST 6: Fallback FAILED exclusion, Razorpay error metadata, & FAILED wording
+    // =========================================================================
+    console.log('6. Testing non-Firestore fallback FAILED exclusion, gateway error metadata, & reconciliation wording...');
+    await db.run("DELETE FROM orders WHERE id LIKE 'CFX-H4-FB-%'");
+    for (let i = 0; i < 25; i++) {
+      const ts = new Date(baseTimeMs + i * 1000).toISOString();
+      await db.run(
+        `INSERT INTO orders (id, product_id, amount, status, dispense_status, refund_status, captured_amount_paise, total_refunded_amount_paise, pending_refund_amount_paise, machine_id, created_at, paid_at, razorpay_order_id, razorpay_payment_id)
+         VALUES (?, 1, 1, 'PAID', 'EXPIRED', 'FAILED', 100, 0, 0, 'CFX-MC-01', ?, ?, ?, ?)`,
+        [`CFX-H4-FB-FAIL-${String(i).padStart(2, '0')}`, ts, ts, `ord_fb_f_${i}`, `pay_fb_f_${i}`]
+      );
+    }
+    const partialTs = new Date(baseTimeMs + 50 * 1000).toISOString();
+    await db.run(
+      `INSERT INTO orders (id, product_id, amount, status, dispense_status, refund_status, captured_amount_paise, total_refunded_amount_paise, pending_refund_amount_paise, machine_id, created_at, paid_at, razorpay_order_id, razorpay_payment_id)
+       VALUES ('CFX-H4-FB-PARTIAL-PEND', 1, 100, 'PAID', 'FAILED', 'PARTIAL', 10000, 4000, 6000, 'CFX-MC-01', ?, ?, 'ord_fb_part', 'pay_fb_part')`,
+      [partialTs, partialTs]
+    );
+    for (let i = 0; i < 5; i++) {
+      const ts = new Date(baseTimeMs + (100 + i) * 1000).toISOString();
+      await db.run(
+        `INSERT INTO orders (id, product_id, amount, status, dispense_status, refund_status, captured_amount_paise, total_refunded_amount_paise, pending_refund_amount_paise, machine_id, created_at, paid_at, razorpay_order_id, razorpay_payment_id)
+         VALUES (?, 1, 1, 'PAID', 'QUEUED', 'NONE', 100, 0, 0, 'CFX-MC-01', ?, ?, ?, ?)`,
+        [`CFX-H4-FB-ELIG-${i}`, ts, ts, `ord_fb_e_${i}`, `pay_fb_e_${i}`]
+      );
+    }
+
+    const savedEmuHost = process.env.FIRESTORE_EMULATOR_HOST;
+    const savedProjectId = process.env.FIREBASE_PROJECT_ID;
+    delete process.env.FIRESTORE_EMULATOR_HOST;
+    delete process.env.FIREBASE_PROJECT_ID;
+    setFirestoreForTesting({ firestoreInstance: null, clearStores: true });
+    try {
+      const fbSelected = await getPaidOrdersForAutoRefundFromFirebase(db, {
+        machineId: 'CFX-MC-01',
+        limit: 20
+      });
+      const fbIds = new Set(fbSelected.map((o: any) => o.id));
+      for (let i = 0; i < 25; i++) {
+        assert.strictEqual(
+          fbIds.has(`CFX-H4-FB-FAIL-${String(i).padStart(2, '0')}`),
+          false,
+          'Non-Firestore fallback must exclude refund_status === FAILED orders'
+        );
+      }
+      assert.strictEqual(
+        fbIds.has('CFX-H4-FB-PARTIAL-PEND'),
+        true,
+        'PARTIAL order with pending_refund_amount_paise > 0 must remain included'
+      );
+      for (let i = 0; i < 5; i++) {
+        assert.strictEqual(fbIds.has(`CFX-H4-FB-ELIG-${i}`), true);
+      }
+    } finally {
+      if (savedEmuHost) process.env.FIRESTORE_EMULATOR_HOST = savedEmuHost;
+      if (savedProjectId) process.env.FIREBASE_PROJECT_ID = savedProjectId;
+      setFirestoreForTesting({ firestoreInstance: firestore });
+      ensureFirebaseReady();
+    }
+
+    // 6b: Razorpay error logging retains statusCode, reason, source, step & redacts secrets
+    setRazorpayRefundClientForTesting({
+      payments: {
+        refund: async () => {
+          throw {
+            statusCode: 403,
+            error: {
+              code: 'BAD_REQUEST_ERROR',
+              description: 'Access is forbidden (Basic dXNlcjpzZWNyZXQ= / rzp_live_SecretKey999)',
+              reason: 'access_denied',
+              source: 'business',
+              step: 'refund_initiation'
+            }
+          };
+        }
+      }
+    });
+    const gwForbidden = await executeGatewayRefund({
+      orderId: 'CFX-H4-ERR-META-01',
+      paymentId: 'pay_live_err_meta_01',
+      amountPaise: 100,
+      receipt: 'RFND-H4-META-01'
+    });
+    assert.strictEqual(gwForbidden.success, false);
+    assert.strictEqual(gwForbidden.status, 'FAILED');
+    assert.strictEqual(gwForbidden.httpStatusCode, 403);
+    assert.strictEqual(gwForbidden.errorCode, 'BAD_REQUEST_ERROR');
+    assert.strictEqual(gwForbidden.errorReason, 'access_denied');
+    assert.strictEqual(gwForbidden.errorSource, 'business');
+    assert.strictEqual(gwForbidden.errorStep, 'refund_initiation');
+    assert.ok(gwForbidden.errorDescription?.includes('http=403'));
+    assert.ok(gwForbidden.errorDescription?.includes('reason=access_denied'));
+    assert.ok(gwForbidden.errorDescription?.includes('source=business'));
+    assert.ok(gwForbidden.errorDescription?.includes('step=refund_initiation'));
+    assert.ok(!gwForbidden.errorDescription?.includes('dXNlcjpzZWNyZXQ='));
+    assert.ok(!gwForbidden.errorDescription?.includes('rzp_live_SecretKey999'));
+
+    // 6c: Reconciliation wording distinguishes FAILED refund attempt from uninitiated refund
+    const recFailedAttempt = reconcileOrderRecord(
+      {
+        id: 'CFX-H4-REC-FAIL',
+        machine_id: 'CFX-MC-01',
+        amount: 1,
+        captured_amount_paise: 100,
+        razorpay_payment_id: 'pay_rec_fail',
+        status: 'PAID',
+        dispense_status: 'EXPIRED',
+        refund_status: 'FAILED',
+        total_refunded_amount_paise: 0,
+        pending_refund_amount_paise: 0,
+        created_at: oldPaidIso,
+        updated_at: oldPaidIso
+      },
+      { refunds: [] }
+    );
+    assert.strictEqual(recFailedAttempt.discrepancy_reason, 'DISPENSE_FAILED_UNREFUNDED');
+    assert.ok(
+      !recFailedAttempt.details.includes('no refund has been initiated'),
+      'FAILED refund must NOT say no refund has been initiated'
+    );
+    assert.ok(recFailedAttempt.details.includes('a refund was attempted, but the payment gateway rejected the refund'));
+
+    const recUninitiated = reconcileOrderRecord(
+      {
+        id: 'CFX-H4-REC-NONE',
+        machine_id: 'CFX-MC-01',
+        amount: 1,
+        captured_amount_paise: 100,
+        razorpay_payment_id: 'pay_rec_none',
+        status: 'PAID',
+        dispense_status: 'EXPIRED',
+        refund_status: 'NONE',
+        total_refunded_amount_paise: 0,
+        pending_refund_amount_paise: 0,
+        created_at: oldPaidIso,
+        updated_at: oldPaidIso
+      },
+      { refunds: [] }
+    );
+    assert.ok(recUninitiated.details.includes('no refund has been initiated'));
+    console.log('   PASS: Fallback FAILED exclusion, gateway error metadata/redaction, and FAILED wording verified.');
 
     console.log('\nALL PHASE H.4 AUTOMATED REFUND PREPARATION TESTS PASSED SUCCESSFULLY!\n');
   } finally {

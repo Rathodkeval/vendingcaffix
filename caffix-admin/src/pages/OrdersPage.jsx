@@ -129,14 +129,23 @@ export function evaluateOrderReconciliation(o) {
     };
   }
 
-  const isFailed = dispenseStatus === 'FAILED' || orderStatus === 'FAILED';
+  const refundStatus = String(o.refund_status || 'NONE').toUpperCase();
+  const isExpired = dispenseStatus === 'EXPIRED';
+  const isFailed = dispenseStatus === 'FAILED' || isExpired || orderStatus === 'FAILED';
   const isPaid = (capturedPaise !== null && capturedPaise > 0) || Boolean(o.razorpay_payment_id);
   if (isFailed && isPaid && totalRefunded === 0 && pendingRefund === 0) {
+    const refundAttemptFailed = refundStatus === 'FAILED';
     return {
       result: 'DISCREPANCY',
-      reason: 'DISPENSE_FAILED_UNREFUNDED',
+      reason: isExpired ? 'DISPENSE_EXPIRED_UNREFUNDED' : 'DISPENSE_FAILED_UNREFUNDED',
       action: 'INITIATE_REFUND',
-      details: 'Dispense failed after payment was captured, but no refund has been initiated.'
+      details: refundAttemptFailed
+        ? isExpired
+          ? 'Order expired before dispensing after payment was captured; a refund was attempted, but the payment gateway rejected the refund.'
+          : 'Dispense failed after payment was captured; a refund was attempted, but the payment gateway rejected the refund.'
+        : isExpired
+          ? 'Order expired before dispensing after payment was captured, and no refund has been initiated.'
+          : 'Dispense failed after payment was captured, and no refund has been initiated.'
     };
   }
 
