@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import signal
 import threading
 import time
@@ -11,6 +12,16 @@ import serial
 import serial.tools.list_ports
 import firebase_admin
 from firebase_admin import credentials, firestore
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
 
 
 # =====================================================
@@ -84,19 +95,46 @@ PING_COMMAND = "PING"
 ARDUINO_RESPONSE = "CAFFIX_ARDUINO"
 
 
+ARDUINO_PING_TIMEOUT_SECONDS = 1.5
+ARDUINO_RECONNECT_RETRY_SECONDS = 2.0
+
+ARDUINO_ERROR_RESPONSES = {
+    "ERROR",
+    "NO_CUP",
+    "CUP_MISSING",
+    "NO_WATER",
+    "NO_MILK",
+    "FAIL",
+    "FAILED",
+    "ABORT",
+    "FAULT",
+}
+
+ARDUINO_ERROR_PREFIXES = (
+    "ERROR:",
+    "ERROR_",
+    "FAIL:",
+    "FAULT:",
+    "NO_CUP",
+)
+
 # =====================================================
 # GLOBAL CONTROLLER STATE
 # =====================================================
 
 arduino = None
+_arduino_responsive = False
+_last_arduino_probe_at = 0.0
 
 arduino_lock = threading.Lock()
 machine_lock = threading.Lock()
+dispense_lockout_lock = threading.Lock()
 
 processed_orders = set()
 orders_in_progress = set()
 order_state_lock = threading.Lock()
 
+arduino_reconnect_event = threading.Event()
 heartbeat_stop_event = threading.Event()
 heartbeat_thread = None
 heartbeat_token_lock = threading.Lock()
@@ -106,13 +144,513 @@ _heartbeat_jwt_cache = {
     "fetched_at": 0.0,
 }
 
+DEFAULT_POSIX_STATE_DIR = "/var/lib/caffix"
+
+_dispense_lockout_state = None
+_dispense_lockout_disk_checked = False
+_fatal_lockout_persistence_error = None
+lockout_persistence_failed_event = threading.Event()
+_controller_runtime_active = False
+_controller_runtime_lock_fd = None
+
+
+class LockoutPersistenceError(RuntimeError):
+    def __init__(
+        self,
+        message,
+        order_id=None,
+        failure_reason=None,
+        command_transmitted=True,
+    ):
+        super().__init__(message)
+        self.order_id = order_id
+        self.failure_reason = failure_reason
+        self.command_transmitted = command_transmitted
+
+
+def get_dispense_state_dir():
+    """
+    Returns the dedicated persistent directory for controller fault/lockout state.
+    Never uses a temporary directory (`/tmp` or system temp). On systemd Linux
+    hosts, uses `CAFFIX_STATE_DIR` or `STATE_DIRECTORY` (`/var/lib/caffix`).
+    """
+    override_dir = os.environ.get("CAFFIX_STATE_DIR", "").strip()
+    if override_dir:
+        return os.path.abspath(override_dir)
+
+    systemd_state_dir = os.environ.get("STATE_DIRECTORY", "").strip()
+    if systemd_state_dir:
+        first_dir = systemd_state_dir.split(":")[0].strip()
+        if first_dir:
+            return os.path.abspath(first_dir)
+
+    if os.name != "nt":
+        if os.path.isdir(DEFAULT_POSIX_STATE_DIR) or os.access("/var/lib", os.W_OK):
+            return DEFAULT_POSIX_STATE_DIR
+
+    return os.path.join(BASE_DIR, "state")
+
+
+def _get_machine_tag():
+    return re.sub(r"[^A-Za-z0-9._-]", "_", MACHINE_ID or "UNCONFIGURED")
+
+
+def get_dispense_lockout_file_path():
+    override = os.environ.get("CAFFIX_DISPENSE_LOCKOUT_FILE", "").strip()
+    if override:
+        return os.path.abspath(override)
+    return os.path.join(get_dispense_state_dir(), f"dispense_lockout_{_get_machine_tag()}.json")
+
+
+def get_dispense_inflight_file_path():
+    lockout_path = get_dispense_lockout_file_path()
+    parent_dir = os.path.dirname(os.path.abspath(lockout_path))
+    return os.path.join(parent_dir, f"dispense_inflight_{_get_machine_tag()}.json")
+
+
+def get_controller_runtime_lock_path():
+    lockout_path = get_dispense_lockout_file_path()
+    parent_dir = os.path.dirname(os.path.abspath(lockout_path))
+    return os.path.join(parent_dir, f"controller_runtime_{_get_machine_tag()}.lock")
+
+
+def _try_lock_fd_exclusive_nonblocking(fd):
+    if os.name != "nt" and fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    elif os.name == "nt" and msvcrt is not None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+
+
+def _unlock_fd(fd):
+    if os.name != "nt" and fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    elif os.name == "nt" and msvcrt is not None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+
+def acquire_controller_runtime_lock():
+    global _controller_runtime_active, _controller_runtime_lock_fd
+
+    if _controller_runtime_lock_fd is not None:
+        _controller_runtime_active = True
+        return
+
+    lock_path = get_controller_runtime_lock_path()
+    _ensure_state_parent_dir(lock_path)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            _try_lock_fd_exclusive_nonblocking(fd)
+        except OSError as err:
+            raise RuntimeError(
+                f"Another controller instance is already running (lock {lock_path}): {err}"
+            ) from err
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, f"{os.getpid()}\n".encode("ascii"))
+        os.fsync(fd)
+        _controller_runtime_lock_fd = fd
+        _controller_runtime_active = True
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
+def release_controller_runtime_lock():
+    global _controller_runtime_active, _controller_runtime_lock_fd
+
+    _controller_runtime_active = False
+    fd = _controller_runtime_lock_fd
+    _controller_runtime_lock_fd = None
+    if fd is not None:
+        try:
+            _unlock_fd(fd)
+        except Exception:
+            pass
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+
+
+def _assert_controller_stopped_for_recovery():
+    if _controller_runtime_active:
+        raise RuntimeError(
+            "Refusing to clear dispensing lockout while controller runtime is active. "
+            "Stop caffix-vending.service first."
+        )
+    if machine_lock.locked() or orders_in_progress:
+        raise RuntimeError(
+            "Refusing to clear dispensing lockout while a dispensing operation is active."
+        )
+    if heartbeat_thread is not None and heartbeat_thread.is_alive():
+        raise RuntimeError(
+            "Refusing to clear dispensing lockout while controller heartbeat thread is running. "
+            "Stop caffix-vending.service first."
+        )
+
+    lock_path = get_controller_runtime_lock_path()
+    if os.path.exists(lock_path):
+        fd = None
+        try:
+            fd = os.open(lock_path, os.O_RDWR, 0o600)
+        except FileNotFoundError:
+            return
+        try:
+            try:
+                _try_lock_fd_exclusive_nonblocking(fd)
+            except OSError as err:
+                raise RuntimeError(
+                    "Refusing to clear dispensing lockout while production controller process "
+                    f"is still running (active lock {lock_path}). Stop caffix-vending.service first."
+                ) from err
+            _unlock_fd(fd)
+        finally:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+
+
+def _fsync_directory(dir_path):
+    """
+    Flushes directory entries to durable storage on POSIX filesystems.
+    Raises immediately on POSIX if opening or fsyncing the directory fails.
+    """
+    if os.name == "nt":
+        return
+    dir_fd = os.open(dir_path, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _ensure_state_parent_dir(file_path):
+    parent_dir = os.path.dirname(os.path.abspath(file_path))
+    os.makedirs(parent_dir, mode=0o750, exist_ok=True)
+    if os.name != "nt":
+        try:
+            os.chmod(parent_dir, 0o750)
+        except OSError:
+            pass
+    return parent_dir
+
+
+def _write_file_durably(target_path, content_text):
+    parent_dir = _ensure_state_parent_dir(target_path)
+    tmp_path = f"{target_path}.tmp.{os.getpid()}"
+    fd = None
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fd = None
+            fh.write(content_text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, target_path)
+        if os.name != "nt":
+            os.chmod(target_path, 0o600)
+        _fsync_directory(parent_dir)
+    except Exception:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
+
+
+def _remove_file_durably(target_path):
+    if not os.path.exists(target_path):
+        return
+    os.remove(target_path)
+    _fsync_directory(os.path.dirname(os.path.abspath(target_path)))
+
+
+def verify_dispense_state_dir_writable():
+    """
+    Preflight durability check executed at controller startup before claiming
+    orders. Fails closed if the persistent state directory cannot be created,
+    written, flushed/fsynced, or replaced cleanly.
+    """
+    lockout_path = get_dispense_lockout_file_path()
+    probe_path = os.path.join(
+        os.path.dirname(os.path.abspath(lockout_path)),
+        f".lockout_probe_{os.getpid()}",
+    )
+    _write_file_durably(probe_path, "{}\n")
+    _remove_file_durably(probe_path)
+
+
+def _read_lockout_marker_file(file_path, default_reason):
+    if not os.path.exists(file_path):
+        return None
+    try:
+        with open(file_path, "r", encoding="utf-8") as fh:
+            loaded = json.load(fh)
+        if isinstance(loaded, dict) and loaded.get("active", True):
+            loaded["active"] = True
+            return loaded
+        # Non-dict or unexpected payload in marker file fails closed.
+        return {
+            "active": True,
+            "machine_id": MACHINE_ID,
+            "order_id": None,
+            "command": None,
+            "failure_stage": "DURING_DISPENSE",
+            "failure_reason": default_reason,
+            "latched_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as err:
+        return {
+            "active": True,
+            "machine_id": MACHINE_ID,
+            "order_id": None,
+            "command": None,
+            "failure_stage": "DURING_DISPENSE",
+            "failure_reason": f"{default_reason}:{type(err).__name__}",
+            "latched_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+
+def _load_dispense_lockout_unlocked():
+    global _dispense_lockout_state, _dispense_lockout_disk_checked
+
+    if _dispense_lockout_state is not None:
+        return _dispense_lockout_state if _dispense_lockout_state.get("active") else None
+
+    if _dispense_lockout_disk_checked:
+        return None
+
+    _dispense_lockout_disk_checked = True
+    lockout_path = get_dispense_lockout_file_path()
+    loaded = _read_lockout_marker_file(lockout_path, "LOCKOUT_FILE_READ_ERROR")
+    if loaded is not None:
+        _dispense_lockout_state = loaded
+        return _dispense_lockout_state
+
+    # If a pre-dispense WAL marker remained on disk after a crash or failed lockout write
+    # (when no local dispense is currently holding machine_lock), fail closed across restarts.
+    if not machine_lock.locked():
+        inflight_path = get_dispense_inflight_file_path()
+        inflight_loaded = _read_lockout_marker_file(
+            inflight_path, "UNFINISHED_DISPENSE_MARKER_ON_RESTART"
+        )
+        if inflight_loaded is not None:
+            inflight_loaded["failure_stage"] = "DURING_DISPENSE"
+            inflight_loaded["failure_reason"] = (
+                inflight_loaded.get("failure_reason")
+                or "UNFINISHED_DISPENSE_MARKER_ON_RESTART"
+            )
+            _dispense_lockout_state = inflight_loaded
+            return _dispense_lockout_state
+
+    return None
+
+
+def get_dispense_lockout_state():
+    with dispense_lockout_lock:
+        state = _load_dispense_lockout_unlocked()
+        return dict(state) if state else None
+
+
+def is_dispense_locked_out():
+    if lockout_persistence_failed_event.is_set():
+        return True
+    return get_dispense_lockout_state() is not None
+
+
+def _write_inflight_dispense_marker(order_id=None, command=None):
+    inflight_path = get_dispense_inflight_file_path()
+    payload = {
+        "active": True,
+        "persisted": True,
+        "machine_id": MACHINE_ID,
+        "order_id": order_id,
+        "command": command,
+        "failure_stage": "DURING_DISPENSE",
+        "failure_reason": "UNFINISHED_DISPENSE_MARKER_ON_RESTART",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _write_file_durably(
+        inflight_path,
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+    )
+
+
+def _clear_inflight_dispense_marker():
+    _remove_file_durably(get_dispense_inflight_file_path())
+
+
+def latch_dispense_lockout(
+    order_id=None,
+    command=None,
+    failure_reason=None,
+    failure_stage="DURING_DISPENSE",
+):
+    """
+    Latches a persistent machine-level dispensing fault after any uncertain
+    dispensing outcome (e.g. write timeout, partial write, post-command
+    disconnect, response timeout, or mid-dispense Arduino error).
+
+    Writes, flushes, fsyncs, and atomically replaces the persistent lockout
+    file before returning (and fsyncs the parent directory on POSIX). If
+    durable persistence fails, keeps the controller locked out in memory (and
+    preserves any on-disk pre-command `dispense_inflight` WAL marker so restarts
+    also remain locked out), halts heartbeats, sets `lockout_persistence_failed_event`,
+    and raises `LockoutPersistenceError`.
+    USB reconnection or PING success must NEVER clear this lockout automatically.
+    """
+    global _dispense_lockout_state, _dispense_lockout_disk_checked, _fatal_lockout_persistence_error
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    resolved_reason = (
+        failure_reason or "UNCERTAIN_DISPENSE_REQUIRES_PHYSICAL_INSPECTION"
+    )
+    resolved_stage = str(failure_stage or "DURING_DISPENSE").strip().upper()
+    with dispense_lockout_lock:
+        existing = _load_dispense_lockout_unlocked()
+        if existing is not None and existing.get("persisted", True):
+            return dict(existing)
+
+        state = {
+            "active": True,
+            "persisted": False,
+            "machine_id": MACHINE_ID,
+            "order_id": order_id,
+            "command": command,
+            "failure_stage": resolved_stage,
+            "failure_reason": resolved_reason,
+            "latched_at": now_iso,
+        }
+        _dispense_lockout_state = state
+        _dispense_lockout_disk_checked = True
+
+        lockout_path = get_dispense_lockout_file_path()
+        try:
+            persisted_payload = dict(state)
+            persisted_payload["persisted"] = True
+            _write_file_durably(
+                lockout_path,
+                json.dumps(persisted_payload, indent=2, sort_keys=True) + "\n",
+            )
+            state["persisted"] = True
+            _dispense_lockout_state = state
+            # Safe to remove pre-command WAL marker only after durable lockout file is on disk
+            _clear_inflight_dispense_marker()
+        except Exception as err:
+            state["persisted"] = False
+            state["persistence_failed"] = True
+            state["persistence_error"] = f"{type(err).__name__}: {err}"
+            _dispense_lockout_state = state
+            _fatal_lockout_persistence_error = state["persistence_error"]
+            lockout_persistence_failed_event.set()
+            heartbeat_stop_event.set()
+            print(
+                f"[LOCKOUT] FATAL: Could not durably persist lockout file {lockout_path} ({err}). "
+                "Failing closed: halting dispensing, claims, and ONLINE heartbeats."
+            )
+            raise LockoutPersistenceError(
+                f"Failed to durably persist machine dispensing lockout to {lockout_path}: {err}",
+                order_id=order_id,
+                failure_reason=resolved_reason,
+            ) from err
+
+    print(
+        f"[LOCKOUT] CRITICAL: Machine {MACHINE_ID or 'UNKNOWN'} latched dispensing fault "
+        f"(order={order_id}, reason={state['failure_reason']}, file={lockout_path}). "
+        "New claims/dispensing and ONLINE heartbeats are halted until controller stop, "
+        "physical inspection, and explicit recovery (`--clear-lockout --confirm-machine-safe`)."
+    )
+    return dict(state)
+
+
+def clear_dispense_lockout(confirm_machine_safe=False, operator=None, notes=None):
+    """
+    Explicitly clears the machine-level dispensing lockout ONLY when:
+    1. `confirm_machine_safe=True` after physical inspection confirms all
+       motors/pumps have stopped and the dispensing tray is safe.
+    2. The controller runtime is stopped and no dispensing operation is active.
+    3. All persistent fault files (`lockout_path`, `inflight_path`) are durably
+       removed BEFORE unlocking in-memory lockout state. If deletion fails,
+       the controller remains locked out in memory.
+    """
+    global _dispense_lockout_state, _dispense_lockout_disk_checked, _fatal_lockout_persistence_error
+
+    if confirm_machine_safe is not True:
+        raise ValueError(
+            "Refusing to clear machine dispensing lockout without "
+            "confirm_machine_safe=True after physical inspection."
+        )
+
+    _assert_controller_stopped_for_recovery()
+
+    with dispense_lockout_lock:
+        previous = _load_dispense_lockout_unlocked()
+        previous_copy = dict(previous) if previous else None
+        lockout_path = get_dispense_lockout_file_path()
+        inflight_path = get_dispense_inflight_file_path()
+        try:
+            _remove_file_durably(lockout_path)
+            _remove_file_durably(inflight_path)
+        except Exception as err:
+            raise RuntimeError(
+                f"Failed to remove dispensing lockout state files ({lockout_path} / {inflight_path}): {err}"
+            ) from err
+
+        # Only unlock in-memory state AFTER disk deletion + directory fsync succeed
+        _dispense_lockout_state = None
+        _dispense_lockout_disk_checked = False
+        _fatal_lockout_persistence_error = None
+        lockout_persistence_failed_event.clear()
+
+    if previous_copy is not None:
+        print(
+            f"[LOCKOUT] Cleared dispensing lockout for machine {MACHINE_ID or previous_copy.get('machine_id') or 'UNKNOWN'} "
+            f"(operator={operator or 'unspecified'}, notes={notes or 'physical inspection confirmed safe'})."
+        )
+    return previous_copy
+
+
+def is_arduino_error_message(message, error_messages=None):
+    if not message or not isinstance(message, str):
+        return False
+    upper = message.strip().upper()
+    if not upper:
+        return False
+    allowed = ARDUINO_ERROR_RESPONSES if error_messages is None else {
+        str(item).strip().upper() for item in error_messages if item
+    }
+    if upper in allowed:
+        return True
+    return upper.startswith(ARDUINO_ERROR_PREFIXES)
+
+
+def schedule_arduino_reconnect():
+    arduino_reconnect_event.set()
+
 
 # =====================================================
 # SERIAL HELPERS
 # =====================================================
 
 def close_serial():
-    global arduino
+    """
+    Closes and clears the active Arduino serial handle.
+    Callers must hold `arduino_lock` (or execute during single-threaded shutdown).
+    """
+    global arduino, _arduino_responsive
 
     if arduino is not None:
         try:
@@ -122,13 +660,14 @@ def close_serial():
             pass
 
     arduino = None
+    _arduino_responsive = False
 
 
 # =====================================================
 # READ SERIAL LINES
 # =====================================================
 
-def read_serial_lines(ser, duration=1.5):
+def read_serial_lines(ser, duration=1.5, stop_on=None):
     lines = []
 
     end_time = time.monotonic() + duration
@@ -144,6 +683,8 @@ def read_serial_lines(ser, duration=1.5):
 
                 if line:
                     lines.append(line)
+                    if stop_on and line in stop_on:
+                        break
             else:
                 time.sleep(0.05)
 
@@ -151,6 +692,293 @@ def read_serial_lines(ser, duration=1.5):
             break
 
     return lines
+
+
+ARDUINO_USB_VID = 0x2341
+ARDUINO_GIGA_PIDS = {0x0266, 0x0466, 0x0666}
+ARDUINO_BOOTLOADER_PIDS = {0x0366}
+
+# Explicit exclusion list for cellular/GNSS modems (including SIMCom SIM7600 1E0E:9001/9011)
+# and legacy hardware UARTs so PING is never transmitted to modem or unrelated ports.
+EXCLUDED_MODEM_USB_VIDS = {0x1E0E, 0x05C6}
+EXCLUDED_SERIAL_PORT_KEYWORDS = (
+    "sim7600",
+    "simcom",
+    "simtech",
+    "qualcomm",
+    "modem",
+    "nmea",
+    "wwan",
+    "diag",
+    "at port",
+)
+
+
+def _port_metadata_text(port):
+    parts = [
+        getattr(port, "device", "") or "",
+        getattr(port, "description", "") or "",
+        getattr(port, "manufacturer", "") or "",
+        getattr(port, "product", "") or "",
+        getattr(port, "interface", "") or "",
+        getattr(port, "hwid", "") or "",
+    ]
+    return " ".join(str(p) for p in parts if p).lower()
+
+
+def _is_excluded_serial_port(port):
+    device = str(getattr(port, "device", "") or "").strip()
+    device_lower = device.lower()
+    if device_lower.startswith("/dev/ttys") or device_lower.startswith("/dev/ttyama"):
+        return True
+
+    vid = getattr(port, "vid", None)
+    if isinstance(vid, int) and vid in EXCLUDED_MODEM_USB_VIDS:
+        return True
+
+    metadata = _port_metadata_text(port)
+    for kw in EXCLUDED_SERIAL_PORT_KEYWORDS:
+        if kw in metadata:
+            return True
+    return False
+
+
+def _is_verified_arduino_giga_port(port):
+    if _is_excluded_serial_port(port):
+        return False
+
+    device = str(getattr(port, "device", "") or "").strip()
+    vid = getattr(port, "vid", None)
+    pid = getattr(port, "pid", None)
+    metadata = _port_metadata_text(port)
+
+    # 1. Hardware USB VID/PID match for Arduino SA / GIGA R1
+    if isinstance(vid, int):
+        if vid != ARDUINO_USB_VID:
+            return False
+        if isinstance(pid, int) and pid in ARDUINO_BOOTLOADER_PIDS:
+            return False
+        return True
+
+    # 2. Verified stable Linux device path (/dev/serial/by-id/*Arduino* or udev alias)
+    device_lower = device.lower()
+    if (
+        device_lower.startswith("/dev/serial/by-id/")
+        and any(tok in device_lower for tok in ("arduino", "giga"))
+    ):
+        return True
+
+    # 3. Descriptor metadata when vid is unavailable (e.g. unit test mocks or custom symlinks)
+    if any(tok in metadata for tok in ("arduino", "giga")):
+        return True
+
+    return False
+
+
+def _port_priority_key(port):
+    pid = getattr(port, "pid", None)
+    device = str(getattr(port, "device", "") or "")
+    return (
+        0 if (isinstance(pid, int) and pid in ARDUINO_GIGA_PIDS) else 1,
+        0 if "/dev/serial/by-id/" in device else (1 if device.startswith("/dev/ttyACM") else 2),
+        device,
+    )
+
+
+def _list_ordered_serial_ports():
+    configured_port = os.environ.get("CAFFIX_ARDUINO_PORT", "").strip()
+    all_ports = list(serial.tools.list_ports.comports())
+
+    if configured_port:
+        real_configured = os.path.realpath(configured_port)
+        matching = [
+            p for p in all_ports
+            if str(getattr(p, "device", "") or "") in {configured_port, real_configured}
+        ]
+        if matching:
+            return [p for p in matching if not _is_excluded_serial_port(p)]
+        pseudo = serial.tools.list_ports_common.ListPortInfo(configured_port) if hasattr(serial.tools, "list_ports_common") else None
+        if pseudo is None:
+            from types import SimpleNamespace
+            pseudo = SimpleNamespace(device=configured_port, description="Configured CAFFIX Arduino Port")
+        if _is_excluded_serial_port(pseudo):
+            return []
+        return [pseudo]
+
+    verified_ports = [port for port in all_ports if _is_verified_arduino_giga_port(port)]
+    verified_ports.sort(key=_port_priority_key)
+    return verified_ports
+
+
+def try_connect_arduino_once():
+    """
+    Performs a single scan pass over available serial ports, sending `PING` and
+    waiting for `CAFFIX_ARDUINO`. Returns the open Serial instance on success
+    or None if no responsive Arduino was found.
+    """
+    global arduino, _arduino_responsive, _last_arduino_probe_at
+
+    ordered_ports = _list_ordered_serial_ports()
+    if not ordered_ports:
+        return None
+
+    for port in ordered_ports:
+        ser = None
+        try:
+            print(
+                f"Checking {port.device} "
+                f"({port.description})"
+            )
+            ser = serial.Serial(
+                port=port.device,
+                baudrate=BAUDRATE,
+                timeout=SERIAL_TIMEOUT,
+                write_timeout=WRITE_TIMEOUT,
+            )
+
+            # Allow Arduino GIGA R1 USB CDC reset before handshake
+            time.sleep(2)
+
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+
+            ser.write((PING_COMMAND + "\n").encode("ascii"))
+            ser.flush()
+
+            responses = read_serial_lines(
+                ser,
+                duration=ARDUINO_PING_TIMEOUT_SECONDS,
+                stop_on={ARDUINO_RESPONSE},
+            )
+            print(
+                f"Responses from "
+                f"{port.device}: {responses}"
+            )
+
+            if ARDUINO_RESPONSE in responses:
+                print("\n===================================")
+                print(" CAFFIX ARDUINO GIGA R1 FOUND")
+                print(f" Port: {port.device}")
+                print("===================================\n")
+
+                with arduino_lock:
+                    if arduino is not None and arduino is not ser:
+                        try:
+                            if arduino.is_open:
+                                arduino.close()
+                        except Exception:
+                            pass
+                    arduino = ser
+                    _arduino_responsive = True
+                    _last_arduino_probe_at = time.monotonic()
+                arduino_reconnect_event.clear()
+                return ser
+
+            print(f"Not CAFFIX Arduino: {port.device}")
+            ser.close()
+        except Exception as error:
+            print(f"{port.device} failed: {error}")
+            if ser is not None:
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+
+    return None
+
+
+def reconcile_arduino_connection_once():
+    """
+    Attempts one non-blocking reconnection cycle if Arduino is disconnected or
+    unresponsive, without disturbing an in-progress dispensing operation.
+    Closes any stale serial handle under `arduino_lock`, releases `arduino_lock`,
+    and only then runs `try_connect_arduino_once()` so `arduino_lock` is never
+    acquired recursively during port scan and PING handshake.
+    """
+    if not machine_lock.acquire(blocking=False):
+        return arduino
+
+    try:
+        with arduino_lock:
+            if (
+                arduino is not None
+                and getattr(arduino, "is_open", False)
+                and _arduino_responsive
+            ):
+                return arduino
+            close_serial()
+        return try_connect_arduino_once()
+    finally:
+        machine_lock.release()
+
+
+def probe_arduino_responsive(timeout=ARDUINO_PING_TIMEOUT_SECONDS):
+    """
+    Actively verifies that the connected Arduino responds to `PING` with
+    `CAFFIX_ARDUINO`. If probing fails or times out, closes the dead serial
+    handle and schedules automatic reconnection.
+    """
+    global _arduino_responsive, _last_arduino_probe_at
+
+    with arduino_lock:
+        if arduino is None or not getattr(arduino, "is_open", False):
+            close_serial()
+            schedule_arduino_reconnect()
+            return False
+
+        try:
+            if hasattr(arduino, "reset_input_buffer"):
+                arduino.reset_input_buffer()
+            arduino.write((PING_COMMAND + "\n").encode("ascii"))
+            arduino.flush()
+            responses = read_serial_lines(
+                arduino,
+                duration=timeout,
+                stop_on={ARDUINO_RESPONSE},
+            )
+            if ARDUINO_RESPONSE in responses:
+                _arduino_responsive = True
+                _last_arduino_probe_at = time.monotonic()
+                return True
+        except Exception as error:
+            print(f"Arduino PING probe failed: {error}")
+
+        close_serial()
+        schedule_arduino_reconnect()
+        return False
+
+
+def is_arduino_ready(probe_when_idle=True, ping_timeout=ARDUINO_PING_TIMEOUT_SECONDS):
+    """
+    Returns True ONLY when the Arduino serial port is open and verified responsive.
+    While a dispensing command holds `machine_lock`, reports current serial open/ready
+    state without interfering with the active dispensing serial stream.
+    """
+    if arduino is None or not getattr(arduino, "is_open", False):
+        schedule_arduino_reconnect()
+        return False
+
+    if not probe_when_idle:
+        return bool(_arduino_responsive)
+
+    if not machine_lock.acquire(blocking=False):
+        return bool(
+            arduino is not None
+            and getattr(arduino, "is_open", False)
+            and _arduino_responsive
+        )
+
+    try:
+        with arduino_lock:
+            if arduino is None or not getattr(arduino, "is_open", False):
+                close_serial()
+                schedule_arduino_reconnect()
+                return False
+            if not _arduino_responsive:
+                return False
+        return probe_arduino_responsive(timeout=ping_timeout)
+    finally:
+        machine_lock.release()
 
 
 # =====================================================
@@ -166,151 +994,16 @@ def connect_arduino():
     )
 
     while True:
-
-        ports = list(
-            serial.tools.list_ports.comports()
-        )
-
-        if not ports:
-
-            print(
-                "No serial ports found. "
-                "Retrying in 2 seconds..."
-            )
-
-            time.sleep(2)
-            continue
-
-        # ---------------------------------
-        # PRIORITIZE ARDUINO ACM PORTS
-        # ---------------------------------
-
-        arduino_ports = [
-            port for port in ports
-            if port.device.startswith("/dev/ttyACM")
-        ]
-
-        other_ports = [
-            port for port in ports
-            if not port.device.startswith("/dev/ttyACM")
-        ]
-
-        # Arduino ports will be checked first
-        ordered_ports = arduino_ports + other_ports
-
-        # ---------------------------------
-        # CHECK SERIAL PORTS
-        # ---------------------------------
-
-        for port in ordered_ports:
-
-            ser = None
-
-            try:
-
-                print(
-                    f"Checking {port.device} "
-                    f"({port.description})"
-                )
-
-                # ---------------------------------
-                # OPEN SERIAL PORT
-                # ---------------------------------
-
-                ser = serial.Serial(
-                    port=port.device,
-                    baudrate=BAUDRATE,
-                    timeout=SERIAL_TIMEOUT,
-                    write_timeout=WRITE_TIMEOUT
-                )
-
-                # ---------------------------------
-                # RESET DELAY
-                # ---------------------------------
-
-                time.sleep(2)
-
-                ser.reset_input_buffer()
-                ser.reset_output_buffer()
-
-                # ---------------------------------
-                # SEND PING
-                # ---------------------------------
-
-                ser.write(
-                    (
-                        PING_COMMAND + "\n"
-                    ).encode("ascii")
-                )
-
-                ser.flush()
-
-                # ---------------------------------
-                # READ RESPONSE
-                # ---------------------------------
-
-                responses = read_serial_lines(
-                    ser,
-                    duration=1.5
-                )
-
-                print(
-                    f"Responses from "
-                    f"{port.device}: {responses}"
-                )
-
-                # ---------------------------------
-                # IDENTIFY ARDUINO
-                # ---------------------------------
-
-                if ARDUINO_RESPONSE in responses:
-
-                    print(
-                        "\n==================================="
-                    )
-
-                    print(
-                        " CAFFIX ARDUINO GIGA R1 FOUND"
-                    )
-
-                    print(
-                        f" Port: {port.device}"
-                    )
-
-                    print(
-                        "===================================\n"
-                    )
-
-                    arduino = ser
-
-                    return ser
-
-                print(
-                    f"Not CAFFIX Arduino: {port.device}"
-                )
-
-                ser.close()
-
-            except Exception as error:
-
-                print(
-                    f"{port.device} failed: {error}"
-                )
-
-                if ser is not None:
-
-                    try:
-                        ser.close()
-
-                    except Exception:
-                        pass
+        found = try_connect_arduino_once()
+        if found is not None:
+            return found
 
         print(
             "\nArduino not found. "
             "Retrying in 2 seconds...\n"
         )
 
-        time.sleep(2)
+        time.sleep(ARDUINO_RECONNECT_RETRY_SECONDS)
 
 
 # =====================================================
@@ -320,7 +1013,7 @@ def connect_arduino():
 def ensure_connection():
     global arduino
 
-    if arduino is None or not arduino.is_open:
+    if arduino is None or not getattr(arduino, "is_open", False) or not _arduino_responsive:
         arduino = connect_arduino()
 
     return arduino
@@ -331,21 +1024,23 @@ def ensure_connection():
 # =====================================================
 
 def send_raw_command(command):
-    global arduino
-
     while True:
 
         try:
 
             ensure_connection()
 
-            arduino.write(
-                (
-                    command.strip() + "\n"
-                ).encode("ascii")
-            )
+            with arduino_lock:
+                if arduino is None or not getattr(arduino, "is_open", False):
+                    raise RuntimeError("Arduino serial handle is not open")
 
-            arduino.flush()
+                arduino.write(
+                    (
+                        command.strip() + "\n"
+                    ).encode("ascii")
+                )
+
+                arduino.flush()
 
             return
 
@@ -355,7 +1050,8 @@ def send_raw_command(command):
                 f"Arduino write error: {error}"
             )
 
-            close_serial()
+            with arduino_lock:
+                close_serial()
 
             print(
                 "Reconnecting to Arduino..."
@@ -370,7 +1066,8 @@ def send_raw_command(command):
 
 def wait_for_message(
     target_messages,
-    timeout=None
+    timeout=None,
+    error_messages=None,
 ):
 
     global arduino
@@ -407,9 +1104,10 @@ def wait_for_message(
 
             if (
                 arduino is None
-                or not arduino.is_open
+                or not getattr(arduino, "is_open", False)
             ):
-
+                close_serial()
+                schedule_arduino_reconnect()
                 return None
 
             raw = arduino.readline()
@@ -436,12 +1134,22 @@ def wait_for_message(
             if message in target_messages:
                 return message
 
+            # ---------------------------------
+            # CHECK IMMEDIATE ARDUINO ERROR
+            # ---------------------------------
+
+            if error_messages is not None and is_arduino_error_message(
+                message, error_messages=error_messages
+            ):
+                return message
+
         except Exception as error:
 
             print(
                 f"Serial read error: {error}"
             )
-
+            close_serial()
+            schedule_arduino_reconnect()
             return None
 
 
@@ -478,16 +1186,16 @@ def send_to_arduino(
             "=================================\n"
         )
 
+        # ---------------------------------
+        # SEND COMMAND (ensure_connection runs outside arduino_lock)
+        # ---------------------------------
+
+        send_raw_command(command)
+
+        if expected is None:
+            return True
+
         with arduino_lock:
-
-            # ---------------------------------
-            # SEND COMMAND
-            # ---------------------------------
-
-            send_raw_command(command)
-
-            if expected is None:
-                return True
 
             # ---------------------------------
             # WAIT FOR RESPONSE
@@ -688,6 +1396,7 @@ def heartbeat_loop(
     api_base=None,
     interval_seconds=None,
     timeout=None,
+    require_arduino=True,
 ):
     resolved_interval = (
         HEARTBEAT_INTERVAL_SECONDS if interval_seconds is None else interval_seconds
@@ -697,8 +1406,46 @@ def heartbeat_loop(
         machine_id, kiosk_token, api_base
     )
     consecutive_failures = 0
+    arduino_unavailable_logged = False
+    lockout_logged = False
 
     while not stop_event.is_set():
+        lockout_state = get_dispense_lockout_state()
+        if lockout_state is not None:
+            if not lockout_logged:
+                print(
+                    f"[Heartbeat] Machine {target_machine_id} is in DISPENSE LOCKOUT "
+                    f"(reason={lockout_state.get('failure_reason')}); suppressing ONLINE heartbeat "
+                    "until physical inspection and explicit recovery."
+                )
+                lockout_logged = True
+            if stop_event.wait(resolved_interval):
+                break
+            continue
+
+        if lockout_logged:
+            print(
+                f"[Heartbeat] Dispense lockout cleared for {target_machine_id}."
+            )
+            lockout_logged = False
+
+        if require_arduino and not is_arduino_ready(probe_when_idle=True):
+            if not arduino_unavailable_logged:
+                print(
+                    f"[Heartbeat] Arduino not connected/responsive for {target_machine_id}; "
+                    "suppressing ONLINE heartbeat until Arduino is ready."
+                )
+                arduino_unavailable_logged = True
+            if stop_event.wait(resolved_interval):
+                break
+            continue
+
+        if arduino_unavailable_logged:
+            print(
+                f"[Heartbeat] Arduino ready for {target_machine_id}; resuming ONLINE heartbeat."
+            )
+            arduino_unavailable_logged = False
+
         try:
             response = send_heartbeat_once(
                 machine_id=machine_id,
@@ -741,6 +1488,7 @@ def start_heartbeat_thread(
     api_base=None,
     interval_seconds=None,
     timeout=None,
+    require_arduino=True,
 ):
     global heartbeat_thread
 
@@ -771,6 +1519,7 @@ def start_heartbeat_thread(
             "api_base": base_url,
             "interval_seconds": resolved_interval,
             "timeout": resolved_timeout,
+            "require_arduino": require_arduino,
         },
         name=f"caffix-heartbeat-{target_machine_id}",
         daemon=True,
@@ -1011,6 +1760,14 @@ def claim_order_in_firestore(
     if not order_id or not MACHINE_ID:
         return None
 
+    lockout_state = get_dispense_lockout_state()
+    if lockout_state is not None:
+        print(
+            f"[LOCKOUT] Refusing to claim order {order_id} while dispensing lockout is active "
+            f"(reason={lockout_state.get('failure_reason')})."
+        )
+        return None
+
     resolved_doc_ref = doc_ref
     resolved_client = client
     if resolved_client is None and resolved_doc_ref is not None:
@@ -1226,24 +1983,40 @@ def record_dispense_outcome_in_firestore(
     return post_updates
 
 
-def execute_arduino_dispense_for_order(command, timeout=180):
+def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
     """
     Executes the Arduino GIGA R1 dispense command while strictly classifying serial outcomes:
     1. Arduino disconnected before any write attempt ->
-       PRE_DISPENSE / NOT_DISPENSED (dispense_started_at = None, claimed_at = None)
+       PRE_DISPENSE / NOT_DISPENSED (dispense_started_at = None, claimed_at = None; no lockout)
     2. Serial write returns 0 bytes without exception and zero transmission is reliably established ->
-       PRE_DISPENSE / NOT_DISPENSED (dispense_started_at = None, claimed_at = None)
+       PRE_DISPENSE / NOT_DISPENSED (dispense_started_at = None, claimed_at = None; no lockout)
     3. Partial transmission (0 < written < expected_bytes), write timeout (SerialTimeoutException),
        any write/flush exception, or any uncertainty about bytes reaching Arduino ->
-       DURING_DISPENSE / UNCERTAIN (preserves dispense_started_at, blocks auto-refund)
-    4. Full command transmission followed by missing DONE (timeout or disconnect) ->
-       DURING_DISPENSE / UNCERTAIN (preserves dispense_started_at, blocks auto-refund)
+       DURING_DISPENSE / UNCERTAIN (preserves dispense_started_at, blocks auto-refund, LATCHES LOCKOUT)
+    4. Full command transmission followed by missing DONE (timeout, disconnect, or Arduino error) ->
+       DURING_DISPENSE / UNCERTAIN (preserves dispense_started_at, blocks auto-refund, LATCHES LOCKOUT)
     5. Full command transmission and Arduino returns DONE ->
-       DISPENSED (dispensed = True, dispense_outcome = DISPENSED)
+       DISPENSED (dispensed = True, dispense_outcome = DISPENSED; no lockout)
+
+    If the machine-level dispensing lockout is already active, refuses to transmit any
+    command to Arduino immediately.
 
     If `send_to_arduino` has been patched/replaced in unit tests, delegates to `send_to_arduino`
-    and treats `False` as `DURING_DISPENSE` (`UNCERTAIN`) by default.
+    and treats `False` as `DURING_DISPENSE` (`UNCERTAIN`) by default (and latches lockout).
     """
+    if is_dispense_locked_out():
+        print(
+            f"[LOCKOUT] Refusing serial command {command!r} for order {order_id}: "
+            "machine-level dispensing lockout is active."
+        )
+        return {
+            "success": False,
+            "command_transmitted": False,
+            "bytes_written": 0,
+            "failure_stage": "LOCKED_OUT",
+            "failure_reason": "MACHINE_DISPENSE_LOCKOUT_ACTIVE",
+        }
+
     if send_to_arduino is not _DEFAULT_SEND_TO_ARDUINO:
         ok = bool(send_to_arduino(command, expected="DONE", timeout=timeout))
         if ok:
@@ -1254,15 +2027,31 @@ def execute_arduino_dispense_for_order(command, timeout=180):
                 "failure_stage": None,
                 "failure_reason": None,
             }
+        reason = "ARDUINO_TIMEOUT_OR_SERIAL_DISCONNECT_DURING_DISPENSE"
+        latch_dispense_lockout(
+            order_id=order_id,
+            command=command,
+            failure_reason=reason,
+            failure_stage="DURING_DISPENSE",
+        )
         return {
             "success": False,
             "command_transmitted": True,
             "bytes_written": None,
             "failure_stage": "DURING_DISPENSE",
-            "failure_reason": "ARDUINO_TIMEOUT_OR_SERIAL_DISCONNECT_DURING_DISPENSE",
+            "failure_reason": reason,
         }
 
     with machine_lock:
+        if is_dispense_locked_out():
+            return {
+                "success": False,
+                "command_transmitted": False,
+                "bytes_written": 0,
+                "failure_stage": "LOCKED_OUT",
+                "failure_reason": "MACHINE_DISPENSE_LOCKOUT_ACTIVE",
+            }
+
         print("\n=================================")
         print("Sending Command ->", command)
         print("=================================\n")
@@ -1271,6 +2060,8 @@ def execute_arduino_dispense_for_order(command, timeout=180):
             # Rule 1: Arduino disconnected before any write attempt
             if arduino is None or not getattr(arduino, "is_open", False):
                 print("Arduino disconnected before command transmission.")
+                close_serial()
+                schedule_arduino_reconnect()
                 return {
                     "success": False,
                     "command_transmitted": False,
@@ -1278,6 +2069,53 @@ def execute_arduino_dispense_for_order(command, timeout=180):
                     "failure_stage": "PRE_DISPENSE",
                     "failure_reason": "ARDUINO_DISCONNECTED_BEFORE_COMMAND",
                 }
+
+            # Clear any stale serial RX bytes before writing the new dispense command
+            if hasattr(arduino, "reset_input_buffer"):
+                try:
+                    arduino.reset_input_buffer()
+                except Exception as buf_err:
+                    print(
+                        f"Arduino reset_input_buffer error before command transmission: {buf_err}"
+                    )
+                    close_serial()
+                    schedule_arduino_reconnect()
+                    return {
+                        "success": False,
+                        "command_transmitted": False,
+                        "bytes_written": 0,
+                        "failure_stage": "PRE_DISPENSE",
+                        "failure_reason": "ARDUINO_DISCONNECTED_BEFORE_COMMAND",
+                    }
+
+            # Durable write-ahead marker BEFORE transmitting any command byte to Arduino.
+            # If writing this pre-command marker fails, fail closed BEFORE arduino.write().
+            try:
+                _write_inflight_dispense_marker(order_id=order_id, command=command)
+            except Exception as wal_err:
+                with dispense_lockout_lock:
+                    _dispense_lockout_state = {
+                        "active": True,
+                        "persisted": False,
+                        "persistence_failed": True,
+                        "persistence_error": f"{type(wal_err).__name__}: {wal_err}",
+                        "machine_id": MACHINE_ID,
+                        "order_id": order_id,
+                        "command": command,
+                        "failure_stage": "PRE_DISPENSE",
+                        "failure_reason": "LOCKOUT_PRE_WRITE_PERSISTENCE_FAILED",
+                        "latched_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    _dispense_lockout_disk_checked = True
+                    _fatal_lockout_persistence_error = f"{type(wal_err).__name__}: {wal_err}"
+                    lockout_persistence_failed_event.set()
+                    heartbeat_stop_event.set()
+                raise LockoutPersistenceError(
+                    f"Refusing dispense because durable state storage failed before write: {wal_err}",
+                    order_id=order_id,
+                    failure_reason="LOCKOUT_PRE_WRITE_PERSISTENCE_FAILED",
+                    command_transmitted=False,
+                ) from wal_err
 
             payload = (command.strip() + "\n").encode("ascii")
             expected_bytes = len(payload)
@@ -1289,34 +2127,58 @@ def execute_arduino_dispense_for_order(command, timeout=180):
                 # Rule 3: Write timeout -> uncertain whether bytes reached Arduino
                 print(f"Arduino serial write timeout (uncertain transmission): {timeout_err}")
                 close_serial()
+                schedule_arduino_reconnect()
+                reason = "SERIAL_WRITE_TIMEOUT_UNCERTAIN"
+                latch_dispense_lockout(
+                    order_id=order_id,
+                    command=command,
+                    failure_reason=reason,
+                    failure_stage="DURING_DISPENSE",
+                )
                 return {
                     "success": False,
                     "command_transmitted": True,
                     "bytes_written": None,
                     "failure_stage": "DURING_DISPENSE",
-                    "failure_reason": "SERIAL_WRITE_TIMEOUT_UNCERTAIN",
+                    "failure_reason": reason,
                 }
             except TimeoutError as timeout_err:
                 print(f"Arduino serial write timeout (uncertain transmission): {timeout_err}")
                 close_serial()
+                schedule_arduino_reconnect()
+                reason = "SERIAL_WRITE_TIMEOUT_UNCERTAIN"
+                latch_dispense_lockout(
+                    order_id=order_id,
+                    command=command,
+                    failure_reason=reason,
+                    failure_stage="DURING_DISPENSE",
+                )
                 return {
                     "success": False,
                     "command_transmitted": True,
                     "bytes_written": None,
                     "failure_stage": "DURING_DISPENSE",
-                    "failure_reason": "SERIAL_WRITE_TIMEOUT_UNCERTAIN",
+                    "failure_reason": reason,
                 }
             except Exception as write_err:
                 # Rule 3: Any write exception may have transmitted some bytes before raising ->
                 # NEVER classify as PRE_DISPENSE; always classify as DURING_DISPENSE / UNCERTAIN.
                 print(f"Arduino write exception (uncertain transmission): {write_err}")
                 close_serial()
+                schedule_arduino_reconnect()
+                reason = "SERIAL_WRITE_EXCEPTION_UNCERTAIN"
+                latch_dispense_lockout(
+                    order_id=order_id,
+                    command=command,
+                    failure_reason=reason,
+                    failure_stage="DURING_DISPENSE",
+                )
                 return {
                     "success": False,
                     "command_transmitted": True,
                     "bytes_written": None,
                     "failure_stage": "DURING_DISPENSE",
-                    "failure_reason": "SERIAL_WRITE_EXCEPTION_UNCERTAIN",
+                    "failure_reason": reason,
                 }
 
             is_exact_int = isinstance(written, int) and not isinstance(written, bool)
@@ -1331,6 +2193,11 @@ def execute_arduino_dispense_for_order(command, timeout=180):
             if is_exact_int and written == 0 and not has_buffered_tx:
                 print("Arduino serial write returned 0 bytes (zero transmission established).")
                 close_serial()
+                schedule_arduino_reconnect()
+                try:
+                    _clear_inflight_dispense_marker()
+                except Exception:
+                    pass
                 return {
                     "success": False,
                     "command_transmitted": False,
@@ -1354,6 +2221,13 @@ def execute_arduino_dispense_for_order(command, timeout=180):
                         "marking DURING_DISPENSE / UNCERTAIN."
                     )
                 close_serial()
+                schedule_arduino_reconnect()
+                latch_dispense_lockout(
+                    order_id=order_id,
+                    command=command,
+                    failure_reason=reason,
+                    failure_stage="DURING_DISPENSE",
+                )
                 return {
                     "success": False,
                     "command_transmitted": True,
@@ -1369,17 +2243,34 @@ def execute_arduino_dispense_for_order(command, timeout=180):
             except Exception as flush_err:
                 print(f"Arduino flush error after command write: {flush_err}")
                 close_serial()
+                schedule_arduino_reconnect()
+                reason = "ARDUINO_DISCONNECTED_AFTER_COMMAND_TRANSMISSION"
+                latch_dispense_lockout(
+                    order_id=order_id,
+                    command=command,
+                    failure_reason=reason,
+                    failure_stage="DURING_DISPENSE",
+                )
                 return {
                     "success": False,
                     "command_transmitted": True,
                     "bytes_written": written,
                     "failure_stage": "DURING_DISPENSE",
-                    "failure_reason": "ARDUINO_DISCONNECTED_AFTER_COMMAND_TRANSMISSION",
+                    "failure_reason": reason,
                 }
 
-            # Rule 5: Arduino returns DONE
-            result = wait_for_message("DONE", timeout=timeout)
+            # Rule 5: Wait for DONE or immediate Arduino error (ERROR, NO_CUP, etc.)
+            result = wait_for_message(
+                "DONE",
+                timeout=timeout,
+                error_messages=ARDUINO_ERROR_RESPONSES,
+            )
             if result == "DONE":
+                try:
+                    _clear_inflight_dispense_marker()
+                except Exception as clear_err:
+                    # DONE was received so Firestore still records DISPENSED; any leftover WAL fails closed on restart.
+                    print(f"[LOCKOUT] Warning: failed to remove in-flight marker after DONE: {clear_err}")
                 print(f"Command completed successfully: {command}")
                 return {
                     "success": True,
@@ -1389,13 +2280,39 @@ def execute_arduino_dispense_for_order(command, timeout=180):
                     "failure_reason": None,
                 }
 
+            if result and is_arduino_error_message(result):
+                sanitized = re.sub(r"[^A-Z0-9]+", "_", result.strip().upper()).strip("_") or "ERROR"
+                reason = f"ARDUINO_ERROR_{sanitized}"
+                print(f"Arduino reported immediate error ({result}); aborting wait cleanly.")
+                latch_dispense_lockout(
+                    order_id=order_id,
+                    command=command,
+                    failure_reason=reason,
+                    failure_stage="DURING_DISPENSE",
+                )
+                return {
+                    "success": False,
+                    "command_transmitted": True,
+                    "bytes_written": written,
+                    "failure_stage": "DURING_DISPENSE",
+                    "failure_reason": reason,
+                }
+
             # Rule 4: Full command transmission followed by missing DONE
             if arduino is None or not getattr(arduino, "is_open", False):
+                close_serial()
+                schedule_arduino_reconnect()
                 reason = "ARDUINO_DISCONNECTED_AFTER_COMMAND_TRANSMISSION"
             else:
                 reason = "ARDUINO_RESPONSE_TIMEOUT_AFTER_COMMAND"
 
             print(f"Arduino did not confirm DONE ({reason}).")
+            latch_dispense_lockout(
+                order_id=order_id,
+                command=command,
+                failure_reason=reason,
+                failure_stage="DURING_DISPENSE",
+            )
             return {
                 "success": False,
                 "command_transmitted": True,
@@ -1511,6 +2428,14 @@ def process_firestore_change(change):
     order_id = change.document.id
     doc_ref = getattr(change.document, "reference", None)
 
+    lockout_state = get_dispense_lockout_state()
+    if lockout_state is not None:
+        print(
+            f"[LOCKOUT] Refusing to claim or dispense order {order_id} while dispensing lockout is active "
+            f"(reason={lockout_state.get('failure_reason')})."
+        )
+        return
+
     # ---------------------------------
     # PREVENT DUPLICATE ORDERS
     # ---------------------------------
@@ -1613,9 +2538,9 @@ def process_firestore_change(change):
     )
 
     print(
-        "Extra Sugar :",
+        "Extra Sugar (Firestore) :",
         claimed_data.get("extra_sugar", 0),
-        "(not sent as Arduino third parameter)"
+        f"(mapped to Arduino 3rd parameter milk_powder={milk_powder})"
     )
 
     print(
@@ -1639,19 +2564,34 @@ def process_firestore_change(change):
     try:
         dispense_exec = execute_arduino_dispense_for_order(
             command,
-            timeout=180
+            timeout=180,
+            order_id=order_id,
         )
         success = bool(dispense_exec["success"])
         failure_stage = dispense_exec.get("failure_stage")
         failure_reason = dispense_exec.get("failure_reason")
 
+        recorded_stage = (
+            "PRE_DISPENSE" if failure_stage == "LOCKED_OUT" else failure_stage
+        )
         record_dispense_outcome_in_firestore(
             order_id=order_id,
             success=success,
             doc_ref=doc_ref,
-            failure_stage=failure_stage,
+            failure_stage=recorded_stage,
             failure_reason=failure_reason,
         )
+    except LockoutPersistenceError as persist_err:
+        record_dispense_outcome_in_firestore(
+            order_id=order_id,
+            success=False,
+            doc_ref=doc_ref,
+            failure_stage=(
+                "DURING_DISPENSE" if persist_err.command_transmitted else "PRE_DISPENSE"
+            ),
+            failure_reason=persist_err.failure_reason,
+        )
+        raise
     finally:
         # Once claimed, ALWAYS mark order_id in processed_orders so a Firestore
         # outcome write error or uncertain Arduino failure NEVER triggers a duplicate dispense.
@@ -1664,7 +2604,7 @@ def process_firestore_change(change):
             f"Order {order_id} "
             "completed and marked DISPENSED in Firestore."
         )
-    elif failure_stage == "PRE_DISPENSE":
+    elif failure_stage in {"PRE_DISPENSE", "LOCKED_OUT"}:
         print(
             f"Order {order_id} failed before command transmission ({failure_reason}). "
             "Marked FAILED (NOT_DISPENSED / PRE_DISPENSE) in Firestore."
@@ -1672,7 +2612,8 @@ def process_firestore_change(change):
     else:
         print(
             f"Order {order_id} was not confirmed by Arduino ({failure_reason}). "
-            "Marked FAILED (UNCERTAIN / DURING_DISPENSE) in Firestore."
+            "Marked FAILED (UNCERTAIN / DURING_DISPENSE) in Firestore; "
+            "machine dispensing lockout latched."
         )
 
 
@@ -1686,7 +2627,7 @@ def _handle_sigterm(signum, frame):
 
 def main():
 
-    global arduino
+    global arduino, _arduino_responsive
 
     print("CAFFIX Raspberry Pi controller starting...")
 
@@ -1702,6 +2643,16 @@ def main():
 
     print(f"Machine ID filter enabled: {MACHINE_ID}")
 
+    startup_lockout = get_dispense_lockout_state()
+    if startup_lockout is not None:
+        print(
+            f"[LOCKOUT] WARNING: Persisted dispensing lockout is ACTIVE for {MACHINE_ID} "
+            f"(order={startup_lockout.get('order_id')}, reason={startup_lockout.get('failure_reason')}, "
+            f"latched_at={startup_lockout.get('latched_at')}). "
+            "Controller will NOT claim/dispense orders or report ONLINE until physically inspected and "
+            "recovered via: python vending_controller.py --clear-lockout --confirm-machine-safe"
+        )
+
     watch = None
     previous_sigterm_handler = None
     registered_sigterm = False
@@ -1715,17 +2666,13 @@ def main():
 
     try:
 
-        # ---------------------------------
-        # START BACKEND HEARTBEAT THREAD IMMEDIATELY
-        # (independent of Arduino serial availability)
-        # ---------------------------------
-
-        start_heartbeat_thread()
+        verify_dispense_state_dir_writable()
+        acquire_controller_runtime_lock()
 
         client = ensure_firestore_client()
 
         # ---------------------------------
-        # CONNECT TO ARDUINO
+        # CONNECT TO ARDUINO FIRST BEFORE REPORTING ONLINE
         # ---------------------------------
 
         print(
@@ -1733,6 +2680,8 @@ def main():
         )
 
         arduino = connect_arduino()
+        if arduino is not None and getattr(arduino, "is_open", False):
+            _arduino_responsive = True
 
         # ---------------------------------
         # CONTROLLER STARTED
@@ -1777,6 +2726,9 @@ def main():
             on_snapshot
         )
 
+        # Start backend heartbeat only once Arduino is connected/responsive AND listener is active
+        start_heartbeat_thread(require_arduino=True)
+
         print(
             "Firestore listener is running."
         )
@@ -1790,11 +2742,22 @@ def main():
         )
 
         # ---------------------------------
-        # KEEP PROGRAM RUNNING
+        # KEEP PROGRAM RUNNING & AUTO-RECONNECT ARDUINO
         # ---------------------------------
 
         while True:
-
+            if lockout_persistence_failed_event.is_set():
+                raise RuntimeError(
+                    "CRITICAL: Dispensing lockout persistence failed; halting controller fail-closed: "
+                    f"{_fatal_lockout_persistence_error}"
+                )
+            if (
+                arduino_reconnect_event.is_set()
+                or arduino is None
+                or not getattr(arduino, "is_open", False)
+                or not _arduino_responsive
+            ):
+                reconcile_arduino_connection_once()
             time.sleep(1)
 
     except (KeyboardInterrupt, SystemExit):
@@ -1813,7 +2776,10 @@ def main():
             except Exception:
                 pass
 
-        close_serial()
+        with arduino_lock:
+            close_serial()
+
+        release_controller_runtime_lock()
 
         if registered_sigterm:
             try:
@@ -1823,10 +2789,76 @@ def main():
 
 
 # =====================================================
+# DOCUMENTED LOCKOUT RECOVERY CLI
+# =====================================================
+
+def run_cli(argv=None):
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="CAFFIX Raspberry Pi Vending Controller & Fault Lockout Recovery"
+    )
+    parser.add_argument(
+        "--lockout-status",
+        action="store_true",
+        help="Print current machine-level dispensing lockout state as JSON and exit.",
+    )
+    parser.add_argument(
+        "--clear-lockout",
+        action="store_true",
+        help="Explicitly clear machine-level dispensing lockout after physical inspection.",
+    )
+    parser.add_argument(
+        "--confirm-machine-safe",
+        action="store_true",
+        help="Required confirmation flag asserting physical inspection verified all motors/valves stopped and cup tray is safe.",
+    )
+    parser.add_argument(
+        "--operator",
+        default="",
+        help="Optional operator identifier recorded in recovery logs.",
+    )
+    parser.add_argument(
+        "--notes",
+        default="",
+        help="Optional physical inspection notes recorded in recovery logs.",
+    )
+
+    args = parser.parse_args(argv)
+
+    if args.lockout_status:
+        state = get_dispense_lockout_state()
+        print(json.dumps({"locked_out": state is not None, "lockout": state}, indent=2))
+        return 2 if state is not None else 0
+
+    if args.clear_lockout:
+        if not args.confirm_machine_safe:
+            print(
+                "ERROR: Refusing to clear dispensing lockout without --confirm-machine-safe.\n"
+                "Recovery procedure:\n"
+                "  1. Stop controller service (`sudo systemctl stop caffix-vending.service`).\n"
+                "  2. Physically inspect the machine and confirm pouring/motors have stopped and cup tray is safe.\n"
+                "  3. Run as controller user: sudo -u caffix ... python vending_controller.py --clear-lockout --confirm-machine-safe --operator <name>\n"
+                "  4. Restart service (`sudo systemctl start caffix-vending.service`)."
+            )
+            return 1
+        cleared = clear_dispense_lockout(
+            confirm_machine_safe=True,
+            operator=args.operator.strip() or None,
+            notes=args.notes.strip() or None,
+        )
+        print(json.dumps({"cleared": True, "previous_lockout": cleared}, indent=2))
+        return 0
+
+    main()
+    return 0
+
+
+# =====================================================
 # PROGRAM ENTRY POINT
 # =====================================================
 
 if __name__ == "__main__":
 
-    main()
+    raise SystemExit(run_cli())
 
