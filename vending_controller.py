@@ -7,7 +7,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import serial
 import serial.tools.list_ports
 import firebase_admin
@@ -206,6 +206,77 @@ def get_dispense_inflight_file_path():
     lockout_path = get_dispense_lockout_file_path()
     parent_dir = os.path.dirname(os.path.abspath(lockout_path))
     return os.path.join(parent_dir, f"dispense_inflight_{_get_machine_tag()}.json")
+
+
+def get_attempted_orders_file_path():
+    override = os.environ.get("CAFFIX_ATTEMPTED_ORDERS_FILE", "").strip()
+    if override:
+        return os.path.abspath(override)
+    lockout_path = get_dispense_lockout_file_path()
+    parent_dir = os.path.dirname(os.path.abspath(lockout_path))
+    return os.path.join(parent_dir, f"attempted_orders_{_get_machine_tag()}.json")
+
+
+ATTEMPTED_ORDERS_MAX_ENTRIES = 500
+attempted_orders_lock = threading.Lock()
+
+
+def _load_attempted_orders_entries_unlocked():
+    path = get_attempted_orders_file_path()
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict) and isinstance(data.get("orders"), list):
+            return [e for e in data["orders"] if isinstance(e, dict) and e.get("order_id")]
+        return []
+    except Exception:
+        return []
+
+
+def load_attempted_orders():
+    with attempted_orders_lock:
+        return {str(e["order_id"]): dict(e) for e in _load_attempted_orders_entries_unlocked()}
+
+
+def is_order_in_attempted_ledger(order_id):
+    if not order_id:
+        return False
+    return str(order_id) in load_attempted_orders()
+
+
+def record_attempted_order(
+    order_id,
+    command_transmitted=False,
+    mechanical_command_attempted=False,
+    stage="PRE_DISPENSE",
+):
+    if not order_id:
+        return
+    normalized_id = str(order_id).strip()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with attempted_orders_lock:
+        entries = _load_attempted_orders_entries_unlocked()
+        by_id = {str(e["order_id"]): dict(e) for e in entries}
+        prev = by_id.get(normalized_id, {})
+        by_id[normalized_id] = {
+            "order_id": normalized_id,
+            "machine_id": MACHINE_ID,
+            "command_transmitted": bool(prev.get("command_transmitted") or command_transmitted),
+            "mechanical_command_attempted": bool(
+                prev.get("mechanical_command_attempted") or mechanical_command_attempted
+            ),
+            "stage": stage or prev.get("stage"),
+            "first_recorded_at": prev.get("first_recorded_at") or now_iso,
+            "updated_at": now_iso,
+        }
+        ordered = list(by_id.values())[-ATTEMPTED_ORDERS_MAX_ENTRIES:]
+        payload = {"machine_id": MACHINE_ID, "orders": ordered}
+        _write_file_durably(
+            get_attempted_orders_file_path(),
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        )
 
 
 def get_controller_runtime_lock_path():
@@ -471,7 +542,13 @@ def is_dispense_locked_out():
     return get_dispense_lockout_state() is not None
 
 
-def _write_inflight_dispense_marker(order_id=None, command=None):
+def _write_inflight_dispense_marker(
+    order_id=None,
+    command=None,
+    command_transmitted=False,
+    command_transmitted_at=None,
+    mechanical_command_attempted=False,
+):
     inflight_path = get_dispense_inflight_file_path()
     payload = {
         "active": True,
@@ -479,7 +556,10 @@ def _write_inflight_dispense_marker(order_id=None, command=None):
         "machine_id": MACHINE_ID,
         "order_id": order_id,
         "command": command,
-        "failure_stage": "DURING_DISPENSE",
+        "command_transmitted": bool(command_transmitted),
+        "command_transmitted_at": command_transmitted_at,
+        "mechanical_command_attempted": bool(mechanical_command_attempted),
+        "failure_stage": "DURING_DISPENSE" if command_transmitted else "PRE_DISPENSE",
         "failure_reason": "UNFINISHED_DISPENSE_MARKER_ON_RESTART",
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -1703,7 +1783,14 @@ def is_order_eligible_for_local_controller(data):
         return False
 
     refund_status = str(data.get("refund_status") or "").strip().upper()
-    if refund_status in {"FULL", "PENDING", "PARTIAL"}:
+    if refund_status in {"FULL", "PENDING", "PARTIAL", "FAILED"}:
+        return False
+
+    if data.get("command_transmitted") is True:
+        return False
+
+    order_id = str(data.get("id") or "").strip()
+    if order_id and is_order_in_attempted_ledger(order_id):
         return False
 
     for refund_field in (
@@ -1768,6 +1855,12 @@ def claim_order_in_firestore(
         )
         return None
 
+    if is_order_in_attempted_ledger(order_id):
+        print(
+            f"[LEDGER] Refusing to claim order {order_id}: already recorded in attempted_orders ledger."
+        )
+        return None
+
     resolved_doc_ref = doc_ref
     resolved_client = client
     if resolved_client is None and resolved_doc_ref is not None:
@@ -1802,13 +1895,18 @@ def claim_order_in_firestore(
             return None
         # Validate command build before claiming in Firestore
         build_coffee_command(snap_data)
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_dt = datetime.now(timezone.utc)
+        now_iso = now_dt.isoformat()
+        dispense_expires_iso = (now_dt + timedelta(seconds=300)).isoformat()
         updates = {
             "dispense_status": "DISPENSING",
             "dispensed": False,
             "claimed_by": MACHINE_ID,
             "claimed_at": now_iso,
             "dispense_started_at": now_iso,
+            "dispense_expires_at": dispense_expires_iso,
+            "command_transmitted": False,
+            "command_transmitted_at": None,
             "updated_at": now_iso,
         }
         return updates
@@ -1850,16 +1948,106 @@ def claim_order_in_firestore(
         return None
 
 
+LOCAL_DISPENSE_DEADLINE_SECONDS = 240.0
+PRE_WRITE_MAX_ELAPSED_SECONDS = 30.0
 OUTCOME_WRITE_MAX_RETRIES = 3
 OUTCOME_WRITE_RETRY_DELAY_SECONDS = 0.05
 pending_outcome_writes = {}
 pending_outcome_lock = threading.Lock()
 
 
+def _resolve_doc_ref_and_client(order_id, doc_ref=None, client=None):
+    resolved_doc_ref = doc_ref
+    resolved_client = client
+    if resolved_client is None and resolved_doc_ref is not None:
+        resolved_client = getattr(resolved_doc_ref, "_client", None)
+    if resolved_client is None:
+        try:
+            resolved_client = ensure_firestore_client()
+        except Exception:
+            resolved_client = db
+    if resolved_doc_ref is None and resolved_client is not None:
+        try:
+            resolved_doc_ref = resolved_client.collection(ORDERS_COLLECTION).document(order_id)
+        except Exception:
+            resolved_doc_ref = None
+    return resolved_doc_ref, resolved_client
+
+
+def _run_firestore_tx(resolved_client, fn):
+    tx_obj = resolved_client.transaction()
+    if hasattr(tx_obj, "run") and callable(tx_obj.run):
+        return tx_obj.run(fn)
+    from google.cloud import firestore as gc_firestore
+
+    @gc_firestore.transactional
+    def _wrapped(transaction):
+        return fn(transaction)
+
+    return _wrapped(tx_obj)
+
+
+def commit_command_transmission_in_firestore(order_id, doc_ref=None, client=None):
+    """
+    Step 1 of crash-safe command transmission:
+    Transactionally commits `command_transmitted=True` and `command_transmitted_at`
+    in Firestore BEFORE updating local WAL or calling `arduino.write()`.
+    Refuses if order is no longer in `DISPENSING` or has been expired/refunded.
+    """
+    resolved_doc_ref, resolved_client = _resolve_doc_ref_and_client(
+        order_id, doc_ref=doc_ref, client=client
+    )
+    if (
+        resolved_doc_ref is None
+        or resolved_client is None
+        or not hasattr(resolved_client, "transaction")
+    ):
+        return {
+            "committed": False,
+            "reason": "FIRESTORE_TRANSACTION_CLIENT_UNAVAILABLE",
+            "command_transmitted_at": None,
+        }
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    def _tx_body(transaction):
+        snapshot = resolved_doc_ref.get(transaction=transaction)
+        if not getattr(snapshot, "exists", False):
+            return {"committed": False, "reason": "ORDER_NOT_FOUND", "command_transmitted_at": None}
+        live = snapshot.to_dict() or {}
+        disp_status = str(live.get("dispense_status") or "").strip().upper()
+        refund_status = str(live.get("refund_status") or "").strip().upper()
+        pending_paise = float(live.get("pending_refund_amount_paise") or 0)
+        if disp_status != "DISPENSING" or refund_status in {"PENDING", "PARTIAL", "FULL", "FAILED"} or pending_paise > 0:
+            return {
+                "committed": False,
+                "reason": f"ORDER_STATE_REJECTED_{disp_status or 'UNKNOWN'}",
+                "command_transmitted_at": None,
+            }
+        tx_at = live.get("command_transmitted_at") or now_iso
+        updates = {
+            "command_transmitted": True,
+            "command_transmitted_at": tx_at,
+            "updated_at": now_iso,
+        }
+        transaction.set(resolved_doc_ref, updates, merge=True)
+        return {"committed": True, "reason": None, "command_transmitted_at": tx_at}
+
+    try:
+        return _run_firestore_tx(resolved_client, _tx_body)
+    except Exception as tx_err:
+        return {
+            "committed": False,
+            "reason": f"FIRESTORE_TX_ERROR:{type(tx_err).__name__}",
+            "command_transmitted_at": None,
+        }
+
+
 def flush_pending_outcome_writes():
     """
     Retries any post-dispense Firestore outcome updates that previously failed
-    due to a temporary network interruption. Never re-sends Arduino commands.
+    due to a temporary network interruption. Executes transactionally so a late
+    DISPENSED write NEVER overwrites an already EXPIRED or refunded order.
     """
     with pending_outcome_lock:
         items = list(pending_outcome_writes.items())
@@ -1872,7 +2060,20 @@ def flush_pending_outcome_writes():
                 pending_outcome_writes.pop(order_id, None)
             continue
         try:
-            target_ref.set(payload, merge=True)
+            _, resolved_client = _resolve_doc_ref_and_client(
+                order_id, doc_ref=target_ref, client=entry.get("client")
+            )
+            is_success_payload = str(payload.get("dispense_status") or "").upper() == "DISPENSED"
+            if resolved_client is not None and hasattr(resolved_client, "transaction"):
+                _apply_outcome_update_transactionally(
+                    order_id=order_id,
+                    target_ref=target_ref,
+                    resolved_client=resolved_client,
+                    post_updates=payload,
+                    is_success=is_success_payload,
+                )
+            else:
+                target_ref.set(payload, merge=True)
             with pending_outcome_lock:
                 pending_outcome_writes.pop(order_id, None)
             print(
@@ -1880,6 +2081,67 @@ def flush_pending_outcome_writes():
             )
         except Exception:
             pass
+
+
+def _apply_outcome_update_transactionally(
+    order_id, target_ref, resolved_client, post_updates, is_success
+):
+    def _tx_outcome(transaction):
+        snapshot = target_ref.get(transaction=transaction)
+        if not getattr(snapshot, "exists", False):
+            return {"rejected_late_dispense": False, "updates": post_updates}
+        live = snapshot.to_dict() or {}
+        live_dispense = str(live.get("dispense_status") or "").strip().upper()
+        live_refund = str(live.get("refund_status") or "").strip().upper()
+        live_outcome = str(live.get("dispense_outcome") or "").strip().upper()
+        pending_paise = float(live.get("pending_refund_amount_paise") or 0)
+        refunded_paise = float(live.get("total_refunded_amount_paise") or 0)
+
+        if is_success and (live_dispense == "DISPENSED" or live.get("dispensed") is True):
+            return {
+                "rejected_late_dispense": False,
+                "already_dispensed": True,
+                "updates": dict(live),
+            }
+
+        is_terminal_or_refunded = (
+            live_dispense in {"EXPIRED", "FAILED", "CANCELLED"}
+            or live_refund in {"PENDING", "PARTIAL", "FULL"}
+            or pending_paise > 0
+            or refunded_paise > 0
+            or live_outcome == "UNCERTAIN"
+        )
+
+        if is_success and is_terminal_or_refunded:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            audit_updates = {
+                "late_dispense_reported_at": live.get("late_dispense_reported_at") or now_iso,
+                "late_dispense_signal": live.get("late_dispense_signal") or "ARDUINO_DONE_AFTER_EXPIRY",
+                "updated_at": now_iso,
+            }
+            transaction.set(target_ref, audit_updates, merge=True)
+            return {"rejected_late_dispense": True, "updates": audit_updates}
+
+        if not is_success and (
+            live_dispense in {"DISPENSED", "EXPIRED", "CANCELLED"}
+            or live.get("dispensed") is True
+            or live_refund in {"PENDING", "PARTIAL", "FULL"}
+            or pending_paise > 0
+            or refunded_paise > 0
+        ):
+            # Never overwrite DISPENSED, EXPIRED, or refunded state with a failure update
+            return {"rejected_late_dispense": False, "updates": dict(live)}
+
+        # Never downgrade command_transmitted=True to False
+        merged_updates = dict(post_updates)
+        if live.get("command_transmitted") is True:
+            merged_updates["command_transmitted"] = True
+            if live.get("command_transmitted_at"):
+                merged_updates["command_transmitted_at"] = live.get("command_transmitted_at")
+        transaction.set(target_ref, merged_updates, merge=True)
+        return {"rejected_late_dispense": False, "updates": merged_updates}
+
+    return _run_firestore_tx(resolved_client, _tx_outcome)
 
 
 def record_dispense_outcome_in_firestore(
@@ -1941,25 +2203,34 @@ def record_dispense_outcome_in_firestore(
             "updated_at": now_iso,
         }
 
-    resolved_doc_ref = doc_ref
-    if resolved_doc_ref is None:
-        try:
-            resolved_client = (
-                ensure_firestore_client() if client is None else client
-            )
-            if resolved_client is not None:
-                resolved_doc_ref = resolved_client.collection(
-                    ORDERS_COLLECTION
-                ).document(order_id)
-        except Exception:
-            resolved_doc_ref = None
+    resolved_doc_ref, resolved_client = _resolve_doc_ref_and_client(
+        order_id, doc_ref=doc_ref, client=client
+    )
 
-    if resolved_doc_ref is not None and hasattr(resolved_doc_ref, "set"):
+    if resolved_doc_ref is not None and (
+        hasattr(resolved_doc_ref, "set")
+        or (resolved_client is not None and hasattr(resolved_client, "transaction"))
+    ):
         wrote = False
         last_exc = None
         for attempt in range(OUTCOME_WRITE_MAX_RETRIES):
             try:
-                resolved_doc_ref.set(post_updates, merge=True)
+                if resolved_client is not None and hasattr(resolved_client, "transaction"):
+                    tx_res = _apply_outcome_update_transactionally(
+                        order_id=order_id,
+                        target_ref=resolved_doc_ref,
+                        resolved_client=resolved_client,
+                        post_updates=post_updates,
+                        is_success=bool(success),
+                    )
+                    if tx_res.get("rejected_late_dispense"):
+                        post_updates = tx_res["updates"]
+                        print(
+                            f"[RACE-GUARD] Rejected late DISPENSED update for {order_id}: "
+                            "backend already expired/refunded order; recorded audit signal."
+                        )
+                else:
+                    resolved_doc_ref.set(post_updates, merge=True)
                 wrote = True
                 with pending_outcome_lock:
                     pending_outcome_writes.pop(order_id, None)
@@ -1973,6 +2244,7 @@ def record_dispense_outcome_in_firestore(
             with pending_outcome_lock:
                 pending_outcome_writes[order_id] = {
                     "doc_ref": resolved_doc_ref,
+                    "client": resolved_client,
                     "updates": dict(post_updates),
                 }
             print(
@@ -1983,26 +2255,34 @@ def record_dispense_outcome_in_firestore(
     return post_updates
 
 
-def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
+from contextlib import nullcontext
+
+
+def execute_arduino_dispense_for_order(
+    command,
+    timeout=180,
+    order_id=None,
+    doc_ref=None,
+    client=None,
+    dispense_started_at=None,
+    _holding_machine_lock=False,
+):
     """
-    Executes the Arduino GIGA R1 dispense command while strictly classifying serial outcomes:
-    1. Arduino disconnected before any write attempt ->
-       PRE_DISPENSE / NOT_DISPENSED (dispense_started_at = None, claimed_at = None; no lockout)
-    2. Serial write returns 0 bytes without exception and zero transmission is reliably established ->
-       PRE_DISPENSE / NOT_DISPENSED (dispense_started_at = None, claimed_at = None; no lockout)
-    3. Partial transmission (0 < written < expected_bytes), write timeout (SerialTimeoutException),
-       any write/flush exception, or any uncertainty about bytes reaching Arduino ->
-       DURING_DISPENSE / UNCERTAIN (preserves dispense_started_at, blocks auto-refund, LATCHES LOCKOUT)
-    4. Full command transmission followed by missing DONE (timeout, disconnect, or Arduino error) ->
-       DURING_DISPENSE / UNCERTAIN (preserves dispense_started_at, blocks auto-refund, LATCHES LOCKOUT)
-    5. Full command transmission and Arduino returns DONE ->
-       DISPENSED (dispensed = True, dispense_outcome = DISPENSED; no lockout)
-
-    If the machine-level dispensing lockout is already active, refuses to transmit any
-    command to Arduino immediately.
-
-    If `send_to_arduino` has been patched/replaced in unit tests, delegates to `send_to_arduino`
-    and treats `False` as `DURING_DISPENSE` (`UNCERTAIN`) by default (and latches lockout).
+    Executes the Arduino GIGA R1 dispense command with Firestore-first crash-safe commits:
+    1. Pre-commit checks (Arduino disconnected, reset_input_buffer failure, elapsed >= 30s,
+       or Firestore commit_command_transmission_in_firestore rejection) ->
+       PRE_DISPENSE / NOT_DISPENSED (no lockout; command_transmitted remains False).
+    2. Step 1: Transactionally commit `command_transmitted=True` in Firestore FIRST.
+    3. Step 2: Durably fsync `dispense_inflight` (command_transmitted=True,
+       mechanical_command_attempted=True) and `attempted_orders` SECOND.
+       If Step 2 fails after Step 1 succeeded, refuse arduino.write(), never downgrade
+       Firestore `command_transmitted=True`, and latch lockout (UNCERTAIN).
+    4. Step 3: Call arduino.write(payload) ONLY after Steps 1 & 2 succeed.
+       Any write exception, partial write, 0-byte return, flush failure, or timeout
+       retains DURING_DISPENSE / UNCERTAIN and latches machine lockout.
+    5. Wait up to min(timeout, 240s - elapsed_since_dispense_started) for DONE.
+       Note: 240s deadline stops Python serial waiting (no Arduino STOP command exists);
+       on 240s timeout, machine lockout is latched until physical inspection.
     """
     if is_dispense_locked_out():
         print(
@@ -2017,12 +2297,52 @@ def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
             "failure_reason": "MACHINE_DISPENSE_LOCKOUT_ACTIVE",
         }
 
+    def _elapsed_since_start():
+        dt = _parse_utc_timestamp(dispense_started_at) if dispense_started_at else None
+        if dt is None:
+            return 0.0
+        return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
+
     if send_to_arduino is not _DEFAULT_SEND_TO_ARDUINO:
-        ok = bool(send_to_arduino(command, expected="DONE", timeout=timeout))
+        if _elapsed_since_start() >= PRE_WRITE_MAX_ELAPSED_SECONDS:
+            return {
+                "success": False,
+                "command_transmitted": False,
+                "bytes_written": 0,
+                "failure_stage": "PRE_DISPENSE",
+                "failure_reason": "PRE_WRITE_DEADLINE_EXCEEDED",
+            }
+        tx_at = None
+        if order_id and (doc_ref is not None or client is not None or db is not None):
+            fs_commit = commit_command_transmission_in_firestore(
+                order_id, doc_ref=doc_ref, client=client
+            )
+            if not fs_commit.get("committed"):
+                return {
+                    "success": False,
+                    "command_transmitted": False,
+                    "bytes_written": 0,
+                    "failure_stage": "PRE_DISPENSE",
+                    "failure_reason": fs_commit.get("reason") or "FIRESTORE_PRE_WRITE_ABORTED",
+                }
+            tx_at = fs_commit.get("command_transmitted_at")
+        if order_id:
+            record_attempted_order(
+                order_id,
+                command_transmitted=True,
+                mechanical_command_attempted=True,
+                stage="DURING_DISPENSE",
+            )
+        remaining_wait = max(
+            0.01 if timeout and timeout > 0 else 0.0,
+            min(float(timeout), max(0.0, LOCAL_DISPENSE_DEADLINE_SECONDS - _elapsed_since_start())),
+        )
+        ok = bool(send_to_arduino(command, expected="DONE", timeout=remaining_wait))
         if ok:
             return {
                 "success": True,
                 "command_transmitted": True,
+                "command_transmitted_at": tx_at,
                 "bytes_written": len((command.strip() + "\n").encode("ascii")),
                 "failure_stage": None,
                 "failure_reason": None,
@@ -2037,12 +2357,13 @@ def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
         return {
             "success": False,
             "command_transmitted": True,
+            "command_transmitted_at": tx_at,
             "bytes_written": None,
             "failure_stage": "DURING_DISPENSE",
             "failure_reason": reason,
         }
 
-    with machine_lock:
+    with (nullcontext() if _holding_machine_lock else machine_lock):
         if is_dispense_locked_out():
             return {
                 "success": False,
@@ -2052,12 +2373,21 @@ def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
                 "failure_reason": "MACHINE_DISPENSE_LOCKOUT_ACTIVE",
             }
 
+        if _elapsed_since_start() >= PRE_WRITE_MAX_ELAPSED_SECONDS:
+            return {
+                "success": False,
+                "command_transmitted": False,
+                "bytes_written": 0,
+                "failure_stage": "PRE_DISPENSE",
+                "failure_reason": "PRE_WRITE_DEADLINE_EXCEEDED",
+            }
+
         print("\n=================================")
         print("Sending Command ->", command)
         print("=================================\n")
 
         with arduino_lock:
-            # Rule 1: Arduino disconnected before any write attempt
+            # Rule 1: Arduino disconnected before any durable command commit
             if arduino is None or not getattr(arduino, "is_open", False):
                 print("Arduino disconnected before command transmission.")
                 close_serial()
@@ -2070,7 +2400,7 @@ def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
                     "failure_reason": "ARDUINO_DISCONNECTED_BEFORE_COMMAND",
                 }
 
-            # Clear any stale serial RX bytes before writing the new dispense command
+            # Clear any stale serial RX bytes before committing transmission
             if hasattr(arduino, "reset_input_buffer"):
                 try:
                     arduino.reset_input_buffer()
@@ -2088,10 +2418,42 @@ def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
                         "failure_reason": "ARDUINO_DISCONNECTED_BEFORE_COMMAND",
                     }
 
-            # Durable write-ahead marker BEFORE transmitting any command byte to Arduino.
-            # If writing this pre-command marker fails, fail closed BEFORE arduino.write().
+            # Step 1: Transactionally commit command_transmitted=True in Firestore FIRST
+            tx_at = datetime.now(timezone.utc).isoformat()
+            firestore_committed = False
+            if order_id and (doc_ref is not None or client is not None or db is not None):
+                fs_commit = commit_command_transmission_in_firestore(
+                    order_id, doc_ref=doc_ref, client=client
+                )
+                if not fs_commit.get("committed"):
+                    return {
+                        "success": False,
+                        "command_transmitted": False,
+                        "bytes_written": 0,
+                        "failure_stage": "PRE_DISPENSE",
+                        "failure_reason": fs_commit.get("reason") or "FIRESTORE_PRE_WRITE_ABORTED",
+                    }
+                tx_at = fs_commit.get("command_transmitted_at") or tx_at
+                firestore_committed = True
+
+            # Step 2: Durably fsync local WAL & attempted_orders SECOND (before arduino.write)
+            wal_committed = False
             try:
-                _write_inflight_dispense_marker(order_id=order_id, command=command)
+                if order_id:
+                    record_attempted_order(
+                        order_id,
+                        command_transmitted=True,
+                        mechanical_command_attempted=True,
+                        stage="DURING_DISPENSE",
+                    )
+                _write_inflight_dispense_marker(
+                    order_id=order_id,
+                    command=command,
+                    command_transmitted=bool(order_id is not None),
+                    command_transmitted_at=tx_at if order_id is not None else None,
+                    mechanical_command_attempted=bool(order_id is not None),
+                )
+                wal_committed = True
             except Exception as wal_err:
                 with dispense_lockout_lock:
                     _dispense_lockout_state = {
@@ -2102,7 +2464,8 @@ def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
                         "machine_id": MACHINE_ID,
                         "order_id": order_id,
                         "command": command,
-                        "failure_stage": "PRE_DISPENSE",
+                        "command_transmitted": firestore_committed,
+                        "failure_stage": "DURING_DISPENSE" if firestore_committed else "PRE_DISPENSE",
                         "failure_reason": "LOCKOUT_PRE_WRITE_PERSISTENCE_FAILED",
                         "latched_at": datetime.now(timezone.utc).isoformat(),
                     }
@@ -2114,9 +2477,10 @@ def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
                     f"Refusing dispense because durable state storage failed before write: {wal_err}",
                     order_id=order_id,
                     failure_reason="LOCKOUT_PRE_WRITE_PERSISTENCE_FAILED",
-                    command_transmitted=False,
+                    command_transmitted=firestore_committed,
                 ) from wal_err
 
+            command_durably_committed = bool(order_id is not None and (firestore_committed or wal_committed))
             payload = (command.strip() + "\n").encode("ascii")
             expected_bytes = len(payload)
             serial_timeout_cls = getattr(serial, "SerialTimeoutException", TimeoutError)
@@ -2138,6 +2502,7 @@ def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
                 return {
                     "success": False,
                     "command_transmitted": True,
+                    "command_transmitted_at": tx_at,
                     "bytes_written": None,
                     "failure_stage": "DURING_DISPENSE",
                     "failure_reason": reason,
@@ -2156,13 +2521,12 @@ def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
                 return {
                     "success": False,
                     "command_transmitted": True,
+                    "command_transmitted_at": tx_at,
                     "bytes_written": None,
                     "failure_stage": "DURING_DISPENSE",
                     "failure_reason": reason,
                 }
             except Exception as write_err:
-                # Rule 3: Any write exception may have transmitted some bytes before raising ->
-                # NEVER classify as PRE_DISPENSE; always classify as DURING_DISPENSE / UNCERTAIN.
                 print(f"Arduino write exception (uncertain transmission): {write_err}")
                 close_serial()
                 schedule_arduino_reconnect()
@@ -2176,6 +2540,7 @@ def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
                 return {
                     "success": False,
                     "command_transmitted": True,
+                    "command_transmitted_at": tx_at,
                     "bytes_written": None,
                     "failure_stage": "DURING_DISPENSE",
                     "failure_reason": reason,
@@ -2189,8 +2554,8 @@ def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
                 and out_waiting > 0
             )
 
-            # Rule 2: Serial write returns 0 bytes cleanly and zero transmission is reliably established
-            if is_exact_int and written == 0 and not has_buffered_tx:
+            # Rule 2: 0-byte return is PRE_DISPENSE ONLY if command_transmitted=True was NOT durably committed
+            if is_exact_int and written == 0 and not has_buffered_tx and not command_durably_committed:
                 print("Arduino serial write returned 0 bytes (zero transmission established).")
                 close_serial()
                 schedule_arduino_reconnect()
@@ -2206,9 +2571,11 @@ def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
                     "failure_reason": "SERIAL_WRITE_ZERO_BYTES",
                 }
 
-            # Rule 3: Partial transmission or uncertain byte count
+            # Rule 3: Partial transmission, uncertain byte count, or 0-byte return AFTER durable commit
             if not is_exact_int or written != expected_bytes:
-                if is_exact_int and 0 < written < expected_bytes:
+                if is_exact_int and written == 0:
+                    reason = "SERIAL_WRITE_ZERO_BYTES_AFTER_DURABLE_COMMIT"
+                elif is_exact_int and 0 < written < expected_bytes:
                     reason = "SERIAL_PARTIAL_WRITE_UNCERTAIN"
                     print(
                         f"Arduino partial serial write ({written}/{expected_bytes} bytes); "
@@ -2231,13 +2598,12 @@ def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
                 return {
                     "success": False,
                     "command_transmitted": True,
+                    "command_transmitted_at": tx_at,
                     "bytes_written": written if is_exact_int else None,
                     "failure_stage": "DURING_DISPENSE",
                     "failure_reason": reason,
                 }
 
-            # Full byte count written to serial: any subsequent flush/read/timeout failure
-            # has uncertain physical outcome and MUST be classified DURING_DISPENSE.
             try:
                 arduino.flush()
             except Exception as flush_err:
@@ -2254,27 +2620,30 @@ def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
                 return {
                     "success": False,
                     "command_transmitted": True,
+                    "command_transmitted_at": tx_at,
                     "bytes_written": written,
                     "failure_stage": "DURING_DISPENSE",
                     "failure_reason": reason,
                 }
 
-            # Rule 5: Wait for DONE or immediate Arduino error (ERROR, NO_CUP, etc.)
+            # Rule 5: Wait for DONE or immediate Arduino error, capped at 240s local deadline
+            remaining_deadline = max(0.0, LOCAL_DISPENSE_DEADLINE_SECONDS - _elapsed_since_start())
+            effective_timeout = min(float(timeout), remaining_deadline)
             result = wait_for_message(
                 "DONE",
-                timeout=timeout,
+                timeout=effective_timeout,
                 error_messages=ARDUINO_ERROR_RESPONSES,
             )
             if result == "DONE":
                 try:
                     _clear_inflight_dispense_marker()
                 except Exception as clear_err:
-                    # DONE was received so Firestore still records DISPENSED; any leftover WAL fails closed on restart.
                     print(f"[LOCKOUT] Warning: failed to remove in-flight marker after DONE: {clear_err}")
                 print(f"Command completed successfully: {command}")
                 return {
                     "success": True,
                     "command_transmitted": True,
+                    "command_transmitted_at": tx_at,
                     "bytes_written": written,
                     "failure_stage": None,
                     "failure_reason": None,
@@ -2293,16 +2662,21 @@ def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
                 return {
                     "success": False,
                     "command_transmitted": True,
+                    "command_transmitted_at": tx_at,
                     "bytes_written": written,
                     "failure_stage": "DURING_DISPENSE",
                     "failure_reason": reason,
                 }
 
-            # Rule 4: Full command transmission followed by missing DONE
+            # Rule 4: Full command transmission followed by missing DONE or 240s deadline exceeded
             if arduino is None or not getattr(arduino, "is_open", False):
                 close_serial()
                 schedule_arduino_reconnect()
                 reason = "ARDUINO_DISCONNECTED_AFTER_COMMAND_TRANSMISSION"
+            elif _elapsed_since_start() >= LOCAL_DISPENSE_DEADLINE_SECONDS or remaining_deadline <= float(timeout):
+                close_serial()
+                schedule_arduino_reconnect()
+                reason = "ARDUINO_DISPENSE_DEADLINE_EXCEEDED_HARDWARE_UNVERIFIED"
             else:
                 reason = "ARDUINO_RESPONSE_TIMEOUT_AFTER_COMMAND"
 
@@ -2316,6 +2690,7 @@ def execute_arduino_dispense_for_order(command, timeout=180, order_id=None):
             return {
                 "success": False,
                 "command_transmitted": True,
+                "command_transmitted_at": tx_at,
                 "bytes_written": written,
                 "failure_stage": "DURING_DISPENSE",
                 "failure_reason": reason,
@@ -2447,19 +2822,13 @@ def process_firestore_change(change):
         orders_in_progress.add(order_id)
 
     # ---------------------------------
-    # BUILD COMMAND & TRANSACTIONALLY CLAIM ORDER (DISPENSING)
+    # BUILD COMMAND & TRANSACTIONALLY CLAIM ORDER (DISPENSING) UNDER machine_lock
     # ---------------------------------
 
     try:
 
         command = build_coffee_command(
             data
-        )
-
-        claimed_data = claim_order_in_firestore(
-            order_id=order_id,
-            doc_ref=doc_ref,
-            fallback_data=data,
         )
 
     except ValueError as error:
@@ -2469,135 +2838,89 @@ def process_firestore_change(change):
             f"{error}"
         )
 
-        # Mark invalid order as processed
-        # so it does not repeatedly retry
-
         with order_state_lock:
             processed_orders.add(order_id)
             orders_in_progress.discard(order_id)
 
         return
 
-    if not claimed_data:
-        with order_state_lock:
-            orders_in_progress.discard(order_id)
-        return
+    with machine_lock:
+        try:
+            claimed_data = claim_order_in_firestore(
+                order_id=order_id,
+                doc_ref=doc_ref,
+                fallback_data=data,
+            )
+        except ValueError as error:
+            print(f"Order {order_id} rejected: {error}")
+            with order_state_lock:
+                processed_orders.add(order_id)
+                orders_in_progress.discard(order_id)
+            return
 
-    # ---------------------------------
-    # ORDER INFORMATION
-    # ---------------------------------
+        if not claimed_data:
+            with order_state_lock:
+                orders_in_progress.discard(order_id)
+            return
 
-    coffee = claimed_data.get(
-        "product_name",
-        ""
-    )
+        coffee = claimed_data.get("product_name", "")
+        base = str(claimed_data.get("base", "water")).upper()
+        milk_powder = normalize_binary_flag(claimed_data.get("extra_sugar", 0))
+        amount = claimed_data.get("amount")
 
-    base = str(
-        claimed_data.get(
-            "base",
-            "water"
+        print("\n--------------------------------")
+        print("NEW ORDER RECEIVED")
+        print("Order ID    :", order_id)
+        print("Coffee      :", coffee)
+        print("Base        :", base)
+        print("Milk Powder :", milk_powder)
+        print(
+            "Extra Sugar (Firestore) :",
+            claimed_data.get("extra_sugar", 0),
+            f"(mapped to Arduino 3rd parameter milk_powder={milk_powder})",
         )
-    ).upper()
+        print("Amount      :", amount)
+        print("Command     :", command)
+        print("--------------------------------")
 
-    milk_powder = normalize_binary_flag(claimed_data.get("extra_sugar", 0))
+        try:
+            dispense_exec = execute_arduino_dispense_for_order(
+                command,
+                timeout=180,
+                order_id=order_id,
+                doc_ref=doc_ref,
+                dispense_started_at=claimed_data.get("dispense_started_at"),
+                _holding_machine_lock=True,
+            )
+            success = bool(dispense_exec["success"])
+            failure_stage = dispense_exec.get("failure_stage")
+            failure_reason = dispense_exec.get("failure_reason")
 
-    amount = claimed_data.get(
-        "amount"
-    )
-
-    # ---------------------------------
-    # DISPLAY ORDER
-    # ---------------------------------
-
-    print(
-        "\n--------------------------------"
-    )
-
-    print(
-        "NEW ORDER RECEIVED"
-    )
-
-    print(
-        "Order ID    :",
-        order_id
-    )
-
-    print(
-        "Coffee      :",
-        coffee
-    )
-
-    print(
-        "Base        :",
-        base
-    )
-
-    print(
-        "Milk Powder :",
-        milk_powder
-    )
-
-    print(
-        "Extra Sugar (Firestore) :",
-        claimed_data.get("extra_sugar", 0),
-        f"(mapped to Arduino 3rd parameter milk_powder={milk_powder})"
-    )
-
-    print(
-        "Amount      :",
-        amount
-    )
-
-    print(
-        "Command     :",
-        command
-    )
-
-    print(
-        "--------------------------------"
-    )
-
-    # ---------------------------------
-    # SEND COFFEE COMMAND & RECORD OUTCOME
-    # ---------------------------------
-
-    try:
-        dispense_exec = execute_arduino_dispense_for_order(
-            command,
-            timeout=180,
-            order_id=order_id,
-        )
-        success = bool(dispense_exec["success"])
-        failure_stage = dispense_exec.get("failure_stage")
-        failure_reason = dispense_exec.get("failure_reason")
-
-        recorded_stage = (
-            "PRE_DISPENSE" if failure_stage == "LOCKED_OUT" else failure_stage
-        )
-        record_dispense_outcome_in_firestore(
-            order_id=order_id,
-            success=success,
-            doc_ref=doc_ref,
-            failure_stage=recorded_stage,
-            failure_reason=failure_reason,
-        )
-    except LockoutPersistenceError as persist_err:
-        record_dispense_outcome_in_firestore(
-            order_id=order_id,
-            success=False,
-            doc_ref=doc_ref,
-            failure_stage=(
-                "DURING_DISPENSE" if persist_err.command_transmitted else "PRE_DISPENSE"
-            ),
-            failure_reason=persist_err.failure_reason,
-        )
-        raise
-    finally:
-        # Once claimed, ALWAYS mark order_id in processed_orders so a Firestore
-        # outcome write error or uncertain Arduino failure NEVER triggers a duplicate dispense.
-        with order_state_lock:
-            orders_in_progress.discard(order_id)
-            processed_orders.add(order_id)
+            recorded_stage = (
+                "PRE_DISPENSE" if failure_stage == "LOCKED_OUT" else failure_stage
+            )
+            record_dispense_outcome_in_firestore(
+                order_id=order_id,
+                success=success,
+                doc_ref=doc_ref,
+                failure_stage=recorded_stage,
+                failure_reason=failure_reason,
+            )
+        except LockoutPersistenceError as persist_err:
+            record_dispense_outcome_in_firestore(
+                order_id=order_id,
+                success=False,
+                doc_ref=doc_ref,
+                failure_stage=(
+                    "DURING_DISPENSE" if persist_err.command_transmitted else "PRE_DISPENSE"
+                ),
+                failure_reason=persist_err.failure_reason,
+            )
+            raise
+        finally:
+            with order_state_lock:
+                orders_in_progress.discard(order_id)
+                processed_orders.add(order_id)
 
     if success:
         print(
@@ -2623,6 +2946,273 @@ def process_firestore_change(change):
 
 def _handle_sigterm(signum, frame):
     raise SystemExit(0)
+
+
+def is_startup_home_verified_in_firmware():
+    return os.environ.get("CAFFIX_STARTUP_HOME_VERIFIED", "").strip().lower() == "true"
+
+
+def run_startup_safety_checks(client=None, arduino_probe_fn=None):
+    """
+    Ordered startup recovery & safety verification sequence:
+    1. Load durable attempted_orders_<MACHINE_ID>.json into RAM processed_orders.
+    2. Detect leftover dispense_inflight_<MACHINE_ID>.json.
+    3. Permanently record interrupted order_id in attempted_orders.
+    4. Reconcile interrupted order with Firestore using strict TWO-SOURCE agreement:
+       NOT_DISPENSED only when BOTH local WAL and Firestore explicitly report
+       command_transmitted=False (and no contradictory attempted_orders record exists);
+       otherwise UNCERTAIN (never allowing Firestore False to override WAL True).
+    5. Verify Arduino responds to PING -> CAFFIX_ARDUINO.
+    6. Enforce CAFFIX_STARTUP_HOME_VERIFIED firmware gate: until actual Arduino sketch
+       HOME behavior is verified, retain lockout on any leftover dispense_inflight.
+       Even when verified, only run HOME if BOTH sources confirmed False.
+    Returns dict with `safe_for_online`, `lockout_retained`, `outcome`, `reason`.
+    """
+    global _dispense_lockout_state, _dispense_lockout_disk_checked
+
+    attempted_map = load_attempted_orders()
+    with order_state_lock:
+        for att_id in attempted_map:
+            processed_orders.add(att_id)
+
+    lockout_path = get_dispense_lockout_file_path()
+    inflight_path = get_dispense_inflight_file_path()
+    has_lockout_file = os.path.exists(lockout_path)
+    has_inflight_file = os.path.exists(inflight_path)
+
+    if has_lockout_file:
+        state = get_dispense_lockout_state()
+        return {
+            "safe_for_online": False,
+            "lockout_retained": True,
+            "outcome": "LOCKOUT_FILE_ACTIVE",
+            "reason": (state or {}).get("failure_reason") or "PERSISTED_LOCKOUT_ACTIVE",
+        }
+
+    if not has_inflight_file:
+        probe_fn = probe_arduino_responsive if arduino_probe_fn is None else arduino_probe_fn
+        if not probe_fn():
+            return {
+                "safe_for_online": False,
+                "lockout_retained": False,
+                "outcome": "ARDUINO_PING_FAILED",
+                "reason": "ARDUINO_PING_FAILED",
+            }
+        return {
+            "safe_for_online": True,
+            "lockout_retained": False,
+            "outcome": "CLEAN_STARTUP",
+            "reason": None,
+        }
+
+    # Parse leftover WAL marker strictly (corrupt/unreadable -> None)
+    wal_data = None
+    wal_valid = False
+    try:
+        with open(inflight_path, "r", encoding="utf-8") as fh:
+            parsed = json.load(fh)
+        if isinstance(parsed, dict) and parsed.get("order_id"):
+            wal_data = parsed
+            wal_valid = True
+    except Exception:
+        wal_data = None
+        wal_valid = False
+
+    interrupted_order_id = str(wal_data.get("order_id")).strip() if wal_data else None
+    wal_cmd_tx = wal_data.get("command_transmitted") if wal_data else None
+    wal_mech_att = wal_data.get("mechanical_command_attempted") if wal_data else None
+    prior_attempt = attempted_map.get(interrupted_order_id) if interrupted_order_id else None
+    contradictory_attempt = bool(
+        prior_attempt
+        and (
+            prior_attempt.get("command_transmitted") is True
+            or prior_attempt.get("mechanical_command_attempted") is True
+        )
+    )
+
+    if interrupted_order_id:
+        record_attempted_order(
+            interrupted_order_id,
+            command_transmitted=bool(wal_cmd_tx is True or contradictory_attempt),
+            mechanical_command_attempted=bool(wal_mech_att is True or contradictory_attempt),
+            stage="DURING_DISPENSE"
+            if (wal_cmd_tx is True or not wal_valid or contradictory_attempt)
+            else "PRE_DISPENSE",
+        )
+        with order_state_lock:
+            processed_orders.add(interrupted_order_id)
+
+    # Reconcile with Firestore using transactional two-source truth
+    firestore_reachable = False
+    firestore_cmd_tx = None
+    if interrupted_order_id:
+        resolved_doc_ref, resolved_client = _resolve_doc_ref_and_client(
+            interrupted_order_id, client=client
+        )
+        if (
+            resolved_doc_ref is not None
+            and resolved_client is not None
+            and hasattr(resolved_client, "transaction")
+        ):
+            try:
+                now_iso = datetime.now(timezone.utc).isoformat()
+
+                def _reconcile_tx(transaction):
+                    snap = resolved_doc_ref.get(transaction=transaction)
+                    if not getattr(snap, "exists", False):
+                        return {"reachable": True, "fs_cmd_tx": None}
+                    live = snap.to_dict() or {}
+                    fs_cmd = live.get("command_transmitted")
+                    disp_status = str(live.get("dispense_status") or "").strip().upper()
+                    live_refund = str(live.get("refund_status") or "").strip().upper()
+                    pending_paise = float(live.get("pending_refund_amount_paise") or 0)
+                    refunded_paise = float(live.get("total_refunded_amount_paise") or 0)
+
+                    wal_explicit_false = (
+                        wal_valid
+                        and wal_cmd_tx is False
+                        and wal_mech_att is False
+                        and not contradictory_attempt
+                    )
+                    both_explicit_false = wal_explicit_false and (fs_cmd is False)
+
+                    is_terminal_or_refunded = (
+                        disp_status in {"DISPENSED", "EXPIRED", "FAILED", "CANCELLED"}
+                        or live.get("dispensed") is True
+                        or live_refund in {"PENDING", "PARTIAL", "FULL"}
+                        or pending_paise > 0
+                        or refunded_paise > 0
+                    )
+
+                    if not is_terminal_or_refunded and disp_status == "DISPENSING":
+                        if both_explicit_false:
+                            updates = {
+                                "dispense_status": "FAILED",
+                                "dispensed": False,
+                                "dispense_outcome": "NOT_DISPENSED",
+                                "failure_stage": "PRE_DISPENSE",
+                                "failure_reason": "POWER_LOSS_BEFORE_COMMAND_TRANSMISSION",
+                                "dispense_started_at": None,
+                                "claimed_at": None,
+                                "updated_at": now_iso,
+                            }
+                        else:
+                            updates = {
+                                "dispense_status": "FAILED",
+                                "dispensed": False,
+                                "dispense_outcome": "UNCERTAIN",
+                                "failure_stage": "DURING_DISPENSE",
+                                "failure_reason": "POWER_LOSS_DURING_DISPENSE_ON_RESTART",
+                                "updated_at": now_iso,
+                            }
+                            if wal_cmd_tx is True or fs_cmd is True:
+                                updates["command_transmitted"] = True
+                                updates["command_transmitted_at"] = (
+                                    live.get("command_transmitted_at")
+                                    or (wal_data or {}).get("command_transmitted_at")
+                                    or now_iso
+                                )
+                        transaction.set(resolved_doc_ref, updates, merge=True)
+                    elif wal_cmd_tx is True and fs_cmd is not True:
+                        # Never allow Firestore False to override WAL True
+                        transaction.set(
+                            resolved_doc_ref,
+                            {
+                                "command_transmitted": True,
+                                "command_transmitted_at": (wal_data or {}).get("command_transmitted_at") or now_iso,
+                                "updated_at": now_iso,
+                            },
+                            merge=True,
+                        )
+                    return {"reachable": True, "fs_cmd_tx": fs_cmd}
+
+                tx_out = _run_firestore_tx(resolved_client, _reconcile_tx)
+                firestore_reachable = bool(tx_out.get("reachable"))
+                firestore_cmd_tx = tx_out.get("fs_cmd_tx")
+            except Exception as fs_err:
+                print(f"[STARTUP] Firestore reconciliation failed for {interrupted_order_id}: {fs_err}")
+                firestore_reachable = False
+
+    both_sources_explicit_false = (
+        wal_valid
+        and wal_cmd_tx is False
+        and wal_mech_att is False
+        and not contradictory_attempt
+        and firestore_reachable
+        and firestore_cmd_tx is False
+    )
+
+    probe_fn = probe_arduino_responsive if arduino_probe_fn is None else arduino_probe_fn
+    if not probe_fn():
+        latch_dispense_lockout(
+            order_id=interrupted_order_id,
+            command=(wal_data or {}).get("command"),
+            failure_reason="STARTUP_ARDUINO_PING_FAILED",
+            failure_stage="DURING_DISPENSE",
+        )
+        return {
+            "safe_for_online": False,
+            "lockout_retained": True,
+            "outcome": "UNCERTAIN",
+            "reason": "STARTUP_ARDUINO_PING_FAILED",
+        }
+
+    if not both_sources_explicit_false:
+        latch_dispense_lockout(
+            order_id=interrupted_order_id,
+            command=(wal_data or {}).get("command"),
+            failure_reason="TRAY_STATUS_UNVERIFIED_AFTER_POWER_LOSS",
+            failure_stage="DURING_DISPENSE",
+        )
+        return {
+            "safe_for_online": False,
+            "lockout_retained": True,
+            "outcome": "UNCERTAIN",
+            "reason": "TRAY_STATUS_UNVERIFIED_AFTER_POWER_LOSS",
+        }
+
+    # Both sources explicitly false, but HOME firmware safety must still be verified
+    if not is_startup_home_verified_in_firmware():
+        latch_dispense_lockout(
+            order_id=interrupted_order_id,
+            command=(wal_data or {}).get("command"),
+            failure_reason="STARTUP_HOME_UNVERIFIED_REQUIRES_PHYSICAL_INSPECTION",
+            failure_stage="PRE_DISPENSE",
+        )
+        return {
+            "safe_for_online": False,
+            "lockout_retained": True,
+            "outcome": "NOT_DISPENSED_LOCKOUT_RETAINED",
+            "reason": "STARTUP_HOME_UNVERIFIED_REQUIRES_PHYSICAL_INSPECTION",
+        }
+
+    # Verified firmware HOME permitted only when both sources confirmed False
+    home_ok = bool(send_to_arduino("HOME", expected="DONE", timeout=90))
+    if not home_ok:
+        latch_dispense_lockout(
+            order_id=interrupted_order_id,
+            command="HOME",
+            failure_reason="STARTUP_HOME_FAILED",
+            failure_stage="DURING_DISPENSE",
+        )
+        return {
+            "safe_for_online": False,
+            "lockout_retained": True,
+            "outcome": "UNCERTAIN",
+            "reason": "STARTUP_HOME_FAILED",
+        }
+
+    # Safe to clear stale pre-command marker only after PING + verified HOME succeed
+    _clear_inflight_dispense_marker()
+    with dispense_lockout_lock:
+        _dispense_lockout_state = None
+        _dispense_lockout_disk_checked = False
+    return {
+        "safe_for_online": True,
+        "lockout_retained": False,
+        "outcome": "NOT_DISPENSED_RECOVERED",
+        "reason": None,
+    }
 
 
 def main():
@@ -2682,6 +3272,14 @@ def main():
         arduino = connect_arduino()
         if arduino is not None and getattr(arduino, "is_open", False):
             _arduino_responsive = True
+
+        startup_safety = run_startup_safety_checks(client=client)
+        if not startup_safety.get("safe_for_online"):
+            print(
+                f"[STARTUP] Machine {MACHINE_ID} failed/held startup safety checks "
+                f"(outcome={startup_safety.get('outcome')}, reason={startup_safety.get('reason')}). "
+                "ONLINE heartbeats and dispensing remain halted until physical inspection."
+            )
 
         # ---------------------------------
         # CONTROLLER STARTED

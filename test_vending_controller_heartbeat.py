@@ -589,11 +589,13 @@ class TestVendingControllerHeartbeat(unittest.TestCase):
             self.assertEqual(observed_during_arduino["cmd"], "HAZELNUT,MILK,1")
             self.assertEqual(observed_during_arduino["status_before_done"], "DISPENSING")
             self.assertIsNotNone(observed_during_arduino["started_at_before_done"])
-            self.assertEqual(len(doc_ok.writes), 2)
+            self.assertEqual(len(doc_ok.writes), 3)
             self.assertEqual(doc_ok.writes[0]["dispense_status"], "DISPENSING")
-            self.assertEqual(doc_ok.writes[1]["dispense_status"], "DISPENSED")
-            self.assertTrue(doc_ok.writes[1]["dispensed"])
-            self.assertEqual(doc_ok.writes[1]["dispense_outcome"], "DISPENSED")
+            self.assertFalse(doc_ok.writes[0]["command_transmitted"])
+            self.assertTrue(doc_ok.writes[1]["command_transmitted"])
+            self.assertEqual(doc_ok.writes[2]["dispense_status"], "DISPENSED")
+            self.assertTrue(doc_ok.writes[2]["dispensed"])
+            self.assertEqual(doc_ok.writes[2]["dispense_outcome"], "DISPENSED")
             self.assertIn("CFX-TEST-OK", vc.processed_orders)
 
             # 2. Timeout / disconnect after sending command: writes DISPENSING, then FAILED + UNCERTAIN + DURING_DISPENSE
@@ -625,12 +627,14 @@ class TestVendingControllerHeartbeat(unittest.TestCase):
                 with redirect_stdout(buf):
                     vc.process_firestore_change(change_fail)
 
-            self.assertEqual(len(doc_fail.writes), 2)
+            self.assertEqual(len(doc_fail.writes), 3)
             self.assertEqual(doc_fail.writes[0]["dispense_status"], "DISPENSING")
-            self.assertEqual(doc_fail.writes[1]["dispense_status"], "FAILED")
-            self.assertFalse(doc_fail.writes[1]["dispensed"])
-            self.assertEqual(doc_fail.writes[1]["dispense_outcome"], "UNCERTAIN")
-            self.assertEqual(doc_fail.writes[1]["failure_stage"], "DURING_DISPENSE")
+            self.assertFalse(doc_fail.writes[0]["command_transmitted"])
+            self.assertTrue(doc_fail.writes[1]["command_transmitted"])
+            self.assertEqual(doc_fail.writes[2]["dispense_status"], "FAILED")
+            self.assertFalse(doc_fail.writes[2]["dispensed"])
+            self.assertEqual(doc_fail.writes[2]["dispense_outcome"], "UNCERTAIN")
+            self.assertEqual(doc_fail.writes[2]["failure_stage"], "DURING_DISPENSE")
             self.assertIsNone(doc_fail.data.get("dispensed_at"))
             self.assertIn("CFX-TEST-TIMEOUT", vc.processed_orders)
         finally:
@@ -1221,7 +1225,8 @@ class TestVendingControllerHeartbeat(unittest.TestCase):
             self.assertIsNone(doc1.data["claimed_at"])
             self.assertTrue(_is_eligible_for_auto_refund(doc1.data))
 
-            # 2. Zero-byte write (serial write returns 0 cleanly without exception) -> PRE_DISPENSE / NOT_DISPENSED (Auto-Refund ELIGIBLE)
+            # 2. Zero-byte write (serial write returns 0 cleanly AFTER durable Firestore + WAL command_transmitted=True commit)
+            # -> Phase II Crash-Window #4: MUST remain DURING_DISPENSE / UNCERTAIN + lockout (Auto-Refund BLOCKED)
             fake_serial_zero = mock.MagicMock()
             fake_serial_zero.is_open = True
             fake_serial_zero.out_waiting = 0
@@ -1236,12 +1241,19 @@ class TestVendingControllerHeartbeat(unittest.TestCase):
                 vc.process_firestore_change(evt2)
             self.assertEqual(doc2.data["dispense_status"], "FAILED")
             self.assertFalse(doc2.data["dispensed"])
-            self.assertEqual(doc2.data["dispense_outcome"], "NOT_DISPENSED")
-            self.assertEqual(doc2.data["failure_stage"], "PRE_DISPENSE")
-            self.assertEqual(doc2.data["failure_reason"], "SERIAL_WRITE_ZERO_BYTES")
-            self.assertIsNone(doc2.data["dispense_started_at"])
-            self.assertIsNone(doc2.data["claimed_at"])
-            self.assertTrue(_is_eligible_for_auto_refund(doc2.data))
+            self.assertEqual(doc2.data["dispense_outcome"], "UNCERTAIN")
+            self.assertEqual(doc2.data["failure_stage"], "DURING_DISPENSE")
+            self.assertEqual(doc2.data["failure_reason"], "SERIAL_WRITE_ZERO_BYTES_AFTER_DURABLE_COMMIT")
+            self.assertTrue(doc2.data["command_transmitted"])
+            self.assertIsNotNone(doc2.data["dispense_started_at"])
+            self.assertIsNotNone(doc2.data["claimed_at"])
+            self.assertFalse(_is_eligible_for_auto_refund(doc2.data))
+            self.assertTrue(vc.is_dispense_locked_out())
+            vc.clear_dispense_lockout(
+                operator="test-subcase",
+                confirm_machine_safe=True,
+                notes="physical inspection confirmed safe",
+            )
 
             # 3. Partial-byte write (0 < written < expected_bytes) -> DURING_DISPENSE / UNCERTAIN (Auto-Refund BLOCKED)
             fake_serial_partial = mock.MagicMock()
@@ -2497,6 +2509,412 @@ class TestVendingControllerHeartbeat(unittest.TestCase):
             vc.MACHINE_ID = old_machine_id
             vc.processed_orders.clear()
             vc.orders_in_progress.clear()
+
+
+class PhaseIIInterruptedDispensingTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.old_state_dir = os.environ.get("CAFFIX_STATE_DIR")
+        self.old_home_verified = os.environ.get("CAFFIX_STARTUP_HOME_VERIFIED")
+        self.old_machine_id = vc.MACHINE_ID
+        os.environ["CAFFIX_STATE_DIR"] = self.tmpdir.name
+        os.environ.pop("CAFFIX_STARTUP_HOME_VERIFIED", None)
+        vc.MACHINE_ID = "CFX-MC-01"
+        vc.processed_orders.clear()
+        vc.orders_in_progress.clear()
+        vc.pending_outcome_writes.clear()
+        vc.lockout_persistence_failed_event.clear()
+        with vc.dispense_lockout_lock:
+            vc._dispense_lockout_state = None
+            vc._dispense_lockout_disk_checked = False
+            vc._fatal_lockout_persistence_error = None
+
+    def tearDown(self):
+        vc.close_serial()
+        vc.MACHINE_ID = self.old_machine_id
+        vc.processed_orders.clear()
+        vc.orders_in_progress.clear()
+        vc.pending_outcome_writes.clear()
+        vc.lockout_persistence_failed_event.clear()
+        with vc.dispense_lockout_lock:
+            vc._dispense_lockout_state = None
+            vc._dispense_lockout_disk_checked = False
+            vc._fatal_lockout_persistence_error = None
+        if self.old_state_dir is not None:
+            os.environ["CAFFIX_STATE_DIR"] = self.old_state_dir
+        else:
+            os.environ.pop("CAFFIX_STATE_DIR", None)
+        if self.old_home_verified is not None:
+            os.environ["CAFFIX_STARTUP_HOME_VERIFIED"] = self.old_home_verified
+        else:
+            os.environ.pop("CAFFIX_STARTUP_HOME_VERIFIED", None)
+        self.tmpdir.cleanup()
+
+    def _make_fake_firestore(self, initial_orders):
+        orders = {k: dict(v) for k, v in initial_orders.items()}
+
+        class _Tx:
+            def __init__(self, fail_commit=False):
+                self.fail_commit = fail_commit
+
+            def run(self, fn):
+                if self.fail_commit:
+                    raise RuntimeError("simulated Firestore tx error")
+                return fn(self)
+
+            def set(self, doc_ref, updates, merge=False):
+                if merge:
+                    orders[doc_ref.id].update(updates)
+                else:
+                    orders[doc_ref.id] = dict(updates)
+
+        class _DocRef:
+            def __init__(self, doc_id, client):
+                self.id = doc_id
+                self._client = client
+
+            def get(self, transaction=None):
+                exists = self.id in orders
+                return SimpleNamespace(
+                    exists=exists,
+                    id=self.id,
+                    to_dict=lambda: dict(orders[self.id]) if exists else None,
+                )
+
+            def set(self, updates, merge=False):
+                if merge:
+                    orders[self.id].update(updates)
+                else:
+                    orders[self.id] = dict(updates)
+
+        class _ColRef:
+            def __init__(self, client):
+                self._client = client
+
+            def document(self, doc_id):
+                return _DocRef(doc_id, self._client)
+
+        class _Client:
+            def __init__(self):
+                self.fail_tx = False
+
+            def collection(self, name):
+                return _ColRef(self)
+
+            def transaction(self):
+                return _Tx(fail_commit=self.fail_tx)
+
+        return _Client(), orders
+
+    def test_scenario_6_firestore_first_commit_order_and_crash_windows(self):
+        client, orders = self._make_fake_firestore(
+            {
+                "ORD-P2-FSFAIL": {
+                    "id": "ORD-P2-FSFAIL",
+                    "machine_id": "CFX-MC-01",
+                    "status": "PAID",
+                    "dispense_status": "DISPENSING",
+                    "command_transmitted": False,
+                },
+                "ORD-P2-WALFAIL": {
+                    "id": "ORD-P2-WALFAIL",
+                    "machine_id": "CFX-MC-01",
+                    "status": "PAID",
+                    "dispense_status": "DISPENSING",
+                    "command_transmitted": False,
+                },
+                "ORD-P2-ZEROBYTE": {
+                    "id": "ORD-P2-ZEROBYTE",
+                    "machine_id": "CFX-MC-01",
+                    "status": "PAID",
+                    "dispense_status": "DISPENSING",
+                    "command_transmitted": False,
+                },
+            }
+        )
+
+        ser = mock.MagicMock()
+        ser.is_open = True
+        ser.out_waiting = 0
+        vc.arduino = ser
+        vc._arduino_responsive = True
+
+        # (a) Firestore tx fails before commit -> WAL not written, arduino.write not called, PRE_DISPENSE
+        client.fail_tx = True
+        res_fs_fail = vc.execute_arduino_dispense_for_order(
+            "CLASSIC,WATER,1",
+            order_id="ORD-P2-FSFAIL",
+            doc_ref=client.collection("orders").document("ORD-P2-FSFAIL"),
+            client=client,
+        )
+        self.assertEqual(res_fs_fail["failure_stage"], "PRE_DISPENSE")
+        self.assertFalse(res_fs_fail["command_transmitted"])
+        self.assertEqual(ser.write.call_count, 0)
+        self.assertFalse(os.path.exists(vc.get_dispense_inflight_file_path()))
+        self.assertFalse(vc.is_dispense_locked_out())
+
+        # (b) Firestore commits true, then local WAL fsync fails -> abort arduino.write, NEVER downgrade Firestore true, latch lockout
+        client.fail_tx = False
+        with mock.patch.object(vc, "_write_inflight_dispense_marker", side_effect=OSError("disk full")):
+            with self.assertRaises(vc.LockoutPersistenceError):
+                vc.execute_arduino_dispense_for_order(
+                    "CLASSIC,WATER,1",
+                    order_id="ORD-P2-WALFAIL",
+                    doc_ref=client.collection("orders").document("ORD-P2-WALFAIL"),
+                    client=client,
+                )
+        self.assertEqual(ser.write.call_count, 0)
+        self.assertIs(orders["ORD-P2-WALFAIL"]["command_transmitted"], True)
+        self.assertTrue(vc.is_dispense_locked_out())
+
+        # Reset lockout for (c)
+        with vc.dispense_lockout_lock:
+            vc._dispense_lockout_state = None
+            vc._dispense_lockout_disk_checked = False
+            vc._fatal_lockout_persistence_error = None
+        vc.lockout_persistence_failed_event.clear()
+
+        # (c) Both Firestore and WAL commit true, arduino.write returns 0 bytes -> DURING_DISPENSE / UNCERTAIN + lockout
+        ser.write.return_value = 0
+        res_zero = vc.execute_arduino_dispense_for_order(
+            "CLASSIC,WATER,1",
+            order_id="ORD-P2-ZEROBYTE",
+            doc_ref=client.collection("orders").document("ORD-P2-ZEROBYTE"),
+            client=client,
+        )
+        self.assertEqual(res_zero["failure_stage"], "DURING_DISPENSE")
+        self.assertEqual(res_zero["failure_reason"], "SERIAL_WRITE_ZERO_BYTES_AFTER_DURABLE_COMMIT")
+        self.assertTrue(vc.is_dispense_locked_out())
+
+    def test_scenario_5_and_7c_240s_deadline_and_late_done_flush_guard(self):
+        client, orders = self._make_fake_firestore(
+            {
+                "ORD-P2-240S": {
+                    "id": "ORD-P2-240S",
+                    "machine_id": "CFX-MC-01",
+                    "status": "PAID",
+                    "dispense_status": "DISPENSING",
+                    "command_transmitted": False,
+                },
+                "ORD-P2-LATEFLUSH": {
+                    "id": "ORD-P2-LATEFLUSH",
+                    "machine_id": "CFX-MC-01",
+                    "status": "PAID",
+                    "dispense_status": "EXPIRED",
+                    "dispense_outcome": "UNCERTAIN",
+                    "command_transmitted": True,
+                },
+            }
+        )
+        ser = mock.MagicMock()
+        ser.is_open = True
+        ser.out_waiting = 0
+        ser.write.side_effect = lambda p: len(p)
+        ser.readline.return_value = b""
+        vc.arduino = ser
+        vc._arduino_responsive = True
+
+        # 240s already elapsed since dispense_started_at -> capped wait aborts immediately with lockout
+        started_240s_ago = (vc.datetime.now(vc.timezone.utc) - vc.timedelta(seconds=241)).isoformat()
+        with mock.patch.object(vc, "PRE_WRITE_MAX_ELAPSED_SECONDS", 300.0):
+            res_240 = vc.execute_arduino_dispense_for_order(
+                "CLASSIC,WATER,1",
+                timeout=180,
+                order_id="ORD-P2-240S",
+                doc_ref=client.collection("orders").document("ORD-P2-240S"),
+                client=client,
+                dispense_started_at=started_240s_ago,
+            )
+        self.assertEqual(res_240["failure_stage"], "DURING_DISPENSE")
+        self.assertEqual(res_240["failure_reason"], "ARDUINO_DISPENSE_DEADLINE_EXCEEDED_HARDWARE_UNVERIFIED")
+        self.assertTrue(vc.is_dispense_locked_out())
+
+        # Scenario 7c: delayed flush_pending_outcome_writes cannot overwrite EXPIRED/UNCERTAIN with DISPENSED
+        doc_ref = client.collection("orders").document("ORD-P2-LATEFLUSH")
+        vc.pending_outcome_writes["ORD-P2-LATEFLUSH"] = {
+            "doc_ref": doc_ref,
+            "client": client,
+            "updates": {"dispense_status": "DISPENSED", "dispensed": True},
+        }
+        vc.flush_pending_outcome_writes()
+        self.assertEqual(orders["ORD-P2-LATEFLUSH"]["dispense_status"], "EXPIRED")
+        self.assertEqual(orders["ORD-P2-LATEFLUSH"]["dispense_outcome"], "UNCERTAIN")
+        self.assertIn("late_dispense_reported_at", orders["ORD-P2-LATEFLUSH"])
+        self.assertEqual(orders["ORD-P2-LATEFLUSH"]["late_dispense_signal"], "ARDUINO_DONE_AFTER_EXPIRY")
+
+        # Issue 2 regressions for record_dispense_outcome_in_firestore & flush_pending_outcome_writes:
+        # (a) Duplicate DONE on already DISPENSED order is idempotent (preserves original dispensed_at/dispensed_by)
+        # (b) Late failure on already DISPENSED order never overwrites DISPENSED
+        # (c) Late DONE on refunded states (PENDING/PARTIAL/FULL) records audit signal without overwriting
+        client2, orders2 = self._make_fake_firestore(
+            {
+                "ORD-DISP-OK": {
+                    "id": "ORD-DISP-OK",
+                    "dispense_status": "DISPENSED",
+                    "dispensed": True,
+                    "dispense_outcome": "DISPENSED",
+                    "dispensed_by": "CFX-MC-ORIG",
+                    "dispensed_at": "2026-11-26T09:00:00Z",
+                    "refund_status": "NONE",
+                },
+                "ORD-RFND-PEND": {
+                    "id": "ORD-RFND-PEND",
+                    "dispense_status": "DISPENSING",
+                    "dispensed": False,
+                    "refund_status": "PENDING",
+                    "pending_refund_amount_paise": 10000,
+                },
+                "ORD-RFND-PART": {
+                    "id": "ORD-RFND-PART",
+                    "dispense_status": "DISPENSING",
+                    "dispensed": False,
+                    "refund_status": "PARTIAL",
+                    "total_refunded_amount_paise": 5000,
+                },
+                "ORD-RFND-FULL": {
+                    "id": "ORD-RFND-FULL",
+                    "dispense_status": "DISPENSING",
+                    "dispensed": False,
+                    "refund_status": "FULL",
+                    "total_refunded_amount_paise": 10000,
+                },
+            }
+        )
+        vc.record_dispense_outcome_in_firestore(
+            "ORD-DISP-OK", True, doc_ref=client2.collection("orders").document("ORD-DISP-OK"), client=client2
+        )
+        self.assertEqual(orders2["ORD-DISP-OK"]["dispensed_at"], "2026-11-26T09:00:00Z")
+        self.assertEqual(orders2["ORD-DISP-OK"]["dispensed_by"], "CFX-MC-ORIG")
+
+        vc.record_dispense_outcome_in_firestore(
+            "ORD-DISP-OK",
+            False,
+            doc_ref=client2.collection("orders").document("ORD-DISP-OK"),
+            failure_stage="DURING_DISPENSE",
+            client=client2,
+        )
+        self.assertEqual(orders2["ORD-DISP-OK"]["dispense_status"], "DISPENSED")
+        self.assertTrue(orders2["ORD-DISP-OK"]["dispensed"])
+
+        vc.pending_outcome_writes["ORD-DISP-OK"] = {
+            "doc_ref": client2.collection("orders").document("ORD-DISP-OK"),
+            "client": client2,
+            "updates": {"dispense_status": "FAILED", "dispensed": False},
+        }
+        vc.flush_pending_outcome_writes()
+        self.assertEqual(orders2["ORD-DISP-OK"]["dispense_status"], "DISPENSED")
+        self.assertTrue(orders2["ORD-DISP-OK"]["dispensed"])
+
+        for rfnd_id, expected_rfnd in (
+            ("ORD-RFND-PEND", "PENDING"),
+            ("ORD-RFND-PART", "PARTIAL"),
+            ("ORD-RFND-FULL", "FULL"),
+        ):
+            vc.record_dispense_outcome_in_firestore(
+                rfnd_id, True, doc_ref=client2.collection("orders").document(rfnd_id), client=client2
+            )
+            self.assertEqual(orders2[rfnd_id]["dispense_status"], "DISPENSING")
+            self.assertEqual(orders2[rfnd_id]["refund_status"], expected_rfnd)
+            self.assertEqual(orders2[rfnd_id]["late_dispense_signal"], "ARDUINO_DONE_AFTER_EXPIRY")
+            self.assertIn("late_dispense_reported_at", orders2[rfnd_id])
+
+    def test_scenario_8_9_10_13_startup_recovery_wal_vs_firestore(self):
+        # Case (a): WAL true + Firestore false -> UNCERTAIN + lockout retained, Firestore upgraded to true
+        client, orders = self._make_fake_firestore(
+            {
+                "ORD-REC-A": {"id": "ORD-REC-A", "dispense_status": "DISPENSING", "command_transmitted": False},
+                "ORD-REC-B": {"id": "ORD-REC-B", "dispense_status": "DISPENSING", "command_transmitted": True},
+                "ORD-REC-C": {"id": "ORD-REC-C", "dispense_status": "DISPENSING", "command_transmitted": False},
+                "ORD-REC-D": {"id": "ORD-REC-D", "dispense_status": "DISPENSING", "command_transmitted": False},
+                "ORD-REC-E": {"id": "ORD-REC-E", "dispense_status": "DISPENSING", "command_transmitted": False},
+            }
+        )
+
+        # (a) WAL true + Firestore false
+        vc._write_inflight_dispense_marker("ORD-REC-A", "CLASSIC,WATER,1", True, "2026-11-26T10:00:00Z", True)
+        res_a = vc.run_startup_safety_checks(client=client, arduino_probe_fn=lambda: True)
+        self.assertFalse(res_a["safe_for_online"])
+        self.assertTrue(res_a["lockout_retained"])
+        self.assertEqual(orders["ORD-REC-A"]["dispense_outcome"], "UNCERTAIN")
+        self.assertIs(orders["ORD-REC-A"]["command_transmitted"], True)
+        self.assertTrue(vc.is_order_in_attempted_ledger("ORD-REC-A"))
+        vc.clear_dispense_lockout(confirm_machine_safe=True, operator="test")
+
+        # (b) Firestore true + WAL false
+        vc._write_inflight_dispense_marker("ORD-REC-B", "CLASSIC,WATER,1", False, None, False)
+        res_b = vc.run_startup_safety_checks(client=client, arduino_probe_fn=lambda: True)
+        self.assertFalse(res_b["safe_for_online"])
+        self.assertEqual(orders["ORD-REC-B"]["dispense_outcome"], "UNCERTAIN")
+        vc.clear_dispense_lockout(confirm_machine_safe=True, operator="test")
+
+        # (c) WAL true + Firestore unavailable
+        client.fail_tx = True
+        vc._write_inflight_dispense_marker("ORD-REC-C", "CLASSIC,WATER,1", True, "2026-11-26T10:00:00Z", True)
+        res_c = vc.run_startup_safety_checks(client=client, arduino_probe_fn=lambda: True)
+        self.assertFalse(res_c["safe_for_online"])
+        self.assertEqual(res_c["outcome"], "UNCERTAIN")
+        client.fail_tx = False
+        vc.clear_dispense_lockout(confirm_machine_safe=True, operator="test")
+
+        # (d) WAL corrupt + Firestore false
+        vc._write_file_durably(vc.get_dispense_inflight_file_path(), "{CORRUPT_JSON")
+        res_d = vc.run_startup_safety_checks(client=client, arduino_probe_fn=lambda: True)
+        self.assertFalse(res_d["safe_for_online"])
+        self.assertEqual(res_d["outcome"], "UNCERTAIN")
+        vc.clear_dispense_lockout(confirm_machine_safe=True, operator="test")
+
+        # (e1) Both false + CAFFIX_STARTUP_HOME_VERIFIED unset -> NOT_DISPENSED in Firestore, lockout retained
+        vc._write_inflight_dispense_marker("ORD-REC-E", "CLASSIC,WATER,1", False, None, False)
+        res_e1 = vc.run_startup_safety_checks(client=client, arduino_probe_fn=lambda: True)
+        self.assertFalse(res_e1["safe_for_online"])
+        self.assertTrue(res_e1["lockout_retained"])
+        self.assertEqual(res_e1["reason"], "STARTUP_HOME_UNVERIFIED_REQUIRES_PHYSICAL_INSPECTION")
+        self.assertEqual(orders["ORD-REC-E"]["dispense_outcome"], "NOT_DISPENSED")
+        vc.clear_dispense_lockout(confirm_machine_safe=True, operator="test")
+
+        # (e2) Both false + CAFFIX_STARTUP_HOME_VERIFIED=true -> HOME runs and clears stale marker
+        os.environ["CAFFIX_STARTUP_HOME_VERIFIED"] = "true"
+        orders["ORD-REC-D2"] = {"id": "ORD-REC-D2", "dispense_status": "DISPENSING", "command_transmitted": False}
+        vc._write_inflight_dispense_marker("ORD-REC-D2", "CLASSIC,WATER,1", False, None, False)
+        with mock.patch.object(vc, "send_to_arduino", return_value=True) as mock_home:
+            res_e2 = vc.run_startup_safety_checks(client=client, arduino_probe_fn=lambda: True)
+        mock_home.assert_called_once_with("HOME", expected="DONE", timeout=90)
+        self.assertTrue(res_e2["safe_for_online"])
+        self.assertFalse(res_e2["lockout_retained"])
+
+        # Scenario 13: Failed Arduino PING retains lockout
+        vc._write_inflight_dispense_marker("ORD-REC-PINGFAIL", "CLASSIC,WATER,1", False, None, False)
+        res_ping_fail = vc.run_startup_safety_checks(client=client, arduino_probe_fn=lambda: False)
+        self.assertFalse(res_ping_fail["safe_for_online"])
+        self.assertEqual(res_ping_fail["reason"], "STARTUP_ARDUINO_PING_FAILED")
+
+    def test_scenario_12_14_15_diagnostic_isolation_failed_refund_and_machine_isolation(self):
+        # Scenario 12: PING probe does not touch attempted_orders or command_transmitted
+        ser = mock.MagicMock()
+        ser.is_open = True
+        ser.readline.side_effect = [b"CAFFIX_ARDUINO\n"]
+        vc.arduino = ser
+        self.assertTrue(vc.probe_arduino_responsive())
+        self.assertEqual(vc.load_attempted_orders(), {})
+
+        # Scenario 14: refund_status === 'FAILED' rejected by is_order_eligible_for_local_controller
+        self.assertFalse(
+            vc.is_order_eligible_for_local_controller(
+                {
+                    "id": "ORD-FAIL-REF",
+                    "machine_id": "CFX-MC-01",
+                    "status": "PAID",
+                    "dispense_status": "QUEUED",
+                    "refund_status": "FAILED",
+                }
+            )
+        )
+
+        # Scenario 15: Machine isolation (CFX-MC-01 ledger does not block CFX-MC-02)
+        vc.record_attempted_order("ORD-SHARED-1", command_transmitted=True)
+        self.assertTrue(vc.is_order_in_attempted_ledger("ORD-SHARED-1"))
+        vc.MACHINE_ID = "CFX-MC-02"
+        self.assertFalse(vc.is_order_in_attempted_ledger("ORD-SHARED-1"))
 
 
 if __name__ == "__main__":
