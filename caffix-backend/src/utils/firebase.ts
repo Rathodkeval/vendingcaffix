@@ -3072,15 +3072,30 @@ export async function ensureFirestoreSeeded(db: any): Promise<void> {
 }
 
 const RECONCILIATION_LOCK_COLLECTION = 'system_locks';
-const RECONCILIATION_LOCK_DOC_ID = 'order_reconciliation';
+export const ORDER_RECONCILIATION_LOCK_DOC_ID = 'order_reconciliation';
+export const AUTO_REFUND_CRON_LOCK_DOC_ID = 'auto_refund_cron_lease';
+export const DEFAULT_CRON_LEASE_TTL_MS = 90_000;
 const PROD_SUPER_ADMIN_BOOTSTRAP_LOCK_DOC_ID = 'production_super_admin_bootstrap';
+const cronLeaseTxQueues = new Map<string, Promise<unknown>>();
 
-/**
- * Acquires a short-lived cross-instance Firestore lease so overlapping scheduler runs
- * across Vercel serverless instances do not evaluate the same PENDING orders concurrently.
- */
-export async function acquireReconciliationLeaseInFirebase(
-  leaseTtlMs: number = 4 * 60_000
+function enqueueCronLeaseTransaction<T>(lockDocId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = cronLeaseTxQueues.get(lockDocId) ?? Promise.resolve();
+  const next = prev.catch(() => undefined).then(fn);
+  cronLeaseTxQueues.set(
+    lockDocId,
+    next.finally(() => {
+      if (cronLeaseTxQueues.get(lockDocId) === next) {
+        cronLeaseTxQueues.delete(lockDocId);
+      }
+    })
+  );
+  return next;
+}
+
+async function acquireDistributedCronLeaseInFirebase(
+  lockDocId: string,
+  owner: string,
+  leaseTtlMs: number = DEFAULT_CRON_LEASE_TTL_MS
 ): Promise<{ acquired: boolean; lockId: string | null }> {
   ensureFirebaseReady();
 
@@ -3090,70 +3105,133 @@ export async function acquireReconciliationLeaseInFirebase(
   }
 
   const lockId = crypto.randomUUID();
-  const nowMs = Date.now();
-  const nowIso = new Date(nowMs).toISOString();
-  const lockedUntilMs = nowMs + Math.max(10_000, leaseTtlMs);
+  const effectiveTtlMs = Math.max(10_000, leaseTtlMs);
   const lockRef = activeFirestore
     .collection(RECONCILIATION_LOCK_COLLECTION)
-    .doc(RECONCILIATION_LOCK_DOC_ID);
+    .doc(lockDocId);
 
   try {
-    return await activeFirestore.runTransaction(async (tx: any) => {
-      const snap = await tx.get(lockRef);
-      const existing = snap.exists ? snap.data() || {} : null;
-      if (
-        existing &&
-        existing.active === true &&
-        Number(existing.locked_until_ms || 0) > nowMs
-      ) {
-        return { acquired: false, lockId: null };
-      }
+    return await enqueueCronLeaseTransaction(lockDocId, () =>
+      activeFirestore.runTransaction(async (tx: any) => {
+        const nowMs = Date.now();
+        const nowIso = new Date(nowMs).toISOString();
+        const lockedUntilMs = nowMs + effectiveTtlMs;
+        const expiresAtIso = new Date(lockedUntilMs).toISOString();
 
-      tx.set(lockRef, {
-        active: true,
-        lock_id: lockId,
-        acquired_at: nowIso,
-        locked_until_ms: lockedUntilMs
-      });
-      return { acquired: true, lockId };
-    });
+        const snap = await tx.get(lockRef);
+        const existing = snap.exists ? snap.data() || {} : null;
+        if (
+          existing &&
+          existing.active === true &&
+          Number(existing.locked_until_ms || 0) > nowMs
+        ) {
+          return { acquired: false, lockId: null };
+        }
+
+        tx.set(lockRef, {
+          active: true,
+          lock_id: lockId,
+          owner,
+          acquired_at: nowIso,
+          expires_at: expiresAtIso,
+          locked_until_ms: lockedUntilMs,
+          last_released_at: existing?.released_at ?? existing?.last_released_at ?? null
+        });
+        return { acquired: true, lockId };
+      })
+    );
   } catch (error) {
-    handleFirestoreFailure('Failed to acquire reconciliation lease in Firestore', error);
+    handleFirestoreFailure(`Failed to acquire cron lease (${lockDocId}) in Firestore`, error);
   }
 }
 
-/**
- * Releases the cross-instance Firestore reconciliation lease if still held by `lockId`.
- */
-export async function releaseReconciliationLeaseInFirebase(lockId: string | null): Promise<void> {
+async function releaseDistributedCronLeaseInFirebase(
+  lockDocId: string,
+  lockId: string | null
+): Promise<void> {
   if (!lockId || lockId === 'local' || !firestore) {
     return;
   }
 
-  const lockRef = firestore
+  const activeFirestore = firestore;
+  const lockRef = activeFirestore
     .collection(RECONCILIATION_LOCK_COLLECTION)
-    .doc(RECONCILIATION_LOCK_DOC_ID);
+    .doc(lockDocId);
 
   try {
-    await firestore.runTransaction(async (tx: any) => {
-      const snap = await tx.get(lockRef);
-      if (!snap.exists) {
-        return;
-      }
-      const existing = snap.data() || {};
-      if (existing.lock_id !== lockId) {
-        return;
-      }
-      tx.set(lockRef, {
-        active: false,
-        lock_id: null,
-        locked_until_ms: 0,
-        released_at: new Date().toISOString()
-      });
-    });
+    await enqueueCronLeaseTransaction(lockDocId, () =>
+      activeFirestore.runTransaction(async (tx: any) => {
+        const snap = await tx.get(lockRef);
+        if (!snap.exists) {
+          return;
+        }
+        const existing = snap.data() || {};
+        if (existing.lock_id !== lockId) {
+          return;
+        }
+        tx.set(lockRef, {
+          active: false,
+          lock_id: null,
+          owner: null,
+          expires_at: null,
+          locked_until_ms: 0,
+          released_at: new Date().toISOString(),
+          last_owner: existing.owner ?? existing.last_owner ?? null,
+          last_lock_id: existing.lock_id ?? null,
+          last_acquired_at: existing.acquired_at ?? existing.last_acquired_at ?? null,
+          last_expires_at: existing.expires_at ?? existing.last_expires_at ?? null
+        });
+      })
+    );
   } catch (err: any) {
-    logger.warn(`Failed to release reconciliation lease (${lockId}): ${err?.message || 'Unknown error'}`);
+    logger.warn(
+      `Failed to release cron lease ${lockDocId} (${lockId}): ${err?.message || 'Unknown error'}`
+    );
   }
+}
+
+/**
+ * Acquires a short-lived cross-instance Firestore lease (`system_locks/order_reconciliation`)
+ * exclusively for pending-order payment reconciliation.
+ */
+export async function acquireReconciliationLeaseInFirebase(
+  leaseTtlMs: number = DEFAULT_CRON_LEASE_TTL_MS
+): Promise<{ acquired: boolean; lockId: string | null }> {
+  return acquireDistributedCronLeaseInFirebase(
+    ORDER_RECONCILIATION_LOCK_DOC_ID,
+    'pending_order_reconciliation',
+    leaseTtlMs
+  );
+}
+
+/**
+ * Releases `system_locks/order_reconciliation` if still held by `lockId`,
+ * preserving diagnostic metadata from the completed run.
+ */
+export async function releaseReconciliationLeaseInFirebase(lockId: string | null): Promise<void> {
+  return releaseDistributedCronLeaseInFirebase(ORDER_RECONCILIATION_LOCK_DOC_ID, lockId);
+}
+
+/**
+ * Acquires a dedicated cross-instance Firestore lease (`system_locks/auto_refund_cron_lease`)
+ * exclusively for automatic refund sweeps so simultaneous pending-order reconciliation runs never block refunds.
+ */
+export async function acquireAutoRefundLeaseInFirebase(
+  leaseTtlMs: number = DEFAULT_CRON_LEASE_TTL_MS
+): Promise<{ acquired: boolean; lockId: string | null }> {
+  return acquireDistributedCronLeaseInFirebase(
+    AUTO_REFUND_CRON_LOCK_DOC_ID,
+    'auto_refund_sweep',
+    leaseTtlMs
+  );
+}
+
+/**
+ * Releases `system_locks/auto_refund_cron_lease` if still held by `lockId`,
+ * preserving diagnostic metadata from the completed sweep.
+ */
+export async function releaseAutoRefundLeaseInFirebase(lockId: string | null): Promise<void> {
+  return releaseDistributedCronLeaseInFirebase(AUTO_REFUND_CRON_LOCK_DOC_ID, lockId);
 }
 
 export interface CreateProdSuperAdminInput {

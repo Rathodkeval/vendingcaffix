@@ -10,7 +10,7 @@ import {
   ServiceUnavailableError
 } from '../utils/errors';
 import {
-  acquireReconciliationLeaseInFirebase,
+  acquireAutoRefundLeaseInFirebase,
   computeConnectionStatus,
   ensureFirebaseReady,
   getAuthoritativeMachineState,
@@ -20,7 +20,7 @@ import {
   getPendingRefundOrdersFromFirebase,
   getFirestoreInstance,
   isFirestoreActive,
-  releaseReconciliationLeaseInFirebase,
+  releaseAutoRefundLeaseInFirebase,
   updateSyncedFirebaseOrder
 } from '../utils/firebase';
 import {
@@ -1062,9 +1062,11 @@ export async function runAutoRefundSweep(
 ): Promise<AutoRefundSweepSummary> {
   ensureFirebaseReady();
   const db = getDB();
-  const nowMs = Number.isFinite(options.nowMs) ? Number(options.nowMs) : Date.now();
+  const resolveSweepNowMs = (): number =>
+    Number.isFinite(options.nowMs) ? Number(options.nowMs) : Date.now();
+  const initialNowMs = resolveSweepNowMs();
   const expiryMs = resolveAutoRefundQueuedExpiryMs(options.queuedExpiryMs);
-  const cutoffIso = new Date(nowMs - expiryMs).toISOString();
+  const initialCutoffIso = new Date(initialNowMs - expiryMs).toISOString();
   const limit =
     options.limit !== undefined && Number.isFinite(Number(options.limit)) && Number(options.limit) > 0
       ? Math.min(200, Math.max(1, Math.floor(Number(options.limit))))
@@ -1089,13 +1091,14 @@ export async function runAutoRefundSweep(
     skipped_other: 0,
     errors: 0,
     expiry_ms: expiryMs,
-    cutoff_iso: cutoffIso
+    cutoff_iso: initialCutoffIso
   };
 
   const dryRun = options.dryRun === true;
   const machineIdFilter = options.machineId ? String(options.machineId).trim() : undefined;
 
   if (dryRun) {
+    const nowMs = initialNowMs;
     // Strictly read-only dry-run: zero lease locks, zero Firestore writes, zero Razorpay calls
     const pendingOrders = await getPendingRefundOrdersFromFirebase(db, {
       machineId: machineIdFilter,
@@ -1198,11 +1201,15 @@ export async function runAutoRefundSweep(
     return summary;
   }
 
-  const lease = await acquireReconciliationLeaseInFirebase();
+  const lease = await acquireAutoRefundLeaseInFirebase();
   if (!lease.acquired) {
     summary.skipped_due_to_active_run = true;
     return summary;
   }
+
+  // Capture authoritative sweep timestamp AFTER acquiring the dedicated auto-refund lease
+  const nowMs = resolveSweepNowMs();
+  summary.cutoff_iso = new Date(nowMs - expiryMs).toISOString();
 
   try {
     const pendingOrders = await getPendingRefundOrdersFromFirebase(db, {
@@ -1299,7 +1306,7 @@ export async function runAutoRefundSweep(
     summary.scanned = scannedIds.size;
     return summary;
   } finally {
-    await releaseReconciliationLeaseInFirebase(lease.lockId);
+    await releaseAutoRefundLeaseInFirebase(lease.lockId);
   }
 }
 

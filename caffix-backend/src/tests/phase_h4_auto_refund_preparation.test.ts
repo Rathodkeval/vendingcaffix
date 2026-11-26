@@ -41,12 +41,21 @@ const {
 } = require('../services/autoRefundService');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
+  AUTO_REFUND_CRON_LOCK_DOC_ID,
+  DEFAULT_CRON_LEASE_TTL_MS,
+  ORDER_RECONCILIATION_LOCK_DOC_ID,
+  acquireAutoRefundLeaseInFirebase,
   ensureFirebaseReady,
   getFirestoreInstance,
   getPaidOrdersForAutoRefundFromFirebase,
+  releaseAutoRefundLeaseInFirebase,
   resetFirestoreSeedStateForTesting,
   setFirestoreForTesting
 } = require('../utils/firebase');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { runPendingOrderReconciliation } = require('../controllers/cronController');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { setRazorpayClientForTesting } = require('../controllers/orderController');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
   executeGatewayRefund,
@@ -883,8 +892,310 @@ async function runTests(): Promise<void> {
     assert.ok(recUninitiated.details.includes('no refund has been initiated'));
     console.log('   PASS: Fallback FAILED exclusion, gateway error metadata/redaction, and FAILED wording verified.');
 
+    // =========================================================================
+    // TEST 7: Separate cron leases, 90s TTL, diagnostic metadata, post-lease timestamp & fencing
+    // =========================================================================
+    console.log('7. Testing simultaneous pending-order reconciliation + auto-refund sweep, lease fencing & metadata...');
+    await clearEmulatorDatabase();
+    resetFirestoreSeedStateForTesting();
+    clearSyncedRefundsStore();
+
+    assert.strictEqual(ORDER_RECONCILIATION_LOCK_DOC_ID, 'order_reconciliation');
+    assert.strictEqual(AUTO_REFUND_CRON_LOCK_DOC_ID, 'auto_refund_cron_lease');
+    assert.strictEqual(DEFAULT_CRON_LEASE_TTL_MS, 90_000, 'Default cron lease TTL must be 90s');
+
+    const stalePendingCreatedIso = new Date(Date.now() - 15 * 60_000).toISOString();
+    const expiredQueuedPaidIso = new Date(Date.now() - 10 * 60_000).toISOString();
+    const expiredQueuedExpIso = new Date(Date.parse(expiredQueuedPaidIso) + 5 * 60_000).toISOString();
+
+    await seedOrdersBatch(firestore, [
+      {
+        id: 'ORD-H4-SIMUL-PEND-01',
+        machine_id: 'CFX-MC-01',
+        product_id: 1,
+        product_name: 'Classic Crest',
+        coffee: 'Classic Crest',
+        amount: 100,
+        status: 'PENDING',
+        dispense_status: 'PENDING',
+        dispensed: false,
+        refund_status: 'NONE',
+        total_refunded_amount_paise: 0,
+        pending_refund_amount_paise: 0,
+        razorpay_order_id: 'order_h4_simul_pend_01',
+        created_at: stalePendingCreatedIso,
+        updated_at: stalePendingCreatedIso
+      },
+      {
+        id: 'CFX-H4-SIMUL-REFUND-01',
+        machine_id: 'CFX-MC-02',
+        product_id: 1,
+        product_name: 'Classic Crest',
+        coffee: 'Classic Crest',
+        amount: 100,
+        captured_amount_paise: 10000,
+        status: 'PAID',
+        dispense_status: 'QUEUED',
+        dispensed: false,
+        refund_status: 'NONE',
+        total_refunded_amount_paise: 0,
+        pending_refund_amount_paise: 0,
+        razorpay_order_id: 'order_h4_simul_ref_01',
+        razorpay_payment_id: 'pay_h4_simul_ref_01',
+        created_at: expiredQueuedPaidIso,
+        paid_at: expiredQueuedPaidIso,
+        expires_at: expiredQueuedExpIso,
+        updated_at: expiredQueuedPaidIso
+      }
+    ]);
+
+    let inFlightReconLock: any = null;
+    let inFlightRefundLock: any = null;
+    let simulRefundCalls = 0;
+
+    let markReconInFlight!: () => void;
+    let markRefundInFlight!: () => void;
+    const reconInFlightPromise = new Promise<void>((r) => {
+      markReconInFlight = r;
+    });
+    const refundInFlightPromise = new Promise<void>((r) => {
+      markRefundInFlight = r;
+    });
+
+    setRazorpayClientForTesting({
+      orders: {
+        fetch: async () => {
+          markReconInFlight();
+          await refundInFlightPromise;
+          inFlightReconLock = (
+            await firestore.collection('system_locks').doc(ORDER_RECONCILIATION_LOCK_DOC_ID).get()
+          ).data();
+          return {
+            id: 'order_h4_simul_pend_01',
+            status: 'paid',
+            currency: 'INR',
+            amount: 10000,
+            amount_paid: 10000,
+            attempts: 1
+          };
+        },
+        fetchPayments: async () => ({
+          items: [
+            {
+              id: 'pay_h4_simul_pend_01',
+              order_id: 'order_h4_simul_pend_01',
+              status: 'captured',
+              currency: 'INR',
+              amount: 10000
+            }
+          ]
+        })
+      }
+    });
+
+    setRazorpayRefundClientForTesting({
+      payments: {
+        refund: async (paymentId: string, payload: any) => {
+          simulRefundCalls += 1;
+          markRefundInFlight();
+          await reconInFlightPromise;
+          inFlightRefundLock = (
+            await firestore.collection('system_locks').doc(AUTO_REFUND_CRON_LOCK_DOC_ID).get()
+          ).data();
+          await new Promise((r) => setTimeout(r, 30));
+          return {
+            id: `rfnd_h4_simul_${simulRefundCalls}`,
+            payment_id: paymentId,
+            amount: Number(payload.amount),
+            currency: 'INR',
+            status: 'processed',
+            receipt: payload.receipt,
+            created_at: Math.floor(Date.now() / 1000)
+          };
+        },
+        fetchRefunds: async () => ({ items: [] })
+      },
+      refunds: { fetch: async () => null }
+    });
+
+    // 7a: Pending-order reconciliation and auto-refund sweep run simultaneously without blocking each other
+    const [simulReconSummary, simulRefundSummary] = await Promise.all([
+      runPendingOrderReconciliation(),
+      runAutoRefundSweep({ machineId: 'CFX-MC-02' })
+    ]);
+
+    assert.strictEqual(simulReconSummary.skipped_due_to_active_run, undefined);
+    assert.strictEqual(simulRefundSummary.skipped_due_to_active_run, undefined);
+    assert.strictEqual(simulReconSummary.reconciled_paid, 1);
+    assert.strictEqual(simulRefundSummary.expired_queued, 1);
+    assert.strictEqual(simulRefundSummary.refunded_processed, 1);
+    assert.strictEqual(simulRefundCalls, 1);
+
+    // Verify in-flight lock metadata & 90-second default TTL on BOTH separate lock documents
+    assert.ok(inFlightReconLock, 'order_reconciliation lock must be active during pending reconciliation');
+    assert.strictEqual(inFlightReconLock.active, true);
+    assert.strictEqual(inFlightReconLock.owner, 'pending_order_reconciliation');
+    assert.ok(inFlightReconLock.lock_id);
+    assert.strictEqual(
+      inFlightReconLock.locked_until_ms - Date.parse(inFlightReconLock.acquired_at),
+      90_000,
+      'order_reconciliation lease TTL must default to 90s'
+    );
+    assert.strictEqual(
+      Date.parse(inFlightReconLock.expires_at),
+      inFlightReconLock.locked_until_ms
+    );
+
+    assert.ok(inFlightRefundLock, 'auto_refund_cron_lease lock must be active during refund sweep');
+    assert.strictEqual(inFlightRefundLock.active, true);
+    assert.strictEqual(inFlightRefundLock.owner, 'auto_refund_sweep');
+    assert.ok(inFlightRefundLock.lock_id);
+    assert.notStrictEqual(inFlightRefundLock.lock_id, inFlightReconLock.lock_id);
+    assert.strictEqual(
+      inFlightRefundLock.locked_until_ms - Date.parse(inFlightRefundLock.acquired_at),
+      90_000,
+      'auto_refund_cron_lease TTL must default to 90s'
+    );
+    assert.strictEqual(
+      Date.parse(inFlightRefundLock.expires_at),
+      inFlightRefundLock.locked_until_ms
+    );
+
+    // Verify post-release diagnostic metadata preservation & post-lease sweep timestamp capture
+    const releasedReconLock = (
+      await firestore.collection('system_locks').doc(ORDER_RECONCILIATION_LOCK_DOC_ID).get()
+    ).data();
+    const releasedRefundLock = (
+      await firestore.collection('system_locks').doc(AUTO_REFUND_CRON_LOCK_DOC_ID).get()
+    ).data();
+
+    assert.strictEqual(releasedReconLock?.active, false);
+    assert.strictEqual(releasedReconLock?.lock_id, null);
+    assert.strictEqual(releasedReconLock?.owner, null);
+    assert.strictEqual(releasedReconLock?.expires_at, null);
+    assert.strictEqual(releasedReconLock?.locked_until_ms, 0);
+    assert.ok(releasedReconLock?.released_at);
+    assert.strictEqual(releasedReconLock?.last_owner, 'pending_order_reconciliation');
+    assert.strictEqual(releasedReconLock?.last_lock_id, inFlightReconLock.lock_id);
+    assert.strictEqual(releasedReconLock?.last_acquired_at, inFlightReconLock.acquired_at);
+    assert.strictEqual(releasedReconLock?.last_expires_at, inFlightReconLock.expires_at);
+
+    assert.strictEqual(releasedRefundLock?.active, false);
+    assert.strictEqual(releasedRefundLock?.lock_id, null);
+    assert.strictEqual(releasedRefundLock?.owner, null);
+    assert.strictEqual(releasedRefundLock?.expires_at, null);
+    assert.strictEqual(releasedRefundLock?.locked_until_ms, 0);
+    assert.ok(releasedRefundLock?.released_at);
+    assert.strictEqual(releasedRefundLock?.last_owner, 'auto_refund_sweep');
+    assert.strictEqual(releasedRefundLock?.last_lock_id, inFlightRefundLock.lock_id);
+    assert.strictEqual(releasedRefundLock?.last_acquired_at, inFlightRefundLock.acquired_at);
+    assert.strictEqual(releasedRefundLock?.last_expires_at, inFlightRefundLock.expires_at);
+
+    const simulRefundedOrder = (
+      await firestore.collection('orders').doc('CFX-H4-SIMUL-REFUND-01').get()
+    ).data();
+    assert.strictEqual(simulRefundedOrder?.refund_status, 'FULL');
+    assert.strictEqual(simulRefundedOrder?.dispense_status, 'EXPIRED');
+    assert.ok(
+      Date.parse(simulRefundedOrder?.expired_at) >= Date.parse(inFlightRefundLock.acquired_at),
+      'Sweep evaluation timestamp (expired_at) must be captured AFTER acquiring auto_refund_cron_lease'
+    );
+
+    // 7b: Two overlapping auto-refund sweeps still block each other on auto_refund_cron_lease
+    await firestore.collection('orders').doc('CFX-H4-OVERLAP-02').set({
+      id: 'CFX-H4-OVERLAP-02',
+      machine_id: 'CFX-MC-02',
+      product_id: 1,
+      product_name: 'Classic Crest',
+      coffee: 'Classic Crest',
+      amount: 100,
+      captured_amount_paise: 10000,
+      status: 'PAID',
+      dispense_status: 'QUEUED',
+      dispensed: false,
+      refund_status: 'NONE',
+      total_refunded_amount_paise: 0,
+      pending_refund_amount_paise: 0,
+      razorpay_order_id: 'order_h4_overlap_02',
+      razorpay_payment_id: 'pay_h4_overlap_02',
+      created_at: expiredQueuedPaidIso,
+      paid_at: expiredQueuedPaidIso,
+      expires_at: expiredQueuedExpIso,
+      updated_at: expiredQueuedPaidIso
+    });
+
+    let overlapCalls = 0;
+    setRazorpayRefundClientForTesting({
+      payments: {
+        refund: async (paymentId: string, payload: any) => {
+          overlapCalls += 1;
+          await new Promise((r) => setTimeout(r, 200));
+          return {
+            id: `rfnd_h4_ov_${overlapCalls}`,
+            payment_id: paymentId,
+            amount: Number(payload.amount),
+            currency: 'INR',
+            status: 'processed',
+            receipt: payload.receipt,
+            created_at: Math.floor(Date.now() / 1000)
+          };
+        },
+        fetchRefunds: async () => ({ items: [] })
+      },
+      refunds: { fetch: async () => null }
+    });
+
+    const [ovSweep1, ovSweep2] = await Promise.all([
+      runAutoRefundSweep({ machineId: 'CFX-MC-02' }),
+      runAutoRefundSweep({ machineId: 'CFX-MC-02' })
+    ]);
+    assert.strictEqual(overlapCalls, 1, 'Overlapping auto-refund sweeps must invoke Razorpay once');
+    const skippedSweep = ovSweep1.skipped_due_to_active_run ? ovSweep1 : ovSweep2;
+    const executedSweep = ovSweep1.skipped_due_to_active_run ? ovSweep2 : ovSweep1;
+    assert.strictEqual(skippedSweep.skipped_due_to_active_run, true);
+    assert.strictEqual(skippedSweep.scanned, 0);
+    assert.strictEqual(executedSweep.skipped_due_to_active_run, undefined);
+    assert.strictEqual(executedSweep.refunded_processed, 1);
+
+    // 7c: Lease fencing (stale lock_id cannot release fresh lease) & idempotency re-sweep check
+    await firestore.collection('system_locks').doc(AUTO_REFUND_CRON_LOCK_DOC_ID).set({
+      active: true,
+      lock_id: 'stale-expired-worker-lock-id',
+      owner: 'auto_refund_sweep',
+      acquired_at: new Date(Date.now() - 120_000).toISOString(),
+      expires_at: new Date(Date.now() - 30_000).toISOString(),
+      locked_until_ms: Date.now() - 30_000
+    });
+
+    const freshLease = await acquireAutoRefundLeaseInFirebase();
+    assert.strictEqual(freshLease.acquired, true);
+    assert.ok(freshLease.lockId && freshLease.lockId !== 'stale-expired-worker-lock-id');
+
+    // Stale worker finishing late attempts to release its old lockId -> must NOT release freshLease
+    await releaseAutoRefundLeaseInFirebase('stale-expired-worker-lock-id');
+    const afterStaleRelease = (
+      await firestore.collection('system_locks').doc(AUTO_REFUND_CRON_LOCK_DOC_ID).get()
+    ).data();
+    assert.strictEqual(afterStaleRelease?.active, true, 'Stale lock_id must never release fresh lease');
+    assert.strictEqual(afterStaleRelease?.lock_id, freshLease.lockId);
+
+    // Fresh worker releases cleanly -> diagnostic metadata preserved, subsequent idempotent sweep is a no-op
+    await releaseAutoRefundLeaseInFirebase(freshLease.lockId);
+    const afterFreshRelease = (
+      await firestore.collection('system_locks').doc(AUTO_REFUND_CRON_LOCK_DOC_ID).get()
+    ).data();
+    assert.strictEqual(afterFreshRelease?.active, false);
+    assert.strictEqual(afterFreshRelease?.last_lock_id, freshLease.lockId);
+
+    const idempotentResweep = await runAutoRefundSweep({ machineId: 'CFX-MC-02' });
+    assert.strictEqual(idempotentResweep.refunded_processed, 0);
+    assert.strictEqual(overlapCalls, 1, 'Idempotent re-sweep must never issue duplicate gateway calls');
+    setRazorpayClientForTesting(null);
+    console.log('   PASS: Separate cron leases, 90s TTL, metadata preservation, post-lease timestamp & fencing verified.');
+
     console.log('\nALL PHASE H.4 AUTOMATED REFUND PREPARATION TESTS PASSED SUCCESSFULLY!\n');
   } finally {
+    setRazorpayClientForTesting(null);
     setRazorpayRefundClientForTesting(null);
     delete process.env.BLOCK_OFFLINE_MACHINE_ORDERS;
     await new Promise<void>((resolve) => server.close(() => resolve()));
