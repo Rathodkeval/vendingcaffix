@@ -20,8 +20,8 @@ process.env.CRON_SECRET = TEST_CRON_SECRET;
 process.env.JWT_SECRET = 'phase_h4_jwt_secret_123456';
 process.env.KIOSK_SECRET = 'phase_h4_shared_kiosk_secret';
 process.env.ENFORCE_PER_MACHINE_SECRETS = 'true';
-delete process.env.RAZORPAY_KEY_ID;
-delete process.env.RAZORPAY_KEY_SECRET;
+process.env.RAZORPAY_KEY_ID = 'mock_test_key_isolated';
+process.env.RAZORPAY_KEY_SECRET = 'mock_test_secret_isolated';
 process.env.RAZORPAY_WEBHOOK_SECRET = 'h4_prep_wh_secret_abc456';
 delete process.env.BLOCK_OFFLINE_MACHINE_ORDERS;
 delete process.env.AUTO_REFUND_QUEUED_EXPIRY_MINUTES;
@@ -34,6 +34,9 @@ process.env.VERCEL = '1';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const app = require('../index').default;
 delete process.env.VERCEL;
+delete process.env.RAZORPAY_KEY_ID;
+delete process.env.RAZORPAY_KEY_SECRET;
+delete process.env.BLOCK_OFFLINE_MACHINE_ORDERS;
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
   DEFAULT_AUTO_REFUND_QUEUED_EXPIRY_MINUTES,

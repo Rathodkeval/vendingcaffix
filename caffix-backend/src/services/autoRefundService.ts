@@ -24,10 +24,15 @@ import {
   updateSyncedFirebaseOrder
 } from '../utils/firebase';
 import {
+  assertRefundExecutionReady,
   executeGatewayRefund,
+  fetchRelayRefundStatus,
   GatewayRefundResponse,
+  getTestRazorpayRefundClientOverride,
+  reconcileRelayRefund,
   resolveRazorpayRefundConfig
 } from '../utils/razorpayRefundClient';
+import { resolveRefundRelayConfig } from '../utils/security';
 import {
   DispensedQuantityConfirmed,
   InspectionResult,
@@ -253,7 +258,10 @@ export async function executeOrderRefundTransaction(
     inspection_notes
   } = params;
 
-  // Step 1: Reserve balance atomically BEFORE contacting Razorpay
+  // Pre-flight fail-closed check BEFORE reserving a PENDING refund in Firestore
+  assertRefundExecutionReady(String(order.razorpay_payment_id || ''), requestedPaise);
+
+  // Step 1: Reserve balance atomically BEFORE contacting Razorpay / VPS Relay
   const reservation = await createPendingRefundReservation(db, {
     orderId: order.id,
     amount_paise: requestedPaise,
@@ -280,12 +288,13 @@ export async function executeOrderRefundTransaction(
     };
   }
 
-  // Step 2: Invoke Razorpay Refunds API
+  // Step 2: Invoke VPS Refund Relay (or test/local mock)
   const gatewayResult = await executeGatewayRefund({
     orderId: order.id,
     paymentId: String(order.razorpay_payment_id),
     amountPaise: requestedPaise,
     receipt: reservation.refund.id,
+    idempotencyKey: reservation.refund.idempotency_key,
     notes: {
       order_id: order.id,
       refund_id: reservation.refund.id,
@@ -359,7 +368,7 @@ export async function executeOrderRefundTransaction(
     };
   }
 
-  if (gatewayResult.isTimeout) {
+  if (gatewayResult.isTimeout || gatewayResult.isUncertain) {
     return {
       outcome: 'timeout',
       refund: reservation.refund,
@@ -1220,16 +1229,14 @@ export async function reconcilePendingRefundsForOrder(
     return result;
   }
 
-  let razorpayClient: any = null;
-  try {
-    const cfg = resolveRazorpayRefundConfig();
-    razorpayClient = cfg.razorpayClient;
-  } catch {
-    return result;
-  }
-
-  if (!razorpayClient) {
-    return result;
+  const testMockClient = getTestRazorpayRefundClientOverride();
+  let useRelay = !testMockClient;
+  if (useRelay) {
+    try {
+      resolveRefundRelayConfig();
+    } catch {
+      return result;
+    }
   }
 
   const refunds = await getRefundsByOrderId(db, String(order.id));
@@ -1242,13 +1249,44 @@ export async function reconcilePendingRefundsForOrder(
     try {
       let gwRefund: any = null;
 
-      if (
+      if (useRelay) {
+        let relayOutcome = pendingRefund.idempotency_key
+          ? await reconcileRelayRefund(String(pendingRefund.idempotency_key))
+          : null;
+
+        if ((!relayOutcome || relayOutcome.outcome === 'UNCERTAIN') && pendingRefund.razorpay_refund_id) {
+          const statusOutcome = await fetchRelayRefundStatus(
+            String(pendingRefund.razorpay_refund_id),
+            String(order.razorpay_payment_id)
+          );
+          if (statusOutcome.outcome === 'CONFIRMED') {
+            relayOutcome = statusOutcome;
+          }
+        }
+
+        if (!relayOutcome || relayOutcome.outcome === 'UNCERTAIN') {
+          result.stillPending += 1;
+          continue;
+        }
+
+        if (relayOutcome.outcome === 'REJECTED') {
+          await markRefundFailed(db, {
+            refundId: pendingRefund.id,
+            error_code: relayOutcome.errorCode || 'RELAY_REJECTED',
+            error_description: relayOutcome.errorDescription || 'VPS Refund Relay confirmed refund rejection'
+          });
+          result.settledFailed += 1;
+          continue;
+        }
+
+        gwRefund = relayOutcome.refund || null;
+      } else if (
         pendingRefund.razorpay_refund_id &&
-        typeof razorpayClient.refunds?.fetch === 'function'
+        typeof testMockClient.refunds?.fetch === 'function'
       ) {
-        gwRefund = await razorpayClient.refunds.fetch(String(pendingRefund.razorpay_refund_id));
-      } else if (typeof razorpayClient.payments?.fetchRefunds === 'function') {
-        const listResp = await razorpayClient.payments.fetchRefunds(
+        gwRefund = await testMockClient.refunds.fetch(String(pendingRefund.razorpay_refund_id));
+      } else if (typeof testMockClient.payments?.fetchRefunds === 'function') {
+        const listResp = await testMockClient.payments.fetchRefunds(
           String(order.razorpay_payment_id)
         );
         const items: any[] = Array.isArray(listResp)

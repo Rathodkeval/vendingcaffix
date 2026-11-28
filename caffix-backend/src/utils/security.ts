@@ -350,3 +350,57 @@ export function redactSensitiveText(input: string): string {
     );
 }
 
+/**
+ * Strict server-side feature gate for live Razorpay refund submission via the VPS Refund Relay.
+ * Only returns true when `RAZORPAY_REFUNDS_ENABLED` is strictly `"true"`.
+ */
+export function isRefundSubmissionEnabled(): boolean {
+  return process.env.RAZORPAY_REFUNDS_ENABLED === 'true';
+}
+
+export interface RefundRelayConfig {
+  relayUrl: string;
+  relaySecret: string;
+}
+
+/**
+ * Validates and returns server-side Ubuntu VPS Refund Relay configuration.
+ * Fails closed with HTTP 503 if `REFUND_RELAY_URL` or `REFUND_RELAY_SECRET` is missing,
+ * malformed, or uses a placeholder/weak value.
+ */
+export function resolveRefundRelayConfig(): RefundRelayConfig {
+  const rawUrl = (process.env.REFUND_RELAY_URL || '').trim().replace(/\/+$/, '');
+  const rawSecret = (process.env.REFUND_RELAY_SECRET || '').trim();
+
+  if (!rawUrl) {
+    throw new ServiceUnavailableError(
+      'Refund relay unavailable: REFUND_RELAY_URL is not configured (HTTP 503)'
+    );
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(rawUrl);
+  } catch {
+    throw new ServiceUnavailableError(
+      'Refund relay unavailable: REFUND_RELAY_URL is not a valid URL (HTTP 503)'
+    );
+  }
+
+  if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+    throw new ServiceUnavailableError(
+      'Refund relay unavailable: REFUND_RELAY_URL must use http or https (HTTP 503)'
+    );
+  }
+
+  if (!rawSecret || isMockSecretValue(rawSecret) || rawSecret.length < 16) {
+    throw new ServiceUnavailableError(
+      'Refund relay unavailable: REFUND_RELAY_SECRET is missing, mock, or shorter than 16 characters (HTTP 503)'
+    );
+  }
+
+  return {
+    relayUrl: parsedUrl.toString().replace(/\/+$/, ''),
+    relaySecret: rawSecret
+  };
+}
