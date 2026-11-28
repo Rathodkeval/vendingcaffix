@@ -10,18 +10,34 @@ import {
   ServiceUnavailableError
 } from '../utils/errors';
 import {
+  AUTO_REFUND_CRON_LOCK_DOC_ID,
+  AUTO_REFUND_MAX_SCAN_PER_MACHINE,
+  AUTO_REFUND_MAX_SCAN_PER_SWEEP,
+  AUTO_REFUND_PAGE_SIZE,
+  AUTO_REFUND_SOFT_WALL_CLOCK_MS,
+  AutoRefundCursorPosition,
+  SweepLeaseFencing,
   acquireAutoRefundLeaseInFirebase,
+  advanceMachineRoundRobinIndexInFirebase,
+  assertAndRenewSweepLeaseInTx,
   computeConnectionStatus,
   ensureFirebaseReady,
+  getActiveMachineIdsForAutoRefundFromFirebase,
   getAuthoritativeMachineState,
   getAuthoritativeOrderById,
   getAuthoritativeOrders,
+  getAutoRefundCursorInFirebase,
+  getAutoRefundSweepControlInFirebase,
+  getManualReviewAnomalyOrdersFromFirebase,
   getPaidOrdersForAutoRefundFromFirebase,
+  getPaidOrdersPageForAutoRefundFromFirebase,
   getPendingRefundOrdersFromFirebase,
   getFirestoreInstance,
   isFirestoreActive,
   releaseAutoRefundLeaseInFirebase,
-  updateSyncedFirebaseOrder
+  saveAutoRefundCursorInFirebase,
+  updateSyncedFirebaseOrder,
+  verifyOrRenewAutoRefundLeaseInFirebase
 } from '../utils/firebase';
 import {
   assertRefundExecutionReady,
@@ -93,6 +109,7 @@ export interface RefundTransactionExecutionParams {
   inspected_by_admin_email?: string | null;
   inspected_at?: string | null;
   inspection_notes?: string | null;
+  leaseFencing?: SweepLeaseFencing | null;
 }
 
 export type RefundTransactionOutcome =
@@ -167,6 +184,15 @@ export interface AutoRefundSweepSummary {
   skipped_other: number;
   errors: number;
   skipped_due_to_active_run?: boolean;
+  aborted_due_to_lease_loss?: boolean;
+  manual_review_anomaly_count?: number;
+  manual_review_anomalies?: Array<{
+    order_id: string;
+    machine_id: string | null;
+    status: string;
+    dispense_status: string | null;
+    refund_status: string | null;
+  }>;
   expiry_ms: number;
   cutoff_iso: string;
   orders?: AutoRefundDryRunOrderReport[];
@@ -255,7 +281,8 @@ export async function executeOrderRefundTransaction(
     inspected_by_admin_id,
     inspected_by_admin_email,
     inspected_at,
-    inspection_notes
+    inspection_notes,
+    leaseFencing
   } = params;
 
   // Pre-flight fail-closed check BEFORE reserving a PENDING refund in Firestore
@@ -276,7 +303,8 @@ export async function executeOrderRefundTransaction(
     inspected_by_admin_id,
     inspected_by_admin_email,
     inspected_at,
-    inspection_notes
+    inspection_notes,
+    leaseFencing: leaseFencing ?? null
   });
 
   if (reservation.isReplay) {
@@ -286,6 +314,33 @@ export async function executeOrderRefundTransaction(
       refund: reservation.refund,
       order: latestOrder
     };
+  }
+
+  // Best-effort pre-HTTP lease check: if lease was lost after durable PENDING reservation
+  // committed, stop before POST /v1/refunds and leave for safe reconciliation.
+  if (leaseFencing && leaseFencing.lockId && leaseFencing.lockId !== 'local') {
+    const leaseCheck = await verifyOrRenewAutoRefundLeaseInFirebase(leaseFencing.lockId);
+    if (!leaseCheck.valid) {
+      logger.warn(
+        `[Auto-Refund] Lease lost after committing PENDING reservation ${reservation.refund.id} for order ${order.id}; stopping before VPS dispatch and leaving for reconciliation.`
+      );
+      return {
+        outcome: 'pending',
+        refund: reservation.refund,
+        order: reservation.order,
+        gateway: {
+          success: false,
+          isMock: false,
+          isUncertain: true,
+          paymentId: String(order.razorpay_payment_id),
+          amountPaise: requestedPaise,
+          currency: 'INR',
+          status: 'PENDING',
+          errorCode: 'LEASE_LOST_BEFORE_DISPATCH',
+          errorDescription: 'Sweep lease expired or replaced before VPS dispatch; reservation held in PENDING.'
+        }
+      };
+    }
   }
 
   // Step 2: Invoke VPS Refund Relay (or test/local mock)
@@ -437,9 +492,17 @@ export function evaluateAutoRefundEligibility(
     };
   }
 
-  const dispenseStatus = String(order.dispense_status || 'PENDING').toUpperCase();
+  const dispenseStatus = String(order.dispense_status ?? '').trim().toUpperCase();
   const dispenseOutcome = String(order.dispense_outcome || '').toUpperCase();
   const failureStage = String(order.failure_stage || '').toUpperCase();
+
+  if (!dispenseStatus) {
+    return {
+      eligible: false,
+      skipReason: 'UNCERTAIN_DISPENSE_OUTCOME',
+      details: 'Order dispense_status is missing; auto-refund forbidden without explicit pre-dispense state.'
+    };
+  }
 
   // Strictly block already-dispensed orders
   if (order.dispensed === true || dispenseStatus === 'DISPENSED' || dispenseOutcome === 'DISPENSED') {
@@ -687,7 +750,8 @@ async function lockAndVerifyOrderForAutoRefund(
   orderId: string,
   nowMs: number,
   queuedExpiryMs: number,
-  dispensingTimeoutMs: number
+  dispensingTimeoutMs: number,
+  leaseFencing?: SweepLeaseFencing | null
 ): Promise<{
   proceed: boolean;
   order?: any;
@@ -702,6 +766,11 @@ async function lockAndVerifyOrderForAutoRefund(
     const txRes = await firestore.runTransaction(async (tx) => {
       const orderRef = firestore.collection('orders').doc(orderId);
       const snap = await tx.get(orderRef);
+
+      if (leaseFencing && leaseFencing.lockId && leaseFencing.lockId !== 'local') {
+        await assertAndRenewSweepLeaseInTx(tx, firestore, leaseFencing, Date.now());
+      }
+
       if (!snap.exists) {
         return {
           proceed: false,
@@ -882,7 +951,12 @@ async function lockAndVerifyOrderForAutoRefund(
 export async function processAutoRefundForOrder(
   db: any,
   orderId: string,
-  options: { nowMs?: number; queuedExpiryMs?: number; dispensingTimeoutMs?: number } = {}
+  options: {
+    nowMs?: number;
+    queuedExpiryMs?: number;
+    dispensingTimeoutMs?: number;
+    leaseFencing?: SweepLeaseFencing | null;
+  } = {}
 ): Promise<{
   status: 'refunded' | 'pending' | 'failed' | 'replayed' | 'skipped' | 'mismatch';
   didExpireQueued: boolean;
@@ -900,7 +974,8 @@ export async function processAutoRefundForOrder(
     orderId,
     nowMs,
     queuedExpiryMs,
-    dispensingTimeoutMs
+    dispensingTimeoutMs,
+    options.leaseFencing ?? null
   );
   if (!locked.proceed || !locked.order || !locked.eligibility) {
     return {
@@ -929,7 +1004,8 @@ export async function processAutoRefundForOrder(
     notes: order.failure_reason ? `Failure reason: ${order.failure_reason}` : locked.eligibility.details,
     initiatedBy: 'system_auto_refund',
     source: 'RECONCILIATION',
-    idempotencyKey
+    idempotencyKey,
+    leaseFencing: options.leaseFencing ?? null
   });
 
   if (execRes.outcome === 'replay') {
@@ -1504,12 +1580,24 @@ export async function runAutoRefundSweep(
       });
     }
 
+    const anomalies = await getManualReviewAnomalyOrdersFromFirebase(db, {
+      machineId: machineIdFilter,
+      limit: 20
+    });
     const pendingCandidates = Array.from(pendingByOrderId.values());
     summary.dry_run = true;
     summary.limit = limit;
     summary.scanned = scannedIds.size;
     summary.skipped = dryRunOrders.filter((entry) => !entry.eligible).length;
     summary.pending_reconciliation_count = pendingCandidates.length;
+    summary.manual_review_anomaly_count = anomalies.length;
+    summary.manual_review_anomalies = anomalies.map((a: any) => ({
+      order_id: String(a.id),
+      machine_id: a.machine_id ? String(a.machine_id) : null,
+      status: String(a.status || 'UNKNOWN').toUpperCase(),
+      dispense_status: a.dispense_status ? String(a.dispense_status).toUpperCase() : null,
+      refund_status: a.refund_status ? String(a.refund_status).toUpperCase() : null
+    }));
     summary.orders = dryRunOrders;
     summary.pending_reconciliation_candidates = pendingCandidates;
     return summary;
@@ -1522,23 +1610,32 @@ export async function runAutoRefundSweep(
   }
 
   // Capture authoritative sweep timestamp AFTER acquiring the dedicated auto-refund lease
+  const sweepStartedMs = Date.now();
   const nowMs = resolveSweepNowMs();
   summary.cutoff_iso = new Date(nowMs - expiryMs).toISOString();
+  const leaseFencing: SweepLeaseFencing = {
+    lockDocId: AUTO_REFUND_CRON_LOCK_DOC_ID,
+    lockId: lease.lockId || 'local'
+  };
 
   try {
+    const reconciliationLimit = Math.min(50, Math.max(20, limit));
     const pendingOrders = await getPendingRefundOrdersFromFirebase(db, {
       machineId: machineIdFilter,
-      limit
-    });
-    const paidOrders = await getPaidOrdersForAutoRefundFromFirebase(db, {
-      machineId: machineIdFilter,
-      limit
+      limit: reconciliationLimit
     });
 
     const scannedIds = new Set<string>();
     const handledOrderIds = new Set<string>();
 
     for (const order of pendingOrders) {
+      if (Date.now() - sweepStartedMs >= AUTO_REFUND_SOFT_WALL_CLOCK_MS) break;
+      const leaseCheck = await verifyOrRenewAutoRefundLeaseInFirebase(lease.lockId);
+      if (!leaseCheck.valid) {
+        summary.aborted_due_to_lease_loss = true;
+        break;
+      }
+
       if (order?.id) scannedIds.add(String(order.id));
       try {
         const pendingRecon = await reconcilePendingRefundsForOrder(db, order);
@@ -1563,61 +1660,238 @@ export async function runAutoRefundSweep(
       }
     }
 
-    for (const order of paidOrders) {
-      if (order?.id) scannedIds.add(String(order.id));
-      if (order?.id && handledOrderIds.has(String(order.id))) {
-        continue;
-      }
-      try {
-        if (
-          String(order?.refund_status || '').toUpperCase() === 'PENDING' ||
-          Number(order?.pending_refund_amount_paise || 0) > 0
-        ) {
-          const pendingRecon = await reconcilePendingRefundsForOrder(db, order);
-          summary.reconciled_pending_processed =
-            (summary.reconciled_pending_processed || 0) + pendingRecon.settledProcessed;
-          summary.reconciled_pending_failed =
-            (summary.reconciled_pending_failed || 0) + pendingRecon.settledFailed;
-          if (pendingRecon.settledProcessed > 0) {
-            summary.refunded_processed += pendingRecon.settledProcessed;
-            continue;
-          }
-          if (pendingRecon.settledFailed > 0) {
-            summary.refund_failed += pendingRecon.settledFailed;
-            continue;
-          }
-          if (pendingRecon.stillPending > 0) {
-            summary.skipped_already_refunded += 1;
-            continue;
-          }
-        }
+    const isFleetSweep = !machineIdFilter;
+    let targetMachines: string[] = [];
+    let startIndex = 0;
+    let sweepControlVersion = 0;
 
-        const res = await processAutoRefundForOrder(db, order.id, {
-          nowMs,
-          queuedExpiryMs: expiryMs,
-          dispensingTimeoutMs
-        });
-
-        if (res.didExpireQueued) {
-          summary.expired_queued += 1;
-        }
-
-        if (res.status === 'skipped') {
-          recordAutoRefundSkipReason(summary, res.skipReason);
-          continue;
-        }
-
-        summary.eligible += 1;
-        if (res.status === 'refunded') summary.refunded_processed += 1;
-        else if (res.status === 'pending' || res.status === 'mismatch') summary.refund_pending += 1;
-        else if (res.status === 'failed') summary.refund_failed += 1;
-        else if (res.status === 'replayed') summary.replayed += 1;
-      } catch (err) {
-        summary.errors += 1;
-        logger.error(`[Auto-Refund Sweep] Error processing order ${order?.id}:`, err);
+    if (machineIdFilter) {
+      targetMachines = [machineIdFilter];
+    } else {
+      const allMachines = await getActiveMachineIdsForAutoRefundFromFirebase();
+      const control = await getAutoRefundSweepControlInFirebase();
+      sweepControlVersion = control.version;
+      if (allMachines.length > 0) {
+        startIndex = control.machine_rr_index % allMachines.length;
+        targetMachines = [
+          ...allMachines.slice(startIndex),
+          ...allMachines.slice(0, startIndex)
+        ];
       }
     }
 
+    let remainingBudget = limit;
+    let totalScanned = 0;
+
+    for (let mIdx = 0; mIdx < targetMachines.length; mIdx += 1) {
+      if (
+        remainingBudget <= 0 ||
+        totalScanned >= AUTO_REFUND_MAX_SCAN_PER_SWEEP ||
+        summary.aborted_due_to_lease_loss ||
+        Date.now() - sweepStartedMs >= AUTO_REFUND_SOFT_WALL_CLOCK_MS
+      ) {
+        break;
+      }
+
+      const machineId = targetMachines[mIdx];
+      const remainingMachines = targetMachines.length - mIdx;
+      const perMachineQuota = Math.max(1, Math.ceil(remainingBudget / remainingMachines));
+
+      try {
+        const cursorRecord = await getAutoRefundCursorInFirebase(machineId);
+        let pageCursor: AutoRefundCursorPosition | null =
+          cursorRecord.last_order_id && cursorRecord.last_created_at !== null
+            ? {
+                last_created_at: cursorRecord.last_created_at,
+                last_order_id: cursorRecord.last_order_id
+              }
+            : null;
+        let lastSafePosition: AutoRefundCursorPosition | null = pageCursor;
+        let exhausted = false;
+        let scannedForMachine = 0;
+        let processedForMachine = 0;
+        let hitLocalStop = false;
+
+        while (
+          processedForMachine < perMachineQuota &&
+          scannedForMachine < AUTO_REFUND_MAX_SCAN_PER_MACHINE &&
+          totalScanned < AUTO_REFUND_MAX_SCAN_PER_SWEEP &&
+          !summary.aborted_due_to_lease_loss
+        ) {
+          if (Date.now() - sweepStartedMs >= AUTO_REFUND_SOFT_WALL_CLOCK_MS) {
+            hitLocalStop = true;
+            break;
+          }
+
+          const page = await getPaidOrdersPageForAutoRefundFromFirebase(db, {
+            machineId,
+            cursor: pageCursor,
+            pageSize: AUTO_REFUND_PAGE_SIZE
+          });
+
+          if (page.rawCount === 0) {
+            exhausted = true;
+            break;
+          }
+
+          for (const order of page.orders) {
+            if (Date.now() - sweepStartedMs >= AUTO_REFUND_SOFT_WALL_CLOCK_MS) {
+              hitLocalStop = true;
+              break;
+            }
+
+            const leaseCheck = await verifyOrRenewAutoRefundLeaseInFirebase(lease.lockId);
+            if (!leaseCheck.valid) {
+              summary.aborted_due_to_lease_loss = true;
+              hitLocalStop = true;
+              break;
+            }
+
+            if (order?.id) scannedIds.add(String(order.id));
+            scannedForMachine += 1;
+            totalScanned += 1;
+
+            const safePos: AutoRefundCursorPosition = {
+              last_created_at: order.created_at ?? null,
+              last_order_id: String(order.id)
+            };
+
+            if (order?.id && handledOrderIds.has(String(order.id))) {
+              lastSafePosition = safePos;
+              pageCursor = safePos;
+              continue;
+            }
+
+            try {
+              if (
+                String(order?.refund_status || '').toUpperCase() === 'PENDING' ||
+                Number(order?.pending_refund_amount_paise || 0) > 0
+              ) {
+                const pendingRecon = await reconcilePendingRefundsForOrder(db, order);
+                summary.reconciled_pending_processed =
+                  (summary.reconciled_pending_processed || 0) + pendingRecon.settledProcessed;
+                summary.reconciled_pending_failed =
+                  (summary.reconciled_pending_failed || 0) + pendingRecon.settledFailed;
+                if (pendingRecon.settledProcessed > 0) summary.refunded_processed += pendingRecon.settledProcessed;
+                else if (pendingRecon.settledFailed > 0) summary.refund_failed += pendingRecon.settledFailed;
+                else if (pendingRecon.stillPending > 0) summary.skipped_already_refunded += 1;
+
+                lastSafePosition = safePos;
+                pageCursor = safePos;
+                continue;
+              }
+
+              const res = await processAutoRefundForOrder(db, order.id, {
+                nowMs,
+                queuedExpiryMs: expiryMs,
+                dispensingTimeoutMs,
+                leaseFencing
+              });
+
+              if (res.didExpireQueued) {
+                summary.expired_queued += 1;
+              }
+
+              if (res.status === 'skipped') {
+                recordAutoRefundSkipReason(summary, res.skipReason);
+              } else {
+                summary.eligible += 1;
+                processedForMachine += 1;
+                remainingBudget -= 1;
+                if (res.status === 'refunded') summary.refunded_processed += 1;
+                else if (res.status === 'pending' || res.status === 'mismatch') summary.refund_pending += 1;
+                else if (res.status === 'failed') summary.refund_failed += 1;
+                else if (res.status === 'replayed') summary.replayed += 1;
+              }
+
+              lastSafePosition = safePos;
+              pageCursor = safePos;
+            } catch (orderErr: any) {
+              if (String(orderErr?.message || '').includes('LEASE_LOST_IN_TRANSACTION')) {
+                summary.aborted_due_to_lease_loss = true;
+                hitLocalStop = true;
+                break;
+              }
+              summary.errors += 1;
+              hitLocalStop = true;
+              logger.error(`[Auto-Refund Sweep] Error processing order ${order?.id}:`, orderErr);
+              break;
+            }
+
+            if (
+              processedForMachine >= perMachineQuota ||
+              scannedForMachine >= AUTO_REFUND_MAX_SCAN_PER_MACHINE ||
+              totalScanned >= AUTO_REFUND_MAX_SCAN_PER_SWEEP
+            ) {
+              hitLocalStop = true;
+              break;
+            }
+          }
+
+          if (hitLocalStop || summary.aborted_due_to_lease_loss) {
+            break;
+          }
+          if (page.reachedEnd) {
+            exhausted = true;
+            break;
+          }
+          if (page.lastPosition) {
+            pageCursor = page.lastPosition;
+            lastSafePosition = page.lastPosition;
+          } else {
+            exhausted = true;
+            break;
+          }
+        }
+
+        if (!summary.aborted_due_to_lease_loss) {
+          if (exhausted) {
+            await saveAutoRefundCursorInFirebase(machineId, null, {
+              expectedVersion: cursorRecord.version,
+              cycleCompletedAt: new Date().toISOString(),
+              leaseLockId: lease.lockId
+            });
+          } else if (lastSafePosition) {
+            await saveAutoRefundCursorInFirebase(machineId, lastSafePosition, {
+              expectedVersion: cursorRecord.version,
+              cycleCompletedAt: cursorRecord.cycle_completed_at,
+              leaseLockId: lease.lockId
+            });
+          }
+        }
+      } catch (machineErr: any) {
+        if (String(machineErr?.message || '').includes('LEASE_LOST_IN_TRANSACTION')) {
+          summary.aborted_due_to_lease_loss = true;
+        } else {
+          summary.errors += 1;
+          logger.error(`[Auto-Refund Sweep] Error processing machine ${machineId}:`, machineErr);
+        }
+      }
+    }
+
+    if (isFleetSweep && targetMachines.length > 0 && !summary.aborted_due_to_lease_loss) {
+      try {
+        await advanceMachineRoundRobinIndexInFirebase(
+          (startIndex + 1) % targetMachines.length,
+          {
+            expectedVersion: sweepControlVersion,
+            leaseLockId: lease.lockId
+          }
+        );
+      } catch (rrErr: any) {
+        if (String(rrErr?.message || '').includes('LEASE_LOST_IN_TRANSACTION')) {
+          summary.aborted_due_to_lease_loss = true;
+        } else {
+          logger.warn(`[Auto-Refund Sweep] Failed to advance machine_rr_index: ${rrErr?.message || rrErr}`);
+        }
+      }
+    }
+
+    const anomalies = await getManualReviewAnomalyOrdersFromFirebase(db, {
+      machineId: machineIdFilter,
+      limit: 20
+    });
+    summary.manual_review_anomaly_count = anomalies.length;
     summary.scanned = scannedIds.size;
     return summary;
   } finally {

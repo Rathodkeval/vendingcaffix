@@ -54,6 +54,13 @@ export interface WebhookFencingParams {
   claimCount: number;
 }
 
+export interface LeaseFencingParams {
+  lockDocId: string;
+  lockId: string;
+  leaseTtlMs?: number;
+  safetyMarginMs?: number;
+}
+
 export interface CreateRefundReservationParams {
   orderId: string;
   amount_paise: number;
@@ -71,6 +78,7 @@ export interface CreateRefundReservationParams {
   inspected_by_admin_email?: string | null;
   inspected_at?: string | null;
   inspection_notes?: string | null;
+  leaseFencing?: LeaseFencingParams | null;
 }
 
 export interface MarkRefundProcessedParams {
@@ -994,6 +1002,26 @@ async function createFirestoreRefundReservation(
     const orderRef = firestore.collection('orders').doc(orderId);
     const orderSnap = await tx.get(orderRef);
 
+    const leaseFencing = params.leaseFencing || null;
+    let leaseRef: any = null;
+    if (leaseFencing && leaseFencing.lockId !== 'local') {
+      leaseRef = firestore.collection('system_locks').doc(leaseFencing.lockDocId);
+      const leaseSnap = (await tx.get(leaseRef)) as any;
+      const leaseData = leaseSnap.exists ? leaseSnap.data() || {} : null;
+      const nowLeaseMs = Date.now();
+      const safetyMarginMs = leaseFencing.safetyMarginMs ?? 15_000;
+      if (
+        !leaseData ||
+        leaseData.active !== true ||
+        leaseData.lock_id !== leaseFencing.lockId ||
+        Number(leaseData.locked_until_ms || 0) - nowLeaseMs < safetyMarginMs
+      ) {
+        throw new ConflictError(
+          `LEASE_LOST_IN_TRANSACTION: Auto-refund lease ${leaseFencing.lockDocId} expired or replaced before reservation commit`
+        );
+      }
+    }
+
     if (idempotencySnap.exists) {
       const idemData = idempotencySnap.data();
       const existingRefundId = idemData?.refund_id;
@@ -1132,6 +1160,21 @@ async function createFirestoreRefundReservation(
     });
 
     tx.set(orderRef, orderUpdatePayload, { merge: true });
+
+    if (leaseRef && leaseFencing && leaseFencing.lockId !== 'local') {
+      const nowRenewMs = Date.now();
+      const renewTtlMs = Math.max(10_000, leaseFencing.leaseTtlMs ?? 90_000);
+      const nextUntilMs = nowRenewMs + renewTtlMs;
+      tx.set(
+        leaseRef,
+        {
+          locked_until_ms: nextUntilMs,
+          expires_at: new Date(nextUntilMs).toISOString(),
+          updated_at: nowIso
+        },
+        { merge: true }
+      );
+    }
 
     return {
       refund: refundRecord,

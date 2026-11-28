@@ -1,5 +1,5 @@
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
-import { getFirestore, Firestore } from 'firebase-admin/firestore';
+import { getFirestore, Firestore, FieldPath } from 'firebase-admin/firestore';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { getConfiguredMachineSeeds } from '../config/db';
@@ -2700,11 +2700,12 @@ function isPaidOrderActionableForAutoRefund(order: any): boolean {
   if (!order || order.is_malformed) return false;
   const status = String(order.status || '').toUpperCase();
   const refundStatus = String(order.refund_status || 'NONE').toUpperCase();
-  const dispenseStatus = String(order.dispense_status || 'QUEUED').toUpperCase();
+  const dispenseStatus = String(order.dispense_status ?? '').trim().toUpperCase();
   const dispenseOutcome = String(order.dispense_outcome || '').toUpperCase();
   const pendingPaise = Number(order.pending_refund_amount_paise ?? 0);
 
   if (status !== 'PAID') return false;
+  if (!dispenseStatus) return false;
   if (pendingPaise > 0) return true;
   if (refundStatus === 'FULL' || refundStatus === 'PARTIAL' || refundStatus === 'FAILED') return false;
   if (order.dispensed === true || dispenseStatus === 'DISPENSED') return false;
@@ -2719,6 +2720,233 @@ function isPaidOrderActionableForAutoRefund(order: any): boolean {
     dispenseStatus === 'FAILED' ||
     dispenseStatus === 'EXPIRED'
   );
+}
+
+export async function getActiveMachineIdsForAutoRefundFromFirebase(): Promise<string[]> {
+  ensureFirebaseReady();
+
+  if (firestore) {
+    try {
+      const snap = await firestore.collection('machines').get();
+      const ids = new Set<string>();
+      snap.forEach((doc: any) => {
+        const data = typeof doc.data === 'function' ? doc.data() : doc.data;
+        const id = String(data?.id || doc.id || '').trim();
+        if (id) ids.add(id);
+      });
+      return Array.from(ids).sort((a, b) => a.localeCompare(b));
+    } catch (error) {
+      handleFirestoreFailure('Failed to list machines for auto-refund sweep from Firestore', error);
+    }
+  }
+
+  const ids = new Set<string>();
+  for (const m of syncedMachinesStore.values()) {
+    const id = String(m?.id || '').trim();
+    if (id) ids.add(id);
+  }
+  for (const seed of getConfiguredMachineSeeds()) {
+    const id = String(seed?.id || '').trim();
+    if (id) ids.add(id);
+  }
+  return Array.from(ids).sort((a, b) => a.localeCompare(b));
+}
+
+export async function getPaidOrdersPageForAutoRefundFromFirebase(
+  db: any,
+  options: {
+    machineId: string;
+    cursor?: AutoRefundCursorPosition | null;
+    pageSize?: number;
+    hydrateLocal?: boolean;
+  }
+): Promise<{
+  orders: any[];
+  rawCount: number;
+  reachedEnd: boolean;
+  lastPosition: AutoRefundCursorPosition | null;
+}> {
+  ensureFirebaseReady();
+
+  const targetMachineId = String(options.machineId || '').trim();
+  const pageSize =
+    options.pageSize !== undefined && Number.isFinite(Number(options.pageSize)) && Number(options.pageSize) > 0
+      ? Math.min(AUTO_REFUND_PAGE_SIZE, Math.max(1, Math.floor(Number(options.pageSize))))
+      : AUTO_REFUND_PAGE_SIZE;
+  const shouldHydrateLocal = options.hydrateLocal !== false;
+  const cursor = options.cursor && isValidCursorPosition(options.cursor) ? options.cursor : null;
+
+  if (firestore) {
+    try {
+      let pageQuery: any = firestore
+        .collection('orders')
+        .where('machine_id', '==', targetMachineId)
+        .where('status', '==', 'PAID')
+        .where('refund_status', 'in', ['NONE', 'PARTIAL'])
+        .where('dispense_status', 'in', ['QUEUED', 'FAILED', 'EXPIRED', 'DISPENSING'])
+        .orderBy('created_at', 'asc')
+        .orderBy(FieldPath.documentId(), 'asc');
+
+      if (cursor && typeof pageQuery.startAfter === 'function') {
+        pageQuery = pageQuery.startAfter(cursor.last_created_at, cursor.last_order_id);
+      }
+      if (typeof pageQuery.limit === 'function') {
+        pageQuery = pageQuery.limit(pageSize);
+      }
+
+      const snap = await pageQuery.get();
+      const docs = Array.isArray(snap?.docs) ? snap.docs : [];
+      const orders: any[] = [];
+      let lastPosition: AutoRefundCursorPosition | null = null;
+
+      for (const doc of docs) {
+        const data = typeof doc.data === 'function' ? doc.data() : doc.data;
+        if (!data) continue;
+        const id = String(data.id || doc.id);
+        const rawCreatedAt = data.created_at;
+        lastPosition = {
+          last_created_at: rawCreatedAt ?? null,
+          last_order_id: id
+        };
+        const rawOrder = { ...data, id };
+        if (shouldHydrateLocal) {
+          syncedOrdersStore.set(id, rawOrder);
+        }
+        const enriched = enrichAuthoritativeOrderRecord(rawOrder);
+        if (enriched.is_malformed) continue;
+
+        if (shouldHydrateLocal) {
+          const row = await hydrateLocalOrderFromAuthoritativeRecord(enriched, db, {
+            reconcileRefunds: false
+          });
+          orders.push(enrichAuthoritativeOrderRecord({ ...(row || {}), ...enriched }));
+        } else {
+          orders.push(enriched);
+        }
+      }
+
+      return {
+        orders,
+        rawCount: docs.length,
+        reachedEnd: docs.length < pageSize,
+        lastPosition
+      };
+    } catch (error) {
+      handleFirestoreFailure(
+        `Failed to query paginated PAID orders for machine ${targetMachineId} from Firestore`,
+        error
+      );
+    }
+  }
+
+  const all = (await getAuthoritativeOrders(db, [targetMachineId]))
+    .filter((o) => {
+      const status = String(o?.status || '').toUpperCase();
+      const refundStatus = String(o?.refund_status || 'NONE').toUpperCase();
+      const dispenseStatus = String(o?.dispense_status ?? '').trim().toUpperCase();
+      return (
+        status === 'PAID' &&
+        (refundStatus === 'NONE' || refundStatus === 'PARTIAL') &&
+        ['QUEUED', 'FAILED', 'EXPIRED', 'DISPENSING'].includes(dispenseStatus)
+      );
+    })
+    .sort((a, b) => {
+      const cmp = compareCursorTimestamps(a.created_at, b.created_at);
+      return cmp !== 0 ? cmp : String(a.id || '').localeCompare(String(b.id || ''));
+    });
+
+  const filtered = cursor
+    ? all.filter((o) => {
+        const cmp = compareCursorTimestamps(o.created_at, cursor.last_created_at);
+        if (cmp !== 0) return cmp > 0;
+        return String(o.id || '').localeCompare(String(cursor.last_order_id || '')) > 0;
+      })
+    : all;
+
+  const slice = filtered.slice(0, pageSize);
+  const lastDoc = slice.length > 0 ? slice[slice.length - 1] : null;
+  return {
+    orders: slice,
+    rawCount: slice.length,
+    reachedEnd: slice.length < pageSize,
+    lastPosition: lastDoc
+      ? { last_created_at: lastDoc.created_at ?? null, last_order_id: String(lastDoc.id) }
+      : null
+  };
+}
+
+export async function getManualReviewAnomalyOrdersFromFirebase(
+  db: any,
+  options?: { machineId?: string; limit?: number }
+): Promise<any[]> {
+  ensureFirebaseReady();
+
+  const targetMachineId = options?.machineId ? String(options.machineId).trim() : '';
+  const maxLimit =
+    options?.limit !== undefined && Number.isFinite(Number(options.limit)) && Number(options.limit) > 0
+      ? Math.min(50, Math.max(1, Math.floor(Number(options.limit))))
+      : 20;
+  const anomaliesById = new Map<string, any>();
+
+  const isAnomalyOrder = (raw: any): boolean => {
+    if (!raw) return false;
+    const status = String(raw.status || '').toUpperCase();
+    const refundStatusRaw = raw.refund_status;
+    const refundStatus = String(refundStatusRaw ?? '').trim().toUpperCase();
+    const dispenseStatusRaw = raw.dispense_status;
+    const dispenseStatus = String(dispenseStatusRaw ?? '').trim().toUpperCase();
+    const pendingPaise = Number(raw.pending_refund_amount_paise ?? 0);
+
+    if (status === 'PAID') {
+      if (!dispenseStatus) return true;
+      if (!['QUEUED', 'FAILED', 'EXPIRED', 'DISPENSING', 'DISPENSED', 'CLAIMING'].includes(dispenseStatus)) {
+        return true;
+      }
+      if (!refundStatus) return true;
+    }
+
+    if (status === 'COMPLETED') {
+      if (pendingPaise > 0 || refundStatus === 'PENDING' || refundStatus === 'FAILED') {
+        return true;
+      }
+      if (raw.dispensed === false && refundStatus === 'NONE') {
+        return true;
+      }
+    }
+
+    return false;
+  };
+
+  if (firestore) {
+    try {
+      let query: any = firestore.collection('orders').orderBy('created_at', 'desc').limit(Math.min(100, maxLimit * 4));
+      if (targetMachineId) {
+        query = firestore
+          .collection('orders')
+          .where('machine_id', '==', targetMachineId)
+          .orderBy('created_at', 'desc')
+          .limit(Math.min(100, maxLimit * 4));
+      }
+      const snap = await query.get();
+      const docs = Array.isArray(snap?.docs) ? snap.docs : [];
+      for (const doc of docs) {
+        const data = typeof doc.data === 'function' ? doc.data() : doc.data;
+        if (!data) continue;
+        const id = String(data.id || doc.id);
+        const rawOrder = { ...data, id };
+        if (isAnomalyOrder(rawOrder) && !anomaliesById.has(id)) {
+          anomaliesById.set(id, rawOrder);
+          if (anomaliesById.size >= maxLimit) break;
+        }
+      }
+    } catch (error) {
+      handleFirestoreFailure('Failed to query manual-review anomaly orders from Firestore', error);
+    }
+    return Array.from(anomaliesById.values()).slice(0, maxLimit);
+  }
+
+  const fallbackOrders = await getAuthoritativeOrders(db, targetMachineId ? [targetMachineId] : undefined);
+  return fallbackOrders.filter(isAnomalyOrder).slice(0, maxLimit);
 }
 
 export async function getPaidOrdersForAutoRefundFromFirebase(
@@ -2862,34 +3090,92 @@ export async function getPendingRefundOrdersFromFirebase(
 
   if (firestore) {
     const pendingById = new Map<string, any>();
+    const addPendingRawOrder = (rawOrder: any) => {
+      if (!rawOrder || !rawOrder.id) return;
+      const id = String(rawOrder.id);
+      if (shouldHydrateLocal) {
+        syncedOrdersStore.set(id, rawOrder);
+      }
+      const enriched = enrichAuthoritativeOrderRecord(rawOrder);
+      if (enriched.is_malformed) return;
+      if (!pendingById.has(id)) {
+        pendingById.set(id, enriched);
+      }
+    };
+
     try {
-      let query: any = firestore
+      // 1. Top-level refunds collection: status == 'PENDING' -> hydrate parent orders
+      let refundsQuery: any = firestore
+        .collection('refunds')
+        .where('status', '==', 'PENDING')
+        .orderBy('created_at', 'asc');
+      if (targetMachineId) {
+        refundsQuery = firestore
+          .collection('refunds')
+          .where('machine_id', '==', targetMachineId)
+          .where('status', '==', 'PENDING')
+          .orderBy('created_at', 'asc');
+      }
+      if (typeof refundsQuery.limit === 'function') {
+        refundsQuery = refundsQuery.limit(maxLimit);
+      }
+      const refundsSnap = await refundsQuery.get();
+      const orderIdsToFetch = new Set<string>();
+      refundsSnap?.forEach?.((doc: any) => {
+        const data = typeof doc.data === 'function' ? doc.data() : doc.data;
+        const oid = data?.order_id ? String(data.order_id).trim() : '';
+        if (oid && !pendingById.has(oid)) orderIdsToFetch.add(oid);
+      });
+      for (const oid of orderIdsToFetch) {
+        const orderSnap = await firestore.collection('orders').doc(oid).get();
+        if (orderSnap.exists) {
+          const data = (typeof orderSnap.data === 'function' ? orderSnap.data() : orderSnap.data) as any;
+          if (data) addPendingRawOrder({ ...data, id: String(data.id || orderSnap.id || oid) });
+        }
+      }
+
+      // 2. Orders collection: refund_status == 'PENDING' (catches zero/missing pending_refund_amount_paise)
+      let statusQuery: any = firestore
+        .collection('orders')
+        .where('refund_status', '==', 'PENDING')
+        .orderBy('created_at', 'asc');
+      if (targetMachineId) {
+        statusQuery = firestore
+          .collection('orders')
+          .where('machine_id', '==', targetMachineId)
+          .where('refund_status', '==', 'PENDING')
+          .orderBy('created_at', 'asc');
+      }
+      if (typeof statusQuery.limit === 'function') {
+        statusQuery = statusQuery.limit(maxLimit);
+      }
+      const statusSnap = await statusQuery.get();
+      statusSnap?.forEach?.((doc: any) => {
+        const data = typeof doc.data === 'function' ? doc.data() : doc.data;
+        if (!data) return;
+        addPendingRawOrder({ ...data, id: String(data.id || doc.id) });
+      });
+
+      // 3. Legacy fallback: pending_refund_amount_paise > 0
+      let amountQuery: any = firestore
         .collection('orders')
         .where('pending_refund_amount_paise', '>', 0)
         .orderBy('pending_refund_amount_paise', 'asc');
       if (targetMachineId) {
-        query = firestore
+        amountQuery = firestore
           .collection('orders')
           .where('machine_id', '==', targetMachineId)
           .where('pending_refund_amount_paise', '>', 0)
           .orderBy('pending_refund_amount_paise', 'asc');
       }
-      if (typeof query.limit === 'function') {
-        query = query.limit(maxLimit);
+      if (typeof amountQuery.limit === 'function') {
+        amountQuery = amountQuery.limit(maxLimit);
       }
-
-      const snap = await query.get();
-      snap.forEach((doc: any) => {
+      const amountSnap = await amountQuery.get();
+      amountSnap?.forEach?.((doc: any) => {
         const data = typeof doc.data === 'function' ? doc.data() : doc.data;
         if (!data) return;
-        const id = String(data.id || doc.id);
-        const rawOrder = { ...data, id };
-        if (shouldHydrateLocal) {
-          syncedOrdersStore.set(id, rawOrder);
-        }
-        const enriched = enrichAuthoritativeOrderRecord(rawOrder);
-        if (enriched.is_malformed) return;
-        pendingById.set(id, enriched);
+        addPendingRawOrder({ ...data, id: String(data.id || doc.id) });
       });
     } catch (error) {
       handleFirestoreFailure('Failed to query orders with pending refunds from Firestore', error);
@@ -3087,6 +3373,360 @@ const RECONCILIATION_LOCK_COLLECTION = 'system_locks';
 export const ORDER_RECONCILIATION_LOCK_DOC_ID = 'order_reconciliation';
 export const AUTO_REFUND_CRON_LOCK_DOC_ID = 'auto_refund_cron_lease';
 export const DEFAULT_CRON_LEASE_TTL_MS = 90_000;
+export const AUTO_REFUND_STATE_COLLECTION = 'auto_refund_state';
+export const AUTO_REFUND_SWEEP_CONTROL_DOC_ID = 'sweep_control';
+export const AUTO_REFUND_LEASE_SAFETY_MARGIN_MS = 15_000;
+export const AUTO_REFUND_RENEW_THRESHOLD_MS = 30_000;
+export const AUTO_REFUND_SOFT_WALL_CLOCK_MS = 45_000;
+export const AUTO_REFUND_PAGE_SIZE = 100;
+export const AUTO_REFUND_MAX_SCAN_PER_MACHINE = 300;
+export const AUTO_REFUND_MAX_SCAN_PER_SWEEP = 1200;
+
+export interface AutoRefundCursorPosition {
+  last_created_at: any;
+  last_order_id: string;
+}
+
+export interface AutoRefundCursorRecord {
+  machine_id: string;
+  last_created_at: any | null;
+  last_order_id: string | null;
+  version: number;
+  cycle_completed_at: string | null;
+  updated_at: string;
+}
+
+export interface AutoRefundSweepControlRecord {
+  machine_rr_index: number;
+  version: number;
+  updated_at: string;
+}
+
+export interface SweepLeaseFencing {
+  lockDocId: string;
+  lockId: string;
+  leaseTtlMs?: number;
+  safetyMarginMs?: number;
+}
+
+const localAutoRefundCursors = new Map<string, AutoRefundCursorRecord>();
+let localAutoRefundSweepControl: AutoRefundSweepControlRecord = {
+  machine_rr_index: 0,
+  version: 0,
+  updated_at: new Date(0).toISOString()
+};
+
+function toCursorEpochMs(val: any): number {
+  if (val === null || val === undefined) return NaN;
+  if (typeof val?.toMillis === 'function') return Number(val.toMillis());
+  if (val instanceof Date) return val.getTime();
+  if (typeof val === 'string' && val.trim().length > 0) return Date.parse(val);
+  return NaN;
+}
+
+function compareCursorTimestamps(a: any, b: any): number {
+  const aMs = toCursorEpochMs(a);
+  const bMs = toCursorEpochMs(b);
+  if (!Number.isNaN(aMs) && !Number.isNaN(bMs)) {
+    if (aMs !== bMs) return aMs - bMs;
+  }
+  return String(a ?? '').localeCompare(String(b ?? ''));
+}
+
+function isValidCursorPosition(pos: any): pos is AutoRefundCursorPosition {
+  if (!pos || typeof pos !== 'object') return false;
+  const orderId = typeof pos.last_order_id === 'string' ? pos.last_order_id.trim() : '';
+  if (!orderId) return false;
+  const ts = pos.last_created_at;
+  if (typeof ts?.toMillis === 'function') return Number.isFinite(ts.toMillis());
+  if (typeof ts === 'string' && ts.trim().length > 0) {
+    return !Number.isNaN(Date.parse(ts));
+  }
+  return false;
+}
+
+export async function assertAndRenewSweepLeaseInTx(
+  tx: any,
+  firestoreInstance: any,
+  leaseFencing: SweepLeaseFencing,
+  nowMs: number = Date.now()
+): Promise<void> {
+  if (!leaseFencing || !leaseFencing.lockId || leaseFencing.lockId === 'local') {
+    return;
+  }
+  const leaseRef = firestoreInstance
+    .collection(RECONCILIATION_LOCK_COLLECTION)
+    .doc(leaseFencing.lockDocId);
+  const leaseSnap = await tx.get(leaseRef);
+  const leaseData = leaseSnap.exists ? leaseSnap.data() || {} : null;
+  const safetyMarginMs = leaseFencing.safetyMarginMs ?? AUTO_REFUND_LEASE_SAFETY_MARGIN_MS;
+
+  if (
+    !leaseData ||
+    leaseData.active !== true ||
+    leaseData.lock_id !== leaseFencing.lockId ||
+    Number(leaseData.locked_until_ms || 0) - nowMs < safetyMarginMs
+  ) {
+    throw new ConflictError(
+      `LEASE_LOST_IN_TRANSACTION: Lease ${leaseFencing.lockDocId} (${leaseFencing.lockId}) expired or replaced`
+    );
+  }
+
+  const renewTtlMs = Math.max(10_000, leaseFencing.leaseTtlMs ?? DEFAULT_CRON_LEASE_TTL_MS);
+  const nextUntilMs = nowMs + renewTtlMs;
+  tx.set(
+    leaseRef,
+    {
+      locked_until_ms: nextUntilMs,
+      expires_at: new Date(nextUntilMs).toISOString(),
+      updated_at: new Date(nowMs).toISOString()
+    },
+    { merge: true }
+  );
+}
+
+export async function verifyOrRenewAutoRefundLeaseInFirebase(
+  lockId: string | null,
+  options?: { leaseTtlMs?: number; safetyMarginMs?: number; renewThresholdMs?: number }
+): Promise<{ valid: boolean; renewed: boolean; reason?: string }> {
+  if (!lockId || lockId === 'local' || !firestore) {
+    return { valid: true, renewed: false };
+  }
+
+  const activeFirestore = firestore;
+  const lockRef = activeFirestore
+    .collection(RECONCILIATION_LOCK_COLLECTION)
+    .doc(AUTO_REFUND_CRON_LOCK_DOC_ID);
+  const safetyMarginMs = options?.safetyMarginMs ?? AUTO_REFUND_LEASE_SAFETY_MARGIN_MS;
+  const renewThresholdMs = options?.renewThresholdMs ?? AUTO_REFUND_RENEW_THRESHOLD_MS;
+  const leaseTtlMs = Math.max(10_000, options?.leaseTtlMs ?? DEFAULT_CRON_LEASE_TTL_MS);
+
+  try {
+    return await enqueueCronLeaseTransaction(AUTO_REFUND_CRON_LOCK_DOC_ID, () =>
+      activeFirestore.runTransaction(async (tx: any) => {
+        const nowMs = Date.now();
+        const snap = await tx.get(lockRef);
+        const existing = snap.exists ? snap.data() || {} : null;
+        if (!existing || existing.active !== true || existing.lock_id !== lockId) {
+          return { valid: false, renewed: false, reason: 'LEASE_REPLACED_OR_INACTIVE' };
+        }
+        const remainingMs = Number(existing.locked_until_ms || 0) - nowMs;
+        if (remainingMs < safetyMarginMs) {
+          return { valid: false, renewed: false, reason: 'LEASE_EXPIRED_OR_WITHIN_SAFETY_MARGIN' };
+        }
+        if (remainingMs < renewThresholdMs) {
+          const nextUntilMs = nowMs + leaseTtlMs;
+          tx.set(
+            lockRef,
+            {
+              locked_until_ms: nextUntilMs,
+              expires_at: new Date(nextUntilMs).toISOString(),
+              updated_at: new Date(nowMs).toISOString()
+            },
+            { merge: true }
+          );
+          return { valid: true, renewed: true };
+        }
+        return { valid: true, renewed: false };
+      })
+    );
+  } catch (err: any) {
+    logger.warn(`[Auto-Refund Lease] Failed to verify/renew lease (${lockId}): ${err?.message || err}`);
+    return { valid: false, renewed: false, reason: 'LEASE_VERIFICATION_ERROR' };
+  }
+}
+
+export async function getAutoRefundCursorInFirebase(
+  machineId: string
+): Promise<AutoRefundCursorRecord> {
+  ensureFirebaseReady();
+  const normalizedMachineId = String(machineId || '').trim();
+  const emptyRecord: AutoRefundCursorRecord = {
+    machine_id: normalizedMachineId,
+    last_created_at: null,
+    last_order_id: null,
+    version: 0,
+    cycle_completed_at: null,
+    updated_at: new Date(0).toISOString()
+  };
+
+  if (!firestore) {
+    return localAutoRefundCursors.get(normalizedMachineId) || emptyRecord;
+  }
+
+  try {
+    const docRef = firestore
+      .collection(AUTO_REFUND_STATE_COLLECTION)
+      .doc(`cursor_${normalizedMachineId}`);
+    const snap = await docRef.get();
+    if (!snap.exists) return emptyRecord;
+    const data = (snap.data() || {}) as any;
+    const valid = isValidCursorPosition(data);
+    if (!valid && (data.last_created_at !== null || data.last_order_id !== null)) {
+      logger.warn(
+        `[Auto-Refund Cursor] Invalid stored cursor for machine ${normalizedMachineId}; resetting to start.`
+      );
+    }
+    return {
+      machine_id: normalizedMachineId,
+      last_created_at: valid ? data.last_created_at : null,
+      last_order_id: valid ? String(data.last_order_id) : null,
+      version: Number(data.version || 0),
+      cycle_completed_at: data.cycle_completed_at ? String(data.cycle_completed_at) : null,
+      updated_at: data.updated_at ? String(data.updated_at) : new Date(0).toISOString()
+    };
+  } catch (error) {
+    handleFirestoreFailure(`Failed to read auto-refund cursor for ${normalizedMachineId}`, error);
+  }
+}
+
+export async function saveAutoRefundCursorInFirebase(
+  machineId: string,
+  position: AutoRefundCursorPosition | null,
+  options: {
+    expectedVersion: number;
+    cycleCompletedAt?: string | null;
+    leaseLockId: string | null;
+    leaseTtlMs?: number;
+  }
+): Promise<AutoRefundCursorRecord> {
+  ensureFirebaseReady();
+  const normalizedMachineId = String(machineId || '').trim();
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const nextPayload: AutoRefundCursorRecord = {
+    machine_id: normalizedMachineId,
+    last_created_at: position ? position.last_created_at : null,
+    last_order_id: position ? String(position.last_order_id) : null,
+    version: Number(options.expectedVersion || 0) + 1,
+    cycle_completed_at: options.cycleCompletedAt ?? null,
+    updated_at: nowIso
+  };
+
+  if (!firestore) {
+    const existing = localAutoRefundCursors.get(normalizedMachineId);
+    const currentVersion = Number(existing?.version || 0);
+    if (currentVersion !== Number(options.expectedVersion || 0)) {
+      throw new ConflictError(
+        `CURSOR_VERSION_CONFLICT: Expected cursor version ${options.expectedVersion} for ${normalizedMachineId}, found ${currentVersion}`
+      );
+    }
+    localAutoRefundCursors.set(normalizedMachineId, nextPayload);
+    return nextPayload;
+  }
+
+  const activeFirestore = firestore;
+  const cursorRef = activeFirestore
+    .collection(AUTO_REFUND_STATE_COLLECTION)
+    .doc(`cursor_${normalizedMachineId}`);
+
+  return await activeFirestore.runTransaction(async (tx: any) => {
+    const cursorSnap = await tx.get(cursorRef);
+    const existing = cursorSnap.exists ? cursorSnap.data() || {} : null;
+    const currentVersion = Number(existing?.version || 0);
+
+    if (options.leaseLockId && options.leaseLockId !== 'local') {
+      await assertAndRenewSweepLeaseInTx(
+        tx,
+        activeFirestore,
+        {
+          lockDocId: AUTO_REFUND_CRON_LOCK_DOC_ID,
+          lockId: options.leaseLockId,
+          leaseTtlMs: options.leaseTtlMs ?? DEFAULT_CRON_LEASE_TTL_MS
+        },
+        nowMs
+      );
+    }
+
+    if (currentVersion !== Number(options.expectedVersion || 0)) {
+      throw new ConflictError(
+        `CURSOR_VERSION_CONFLICT: Expected cursor version ${options.expectedVersion} for ${normalizedMachineId}, found ${currentVersion}`
+      );
+    }
+
+    tx.set(cursorRef, nextPayload);
+    return nextPayload;
+  });
+}
+
+export async function getAutoRefundSweepControlInFirebase(): Promise<AutoRefundSweepControlRecord> {
+  ensureFirebaseReady();
+  if (!firestore) {
+    return { ...localAutoRefundSweepControl };
+  }
+
+  try {
+    const ref = firestore
+      .collection(AUTO_REFUND_STATE_COLLECTION)
+      .doc(AUTO_REFUND_SWEEP_CONTROL_DOC_ID);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      return { machine_rr_index: 0, version: 0, updated_at: new Date(0).toISOString() };
+    }
+    const data = snap.data() || {};
+    return {
+      machine_rr_index: Number.isFinite(Number(data.machine_rr_index))
+        ? Math.max(0, Math.floor(Number(data.machine_rr_index)))
+        : 0,
+      version: Number(data.version || 0),
+      updated_at: data.updated_at ? String(data.updated_at) : new Date(0).toISOString()
+    };
+  } catch (error) {
+    handleFirestoreFailure('Failed to read auto-refund sweep control state', error);
+  }
+}
+
+export async function advanceMachineRoundRobinIndexInFirebase(
+  nextIndex: number,
+  options: { expectedVersion: number; leaseLockId: string | null; leaseTtlMs?: number }
+): Promise<AutoRefundSweepControlRecord> {
+  ensureFirebaseReady();
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const nextRecord: AutoRefundSweepControlRecord = {
+    machine_rr_index: Math.max(0, Math.floor(Number(nextIndex || 0))),
+    version: Number(options.expectedVersion || 0) + 1,
+    updated_at: nowIso
+  };
+
+  if (!firestore) {
+    localAutoRefundSweepControl = nextRecord;
+    return nextRecord;
+  }
+
+  const activeFirestore = firestore;
+  const controlRef = activeFirestore
+    .collection(AUTO_REFUND_STATE_COLLECTION)
+    .doc(AUTO_REFUND_SWEEP_CONTROL_DOC_ID);
+
+  return await activeFirestore.runTransaction(async (tx: any) => {
+    const snap = await tx.get(controlRef);
+    const existing = snap.exists ? snap.data() || {} : null;
+    const currentVersion = Number(existing?.version || 0);
+
+    if (options.leaseLockId && options.leaseLockId !== 'local') {
+      await assertAndRenewSweepLeaseInTx(
+        tx,
+        activeFirestore,
+        {
+          lockDocId: AUTO_REFUND_CRON_LOCK_DOC_ID,
+          lockId: options.leaseLockId,
+          leaseTtlMs: options.leaseTtlMs ?? DEFAULT_CRON_LEASE_TTL_MS
+        },
+        nowMs
+      );
+    }
+
+    if (currentVersion !== Number(options.expectedVersion || 0)) {
+      throw new ConflictError(
+        `SWEEP_CONTROL_VERSION_CONFLICT: Expected version ${options.expectedVersion}, found ${currentVersion}`
+      );
+    }
+
+    tx.set(controlRef, nextRecord);
+    return nextRecord;
+  });
+}
 const PROD_SUPER_ADMIN_BOOTSTRAP_LOCK_DOC_ID = 'production_super_admin_bootstrap';
 const cronLeaseTxQueues = new Map<string, Promise<unknown>>();
 
